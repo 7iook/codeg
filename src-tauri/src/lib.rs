@@ -1135,6 +1135,7 @@ mod tauri_app {
                 acp_commands::acp_reveal_hermes_home,
                 acp_commands::acp_reorder_agents,
                 acp_commands::acp_list_agent_skills,
+                acp_commands::acp_list_kiro_custom_agents,
                 acp_commands::acp_read_agent_skill,
                 acp_commands::acp_save_agent_skill,
                 acp_commands::acp_delete_agent_skill,

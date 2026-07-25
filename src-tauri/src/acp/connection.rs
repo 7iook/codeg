@@ -902,6 +902,12 @@ async fn build_agent(
             // subcommand.
             let mut cmd_args: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
             if agent_type == AgentType::Kiro {
+                // A selected-but-missing custom agent is a hard error: its
+                // prompt AND tool allowlist would silently change (R6.5.4).
+                crate::commands::acp::verify_kiro_selected_agent_exists(
+                    runtime_env,
+                    &crate::commands::acp::list_kiro_custom_agents(),
+                )?;
                 cmd_args.extend(kiro_launch_args(runtime_env));
             }
             let cmd_args_for_log = cmd_args.clone();

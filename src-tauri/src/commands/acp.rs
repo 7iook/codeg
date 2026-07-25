@@ -542,6 +542,44 @@ pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), 
     }
 }
 
+/// Fail the connect when the Kiro custom agent selected in the panel no longer
+/// exists on disk.
+///
+/// Deliberately an ERROR rather than a silent fall back to Kiro's default agent:
+/// a custom agent carries its own prompt and tool allowlist, so quietly running
+/// a different one would change both what the agent is told to do and what it is
+/// allowed to touch, with no signal to the user.
+pub(crate) fn verify_kiro_selected_agent_exists(
+    runtime_env: &BTreeMap<String, String>,
+    available: &[KiroCustomAgent],
+) -> Result<(), AcpError> {
+    let Some(selected) = runtime_env
+        .get(crate::acp::connection::KIRO_AGENT_ENV)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    else {
+        // Nothing selected ⇒ Kiro uses its own default.
+        return Ok(());
+    };
+    if available.iter().any(|a| a.id == selected) {
+        return Ok(());
+    }
+    let known = if available.is_empty() {
+        "none found".to_string()
+    } else {
+        available
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Err(AcpError::protocol(format!(
+        "the selected Kiro agent {selected:?} was not found in <KIRO_HOME>/agents \
+         (available: {known}). Pick an existing agent in Kiro settings, or clear \
+         the selection to use Kiro's default."
+    )))
+}
+
 /// Detect the actual installed version of an npm global package by running
 /// `npm list -g <package_name> --json` and parsing the JSON output.
 ///
@@ -4319,6 +4357,90 @@ async fn clear_kimi_model_env(db: &AppDatabase) -> Result<(), AcpError> {
     .map_err(|e| AcpError::protocol(e.to_string()))?;
     Ok(())
 }
+
+/// One selectable Kiro custom agent definition, discovered by scanning
+/// `<KIRO_HOME>/agents/*.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KiroCustomAgent {
+    /// File stem — the stable identifier, and exactly the value passed to
+    /// `kiro-cli acp --agent <id>`.
+    pub id: String,
+    /// The definition's own `description`, when it has one.
+    pub description: Option<String>,
+}
+
+/// Scan `<KIRO_HOME>/agents/` for selectable custom agent definitions.
+///
+/// The file stem is the identifier (that is what `--agent` takes), NOT the
+/// `name` field inside the file — the two can disagree and Kiro resolves by
+/// file name. An unreadable or malformed file is excluded from the list without
+/// blocking the others, and a missing or empty directory yields an empty list
+/// rather than an error, so it can never block a connection.
+pub(crate) fn list_kiro_custom_agents() -> Vec<KiroCustomAgent> {
+    list_kiro_custom_agents_at(&crate::parsers::kiro::resolve_kiro_home_dir().join("agents"))
+}
+
+/// `list_kiro_custom_agents` against an explicit directory (test injection —
+/// same `_at` convention used elsewhere in this module).
+pub(crate) fn list_kiro_custom_agents_at(dir: &Path) -> Vec<KiroCustomAgent> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        // Missing directory is the common case on a fresh install.
+        return Vec::new();
+    };
+
+    let mut agents: Vec<KiroCustomAgent> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        // Case-insensitive because the extension casing is the filesystem's
+        // business, not the user's.
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| !e.eq_ignore_ascii_case("json"))
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        // Unreadable or invalid JSON ⇒ skip this one only. The file is the
+        // user's own; a syntax error there must not hide their other agents.
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            tracing::warn!("[Kiro] skipping unreadable agent definition {}", path.display());
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            tracing::warn!("[Kiro] skipping malformed agent definition {}", path.display());
+            continue;
+        };
+        let description = value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| crate::parsers::truncate_str(s, KIRO_AGENT_DESCRIPTION_CAP));
+        agents.push(KiroCustomAgent {
+            id: id.to_string(),
+            description,
+        });
+    }
+    // Stable order so the dropdown does not reshuffle between reads.
+    agents.sort_by(|a, b| a.id.cmp(&b.id));
+    agents
+}
+
+/// Cap for a custom agent's description in the picker. These are user-authored
+/// and can run to paragraphs (one real definition on the author's machine is a
+/// full paragraph of Chinese prose).
+const KIRO_AGENT_DESCRIPTION_CAP: usize = 300;
 
 /// Apply a structured Kimi config update across both stores (DB `env_json` +
 /// `~/.kimi-code/config.toml`), keeping exactly one authoritative. Validates the
@@ -9272,6 +9394,15 @@ pub async fn acp_update_hermes_config(
     )
 }
 
+/// List the Kiro custom agents the user can pick in the Kiro settings panel.
+///
+/// Read-only and infallible by design: a broken definition is skipped and a
+/// missing directory is an empty list, so the picker can never block the panel.
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn acp_list_kiro_custom_agents() -> Result<Vec<KiroCustomAgent>, AcpError> {
+    Ok(list_kiro_custom_agents())
+}
+
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 #[allow(clippy::too_many_arguments)]
@@ -10658,6 +10789,137 @@ pub(crate) async fn codex_poll_device_code_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Create a fresh temp directory for a Kiro `agents/` fixture. Uses
+    /// `std::env::temp_dir()` rather than a `/tmp` literal, which is NOT
+    /// absolute on Windows.
+    fn kiro_agents_fixture(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("codeg-kiro-agents-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        dir
+    }
+
+    #[test]
+    fn kiro_agent_scan_uses_the_file_stem_and_reads_the_description() {
+        let dir = kiro_agents_fixture("basic");
+        std::fs::write(
+            dir.join("reviewer.json"),
+            r#"{"name":"a-different-name","description":"Reviews code"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("plain.json"), r#"{"name":"plain"}"#).unwrap();
+
+        let agents = list_kiro_custom_agents_at(&dir);
+        assert_eq!(
+            agents,
+            vec![
+                KiroCustomAgent {
+                    id: "plain".to_string(),
+                    description: None,
+                },
+                KiroCustomAgent {
+                    // The stem wins over the inner `name` — `--agent` resolves
+                    // by file name.
+                    id: "reviewer".to_string(),
+                    description: Some("Reviews code".to_string()),
+                },
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kiro_agent_scan_skips_broken_definitions_without_hiding_the_others() {
+        let dir = kiro_agents_fixture("broken");
+        std::fs::write(dir.join("good.json"), r#"{"description":"fine"}"#).unwrap();
+        std::fs::write(dir.join("truncated.json"), "{ not json").unwrap();
+        // Non-JSON siblings (Kiro's own backups live next to real config) are
+        // not agent definitions.
+        std::fs::write(dir.join("notes.txt"), "ignore me").unwrap();
+        std::fs::write(dir.join("stale.json.bak"), r#"{"description":"old"}"#).unwrap();
+
+        let ids: Vec<String> = list_kiro_custom_agents_at(&dir)
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(ids, vec!["good".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kiro_agent_scan_on_a_missing_directory_is_an_empty_list_not_an_error() {
+        let missing = std::env::temp_dir().join("codeg-kiro-agents-does-not-exist");
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(list_kiro_custom_agents_at(&missing).is_empty());
+
+        let empty = kiro_agents_fixture("empty");
+        assert!(list_kiro_custom_agents_at(&empty).is_empty());
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn kiro_selected_agent_must_exist_and_is_never_silently_replaced() {
+        let available = vec![KiroCustomAgent {
+            id: "reviewer".to_string(),
+            description: None,
+        }];
+
+        // Nothing selected ⇒ Kiro's own default, no error.
+        assert!(verify_kiro_selected_agent_exists(&BTreeMap::new(), &available).is_ok());
+
+        let selected = |v: &str| {
+            BTreeMap::from([(
+                crate::acp::connection::KIRO_AGENT_ENV.to_string(),
+                v.to_string(),
+            )])
+        };
+        assert!(verify_kiro_selected_agent_exists(&selected("reviewer"), &available).is_ok());
+        // Blank counts as "not selected", not as a missing agent.
+        assert!(verify_kiro_selected_agent_exists(&selected("  "), &available).is_ok());
+
+        let err = verify_kiro_selected_agent_exists(&selected("deleted-agent"), &available)
+            .expect_err("a missing agent must fail the connect, not fall back");
+        let message = err.to_string();
+        assert!(
+            message.contains("deleted-agent"),
+            "the error must name the missing agent: {message}"
+        );
+        assert!(
+            message.contains("reviewer"),
+            "the error should list what IS available: {message}"
+        );
+    }
+
+    #[test]
+    fn kiro_version_output_drops_the_vendor_prefix() {
+        // Measured on kiro-cli 2.14.2: `kiro-cli --version` prints
+        // "kiro-cli-chat 2.14.2".
+        assert_eq!(
+            strip_system_binary_version_prefix(AgentType::Kiro, "kiro-cli-chat 2.14.2"),
+            "2.14.2"
+        );
+        // A future rename to the shorter prefix is handled too.
+        assert_eq!(
+            strip_system_binary_version_prefix(AgentType::Kiro, "kiro-cli 3.0.0"),
+            "3.0.0"
+        );
+        // An unrecognized shape is passed through rather than mangled, and a
+        // prefix-only line never collapses to the empty string.
+        assert_eq!(
+            strip_system_binary_version_prefix(AgentType::Kiro, "2.14.2"),
+            "2.14.2"
+        );
+        assert_eq!(
+            strip_system_binary_version_prefix(AgentType::Kiro, "kiro-cli-chat"),
+            "kiro-cli-chat"
+        );
+        // Other agents are untouched by Kiro's prefix rule.
+        assert_eq!(
+            strip_system_binary_version_prefix(AgentType::Cursor, "kiro-cli-chat 2.14.2"),
+            "kiro-cli-chat 2.14.2"
+        );
+    }
 
     #[test]
     fn parse_grok_settings_reads_documented_keys() {

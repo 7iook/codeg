@@ -737,6 +737,10 @@ pub fn build_router(
             post(handlers::acp::acp_list_agent_skills),
         )
         .route(
+            "/acp_list_kiro_custom_agents",
+            post(handlers::acp::acp_list_kiro_custom_agents),
+        )
+        .route(
             "/acp_read_agent_skill",
             post(handlers::acp::acp_read_agent_skill),
         )

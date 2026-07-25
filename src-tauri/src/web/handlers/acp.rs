@@ -231,6 +231,15 @@ pub async fn acp_list_agent_skills(
     Ok(Json(result))
 }
 
+/// Kiro custom agents available for `--agent`. No params: the scan is rooted at
+/// the single `<KIRO_HOME>` resolution point, and it reads no credentials, so it
+/// is not subject to the Kiro credential gate.
+pub async fn acp_list_kiro_custom_agents(
+) -> Result<Json<Vec<acp_commands::KiroCustomAgent>>, AppCommandError> {
+    let result = acp_commands::list_kiro_custom_agents();
+    Ok(Json(result))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpReadAgentSkillParams {
