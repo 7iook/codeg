@@ -1,12 +1,39 @@
-# Kiro Agent 接入 codeg — 一次性重建规格 (REBUILD SPEC)
+# Kiro Agent 接入 codeg — 上一轮结论存档（背景资料 · 非契约）
+
+> ## ⚠️ 本文档已降级为背景资料（2026-07-26）
+>
+> **本文不是执行契约。唯一契约是同目录的 `requirements.md` + `design.md`。**
+> 凡本文与它们冲突之处，**一律以 `requirements.md` / `design.md` 为准**，本文不再具有约束力。
+>
+> 已知本文已被推翻或修正的部分（详见 `design.md` 的 Current-State Inventory 与 Update Log）：
+>
+> | 本文所述 | 现行契约 |
+> |---|---|
+> | MCP 三类型 DTO + 脱敏 + `Keep` 三态 | **不采用**。明文读写、不引入占位符（`requirements.md` R4.7 / R4.12 / R4.13）；桌面/HTTP 入口差异由 R5 处理 |
+> | MCP 单一配置文件 | **三层合并** `Agent > Project > Global`（官方文档核实）；写入目标为 Global，另支持 `KIRO_HOME` 重定向 |
+> | 会话顶层 4 种 kind | **5 种**，多 `Compaction`；且 `Prompt` 也是轮次边界 |
+> | Kiro CLI 2.12.1 | 实测 **2.14.2**；`acp` 另有 `--agent` / `--agent-engine` |
+> | 后端测试 1590 全绿 | 基线**红**：1648 passed / 8 failed（Windows `/tmp` 问题），验收改为固定标识集合比较 |
+> | `chat_channel::webhook` flaky | 该测试模块**不存在**，不列为已知噪声 |
+> | Tailwind `@source not` 已修 | 当前仓内**零命中**，列为待验证风险 |
+> | `tools/git-pre-commit.ps1` 存在 | 本仓**不存在**，无任何提交门禁 |
+> | D5 单机单用户 / `runtime_mode.rs` 新建门禁 | 用户裁决**需支持局域网**；门禁降级为 `commands/mcp.rs` 函数族层（覆盖 Tauri + HTTP 两入口）+ 可配开关 |
+> | 「不建 ADR」相关表述 | ADR **needed: yes** → `docs/architecture/ADR-0001-agent-distribution-system-binary.md` |
+>
+> **仍然可信的部分**：符号名与结构（`build_agent` / `detect_local_version` /
+> `load_mcp_servers_for_agent` 等经本轮逐一命中）、七条「死路」的验证结论、
+> §7「勿造轮子」清单、Cursor 的动态 argv 范本。**所有 file:line 行号已全部漂移**，
+> 以 `design.md` 与勘察报告的实测行号为准。
+
+---
+
+## 以下为上一轮原文存档（仅供追溯设计意图，勿作为执行依据）
 
 > **读者：执行重建的 AI，不是人类。** 本文是上一轮完整工程（14 commit / 483 turns / 3 轮 codex 异构评审 / 3 轮 sonnet reviewer）的全部结论蒸馏。上一轮的源码与 git 历史已因误操作永久丢失（见 `C-010`），只剩本规格。
 >
-> **执行契约**：本文所有「决策」段是**已定案**，不要重新论证；所有「死路」段是**已验证走不通**，不要再试；所有「锚点」是上一轮真实存在过的 file:line，**新基线行号会漂移，必须自己 grep 重新定位，但符号名和结构可信**。
->
 > **基线**：`F:\codeg-research` @ `2b017446`（fork = `github.com/7iook/codeg`，upstream = `xintaofei/codeg`，codeg v0.21.8+）。上一轮基于 `692d6eb`(v0.21.6)，中途合并到 `c181c56b`(v0.21.8)。
 >
-> **目标产物**：Kiro CLI 作为 codeg 一等 agent，能对话、能被委派、会话可浏览、MCP 归口管理、模型/effort/授权模式可配。
+> **上一轮的目标产物表述**：Kiro CLI 作为 codeg 一等 agent，能对话、能被委派、会话可浏览、MCP 归口管理、模型/effort/授权模式可配。
 
 ---
 
