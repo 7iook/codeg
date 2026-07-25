@@ -170,9 +170,9 @@ describe("groupConsecutiveToolCalls", () => {
       state: "output-available",
       meta: { contextCompaction: true, tokensBefore: 51777, tokensAfter: 4616 },
     }
-    expect(
-      groupConsecutiveToolCalls([compaction]).map((p) => p.type)
-    ).toEqual(["tool-call"])
+    expect(groupConsecutiveToolCalls([compaction]).map((p) => p.type)).toEqual([
+      "tool-call",
+    ])
     // It also breaks a surrounding run instead of folding in.
     expect(
       groupConsecutiveToolCalls([poll("read"), compaction, poll("read")]).map(
