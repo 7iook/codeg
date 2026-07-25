@@ -129,6 +129,133 @@ fn apply_grok_env_policy(merged: &mut Vec<(String, String)>, runtime_env: &BTree
     }
 }
 
+/// codeg-side launch knobs for `kiro-cli acp`, read from the Kiro settings
+/// panel's `agent_setting.env_json`. These are NOT environment variables the
+/// CLI itself reads — `kiro_launch_args` turns them into command-line flags.
+pub(crate) const KIRO_MODEL_ENV: &str = "KIRO_MODEL";
+pub(crate) const KIRO_EFFORT_ENV: &str = "KIRO_EFFORT";
+pub(crate) const KIRO_TRUST_MODE_ENV: &str = "KIRO_TRUST_MODE";
+pub(crate) const KIRO_TRUST_TOOLS_ENV: &str = "KIRO_TRUST_TOOLS";
+pub(crate) const KIRO_AGENT_ENV: &str = "KIRO_AGENT";
+/// Every codeg-side knob above. `apply_kiro_env_policy` strips these from the
+/// child's environment: they are codeg's own launch inputs, and leaking them
+/// into `kiro-cli` could collide with a future env var of the same name.
+const KIRO_LAUNCH_KNOB_ENVS: &[&str] = &[
+    KIRO_MODEL_ENV,
+    KIRO_EFFORT_ENV,
+    KIRO_TRUST_MODE_ENV,
+    KIRO_TRUST_TOOLS_ENV,
+    KIRO_AGENT_ENV,
+];
+
+/// Effort levels `kiro-cli acp --effort` accepts. A value outside this set is
+/// dropped rather than passed through, because the CLI rejects the whole launch
+/// on an unknown effort — unlike `--model`, where custom IDs are legitimate.
+const KIRO_EFFORT_VALUES: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Per-launch `kiro-cli acp` flags derived from the panel's stored knobs.
+///
+/// Order is fixed (model → effort → trust → agent) so a launch is reproducible,
+/// and each dimension contributes at most one flag pair. An unset dimension
+/// contributes nothing, letting Kiro apply its own default.
+///
+/// Pure so the full combination matrix is unit-testable without spawning.
+fn kiro_launch_args(runtime_env: &BTreeMap<String, String>) -> Vec<String> {
+    let value = |key: &str| -> Option<&str> {
+        runtime_env
+            .get(key)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+    };
+    let mut args: Vec<String> = Vec::new();
+
+    // The preset model list in the UI is not authoritative: a custom ID is
+    // passed through verbatim (requirements R6.1.1/6.1.2).
+    if let Some(model) = value(KIRO_MODEL_ENV) {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if let Some(effort) = value(KIRO_EFFORT_ENV) {
+        let effort = effort.to_ascii_lowercase();
+        if KIRO_EFFORT_VALUES.contains(&effort.as_str()) {
+            args.push("--effort".to_string());
+            args.push(effort);
+        } else {
+            tracing::warn!("[ACP][Kiro] ignoring unknown effort {effort:?}");
+        }
+    }
+    // `--trust-all-tools` and `--trust-tools` are mutually exclusive; the panel
+    // stores which mode is selected, so exactly one can ever be emitted.
+    match value(KIRO_TRUST_MODE_ENV).map(str::to_ascii_lowercase).as_deref() {
+        Some("all") => args.push("--trust-all-tools".to_string()),
+        Some("tools") => {
+            // Comma-separated in the CLI; normalize away blank entries so a
+            // trailing comma can't produce an empty tool name.
+            let tools = value(KIRO_TRUST_TOOLS_ENV)
+                .map(|raw| {
+                    raw.split(',')
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            if tools.is_empty() {
+                tracing::warn!(
+                    "[ACP][Kiro] trust mode is per-tool but no tool names are set; \
+                     launching with Kiro's default confirmation prompts"
+                );
+            } else {
+                args.push("--trust-tools".to_string());
+                args.push(tools);
+            }
+        }
+        _ => {}
+    }
+    // A custom agent definition from `<KIRO_HOME>/agents/<name>.json`; the
+    // stable identifier is the file stem.
+    if let Some(agent) = value(KIRO_AGENT_ENV) {
+        args.push("--agent".to_string());
+        args.push(agent.to_string());
+    }
+    args
+}
+
+/// Kiro-only launch policy.
+///
+/// Drops codeg's own launch knobs (they are flags, not env vars) and normalizes
+/// the API key: an explicitly-cleared key must be REMOVED rather than injected
+/// as an empty string, so Kiro falls back to its own `kiro-cli login` state
+/// instead of authenticating with a blank credential. An empty value tells the
+/// spawn layer (vendored sacp-tokio) to `env_remove` the inherited var, which is
+/// what "the user cleared this field" should mean for a key inherited from the
+/// surrounding shell.
+fn apply_kiro_env_policy(
+    merged: &mut Vec<(String, String)>,
+    runtime_env: &BTreeMap<String, String>,
+) {
+    merged.retain(|(k, _)| !KIRO_LAUNCH_KNOB_ENVS.contains(&k.as_str()));
+
+    // Blank-but-present in env_json means "cleared in the panel": scrub any
+    // same-named value inherited from codeg's environment.
+    for key in KIRO_API_KEY_ENVS {
+        let cleared_in_panel = runtime_env
+            .get(*key)
+            .is_some_and(|v| v.trim().is_empty());
+        let has_value = merged
+            .iter()
+            .any(|(k, v)| k == key && !v.trim().is_empty());
+        if cleared_in_panel && !has_value {
+            merged.retain(|(k, _)| k != key);
+            merged.push(((*key).to_string(), String::new()));
+        }
+    }
+}
+
+/// Environment variables carrying a Kiro API key. Stored in
+/// `agent_setting.env_json` and injected verbatim into the child.
+pub(crate) const KIRO_API_KEY_ENVS: &[&str] = &["KIRO_API_KEY"];
+
 /// Codex-only launch policy: force codex-acp's MCP name-conflict de-duplication
 /// OFF. codeg injects its companion server (`codeg-mcp`) over ACP
 /// `session/new.mcpServers`; codex-acp otherwise drops any ACP-passed server
@@ -750,6 +877,68 @@ async fn build_agent(
                     })
                 })
                 .map_err(|e| AcpError::SpawnFailed(e.to_string()))
+        }
+        AgentDistribution::SystemBinary { cmd, args, env } => {
+            // The user installs and updates this binary themselves (ADR-0001):
+            // no cache lookup, no version pin — resolve it on PATH or fail with
+            // the install-prompt-routable error.
+            let binary_path = crate::commands::acp::resolve_system_agent_binary(cmd)
+                .ok_or_else(|| {
+                    // INVARIANT: the substring "is not installed" is matched
+                    // verbatim by the frontend catch block in
+                    // `src/contexts/acp-connections-context.tsx` to surface a
+                    // localized install prompt. Do not change the wording.
+                    AcpError::SdkNotInstalled(format!(
+                        "{} is not installed. Please install it in Agent Settings.",
+                        meta.name
+                    ))
+                })?;
+            let binary_str = binary_path.to_string_lossy().to_string();
+            let mut server = McpServerStdio::new(meta.name, &binary_str);
+
+            // The registry `args` are `&'static`, so every per-launch argument
+            // is appended here (same shape as Cursor's branch above). `args`
+            // stays first so argv[0] after the binary is always the `acp`
+            // subcommand.
+            let mut cmd_args: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+            if agent_type == AgentType::Kiro {
+                cmd_args.extend(kiro_launch_args(runtime_env));
+            }
+            let cmd_args_for_log = cmd_args.clone();
+            if !cmd_args.is_empty() {
+                server = server.args(cmd_args);
+            }
+
+            let mut merged_env = merge_agent_env(env, runtime_env);
+            if agent_type == AgentType::Kiro {
+                apply_kiro_env_policy(&mut merged_env, runtime_env);
+            }
+            let env_key_list: Vec<&str> = merged_env.iter().map(|(k, _)| k.as_str()).collect();
+            if !merged_env.is_empty() {
+                let env_vars: Vec<sacp::schema::EnvVariable> = merged_env
+                    .iter()
+                    .map(|(k, v)| sacp::schema::EnvVariable::new(k, v))
+                    .collect();
+                server = server.env(env_vars);
+            }
+            tracing::info!(
+                "[ACP][{}] binary_path={} distribution=system-binary args={:?} env_keys={:?}",
+                meta.name,
+                binary_str,
+                cmd_args_for_log,
+                env_key_list
+            );
+
+            let agent_name = meta.name.to_string();
+            Ok(
+                AcpAgent::new(sacp::schema::McpServer::Stdio(server)).with_debug(
+                    move |line, dir| {
+                        if dir == sacp_tokio::LineDirection::Stderr {
+                            tracing::debug!("[ACP][{agent_name}][stderr] {line}");
+                        }
+                    },
+                ),
+            )
         }
     }?;
 
@@ -2086,19 +2275,24 @@ fn agent_delivers_wire_mcp(agent_type: AgentType) -> bool {
 /// ACP wire format. Errors and unsupported entries are logged and skipped so
 /// a single malformed entry never blocks a session from starting.
 fn load_mcp_servers_for_agent(agent_type: AgentType) -> Vec<McpServer> {
-    // Hermes, Kimi Code, Grok, and Cursor each read their own native MCP
+    // Hermes, Kimi Code, Grok, Cursor, and Kiro each read their own native MCP
     // config at launch — Hermes from `~/.hermes/config.yaml` (`mcp_servers`,
     // registered as `mcp-<name>` toolsets), Kimi Code from
     // `~/.kimi-code/mcp.json` (`mcpServers`), Grok from `~/.grok/config.toml`
     // (`[mcp_servers.<name>]`), Cursor from `~/.cursor/mcp.json`
-    // (`mcpServers`, shared with the IDE). codeg manages those files directly
-    // via the MCP settings UI, so forwarding the same servers over the ACP
-    // wire here would double-register them — skip it. (The built-in
+    // (`mcpServers`, shared with the IDE), Kiro from its three merged scopes
+    // rooted at `<KIRO_HOME>/settings/mcp.json`. codeg manages those files
+    // directly via the MCP settings UI, so forwarding the same servers over the
+    // ACP wire here would double-register them — skip it. (The built-in
     // `codeg-mcp` companion is injected separately by `inject_codeg_mcp`, so
     // it still reaches them.)
     if matches!(
         agent_type,
-        AgentType::Hermes | AgentType::KimiCode | AgentType::Grok | AgentType::Cursor
+        AgentType::Hermes
+            | AgentType::KimiCode
+            | AgentType::Grok
+            | AgentType::Cursor
+            | AgentType::Kiro
     ) {
         return Vec::new();
     }
@@ -7294,6 +7488,160 @@ async fn emit_conversation_update(
 mod tests {
     use super::*;
     use sacp::schema::Diff;
+
+    /// Build a `runtime_env` from `(key, value)` pairs.
+    fn env_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// P-3: every combination of the four launch dimensions (each including its
+    /// "unset" state) yields an argv where each SET dimension contributes
+    /// exactly one flag and each unset one contributes none.
+    ///
+    /// This is the test that catches the likeliest silent failure of this
+    /// feature: a knob written to `env_json` by the settings panel that
+    /// `build_agent` never reads.
+    #[test]
+    fn kiro_launch_args_cover_every_dimension_combination() {
+        let models = [None, Some("claude-sonnet-5"), Some("my-custom-model")];
+        let efforts = [None, Some("low"), Some("max")];
+        let trusts: [Option<(&str, &str)>; 3] =
+            [None, Some(("all", "")), Some(("tools", "fs_read,fs_write"))];
+        let agents = [None, Some("my-agent")];
+
+        for model in models {
+            for effort in efforts {
+                for trust in trusts {
+                    for agent in agents {
+                        let mut pairs: Vec<(&str, &str)> = Vec::new();
+                        if let Some(m) = model {
+                            pairs.push((KIRO_MODEL_ENV, m));
+                        }
+                        if let Some(e) = effort {
+                            pairs.push((KIRO_EFFORT_ENV, e));
+                        }
+                        if let Some((mode, tools)) = trust {
+                            pairs.push((KIRO_TRUST_MODE_ENV, mode));
+                            if !tools.is_empty() {
+                                pairs.push((KIRO_TRUST_TOOLS_ENV, tools));
+                            }
+                        }
+                        if let Some(a) = agent {
+                            pairs.push((KIRO_AGENT_ENV, a));
+                        }
+                        let args = kiro_launch_args(&env_of(&pairs));
+                        let count = |flag: &str| args.iter().filter(|a| *a == flag).count();
+
+                        assert_eq!(count("--model"), usize::from(model.is_some()));
+                        if let Some(m) = model {
+                            let idx = args.iter().position(|a| a == "--model").unwrap();
+                            assert_eq!(args[idx + 1], m, "custom model must pass through verbatim");
+                        }
+                        assert_eq!(count("--effort"), usize::from(effort.is_some()));
+                        assert_eq!(
+                            count("--trust-all-tools"),
+                            usize::from(matches!(trust, Some(("all", _))))
+                        );
+                        assert_eq!(
+                            count("--trust-tools"),
+                            usize::from(matches!(trust, Some(("tools", _))))
+                        );
+                        // The two trust flags are mutually exclusive.
+                        assert!(count("--trust-all-tools") + count("--trust-tools") <= 1);
+                        assert_eq!(count("--agent"), usize::from(agent.is_some()));
+
+                        // Registry `args` are prepended by the caller, so the
+                        // launch args never claim argv[0].
+                        assert!(!args.iter().any(|a| a == "acp"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kiro_launch_args_are_empty_when_nothing_is_configured() {
+        assert!(kiro_launch_args(&BTreeMap::new()).is_empty());
+        // Whitespace-only values are treated as unset, not passed as "".
+        let blank = env_of(&[
+            (KIRO_MODEL_ENV, "   "),
+            (KIRO_EFFORT_ENV, ""),
+            (KIRO_AGENT_ENV, " "),
+        ]);
+        assert!(kiro_launch_args(&blank).is_empty());
+    }
+
+    #[test]
+    fn kiro_launch_args_drop_an_unknown_effort_rather_than_failing_the_launch() {
+        let args = kiro_launch_args(&env_of(&[(KIRO_EFFORT_ENV, "turbo")]));
+        assert!(args.is_empty(), "unknown effort must not reach the CLI");
+        // Case is normalized to the CLI's own lowercase vocabulary.
+        let args = kiro_launch_args(&env_of(&[(KIRO_EFFORT_ENV, "HIGH")]));
+        assert_eq!(args, vec!["--effort".to_string(), "high".to_string()]);
+    }
+
+    #[test]
+    fn kiro_per_tool_trust_without_tool_names_emits_no_flag() {
+        let args = kiro_launch_args(&env_of(&[
+            (KIRO_TRUST_MODE_ENV, "tools"),
+            (KIRO_TRUST_TOOLS_ENV, " , ,"),
+        ]));
+        assert!(
+            args.is_empty(),
+            "an empty tool list must not produce `--trust-tools`"
+        );
+    }
+
+    #[test]
+    fn kiro_env_policy_strips_codeg_launch_knobs_from_the_child() {
+        let runtime_env = env_of(&[
+            (KIRO_MODEL_ENV, "claude-sonnet-5"),
+            (KIRO_AGENT_ENV, "my-agent"),
+            ("KIRO_API_KEY", "secret"),
+        ]);
+        let mut merged: Vec<(String, String)> = runtime_env.clone().into_iter().collect();
+        apply_kiro_env_policy(&mut merged, &runtime_env);
+
+        assert!(
+            !merged.iter().any(|(k, _)| k == KIRO_MODEL_ENV || k == KIRO_AGENT_ENV),
+            "codeg's own launch knobs must not leak into the child env"
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .find(|(k, _)| k == "KIRO_API_KEY")
+                .map(|(_, v)| v.as_str()),
+            Some("secret"),
+            "a stored API key is still injected"
+        );
+    }
+
+    #[test]
+    fn kiro_env_policy_clears_an_api_key_the_user_emptied() {
+        // Blank in env_json = "cleared in the panel": the child must receive an
+        // empty value (which the spawn layer turns into env_remove) rather than
+        // inheriting a stale key from codeg's own environment.
+        let runtime_env = env_of(&[("KIRO_API_KEY", "")]);
+        let mut merged: Vec<(String, String)> = vec![];
+        apply_kiro_env_policy(&mut merged, &runtime_env);
+        assert_eq!(
+            merged,
+            vec![("KIRO_API_KEY".to_string(), String::new())],
+            "a cleared key must be scrubbed, never injected as a real value"
+        );
+    }
+
+    #[test]
+    fn kiro_env_policy_does_not_invent_an_api_key_when_none_was_stored() {
+        // Not stored at all ⇒ nothing injected, so Kiro falls back to its own
+        // `kiro-cli login` state.
+        let mut merged: Vec<(String, String)> = vec![];
+        apply_kiro_env_policy(&mut merged, &BTreeMap::new());
+        assert!(merged.is_empty());
+    }
 
     #[test]
     fn grok_ask_ext_request_routes_and_parses_captured_wire_shape() {

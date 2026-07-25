@@ -70,6 +70,9 @@ pub async fn run_preflight(agent_type: AgentType) -> PreflightResult {
             system_cmd,
             ..
         } => check_uv_environment(*uv_required, *system_cmd).await,
+        // The user owns the install: the only thing codeg can check is whether
+        // the command resolves on PATH.
+        AgentDistribution::SystemBinary { cmd, .. } => check_system_binary_environment(cmd),
     };
 
     let passed = checks
@@ -352,6 +355,30 @@ async fn check_uv_environment(
             kind: FixActionKind::InstallUv,
             payload: String::new(),
         }],
+    }]
+}
+
+/// The only environment check a `SystemBinary` agent has: the user installs and
+/// updates the CLI themselves (ADR-0001), so there is no runtime to provision —
+/// either the command resolves on PATH or the agent cannot launch.
+fn check_system_binary_environment(cmd: &str) -> Vec<CheckItem> {
+    let resolved = crate::commands::acp::resolve_system_agent_binary(cmd);
+    vec![CheckItem {
+        check_id: "system_binary_available".into(),
+        label: cmd.to_string(),
+        status: if resolved.is_some() {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        message: match &resolved {
+            Some(path) => format!("`{cmd}` found at {}", path.display()),
+            None => format!(
+                "`{cmd}` was not found on PATH. Install it yourself, then make sure \
+                 the command is on the PATH this app sees."
+            ),
+        },
+        fixes: vec![],
     }]
 }
 

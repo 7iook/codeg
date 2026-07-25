@@ -519,6 +519,21 @@ fn agent_root_slots(agent_type: AgentType) -> &'static [RootSlot] {
             trims: false,
             default_rel: &[".openclaw"],
         }],
+        // Kiro is deliberately NARROWER than its data root: the slot resolves to
+        // `<KIRO_HOME>/sessions`, not `<KIRO_HOME>`.
+        //
+        // This list only governs paths the MODEL can drive codeg to write via
+        // ACP `fs/*`; the Kiro process maintains its own `~/.kiro` through its
+        // own file API and never needs codeg to write there on its behalf.
+        // Granting the whole root would put session records, agent definitions
+        // (prompts + tool allowlists) and MCP credentials on the model-driven
+        // write surface — `settings/` and `agents/` stay unwritable by omission.
+        // Mirrors `parsers::kiro::resolve_kiro_home_from` for the root itself.
+        AgentType::Kiro => &[RootSlot {
+            candidates: &[("KIRO_HOME", "sessions")],
+            trims: false,
+            default_rel: &[".kiro", "sessions"],
+        }],
         // pi's agent home and its session store relocate INDEPENDENTLY, so both
         // are genuine roots rather than alternatives. The sessions slot mirrors
         // `resolve_pi_sessions_dir_from`: the session override wins, else
@@ -1370,6 +1385,39 @@ mod tests {
                  (that widens it by a level): {roots:?}"
             );
         }
+    }
+
+    /// R8: Kiro's ACP write boundary is `<KIRO_HOME>/sessions`, NOT the data root.
+    ///
+    /// `settings/` holds MCP credentials and `agents/` holds agent definitions
+    /// (prompts + tool allowlists); neither is something the model should be able
+    /// to drive codeg into rewriting, so both must be OUTSIDE every root — and
+    /// they are, by the root being one level deeper than the home.
+    #[test]
+    fn kiro_write_boundary_excludes_settings_and_agent_definitions() {
+        let kiro_home = absolute_path("tmp/codeg-kiro-home");
+        let runtime_env = BTreeMap::from([(
+            "KIRO_HOME".to_string(),
+            kiro_home.to_string_lossy().to_string(),
+        )]);
+        let roots = agent_data_roots(AgentType::Kiro, &runtime_env);
+
+        assert_eq!(
+            roots,
+            vec![kiro_home.join("sessions")],
+            "the only Kiro root is <KIRO_HOME>/sessions"
+        );
+        for denied in ["settings", "agents"] {
+            let path = kiro_home.join(denied);
+            assert!(
+                !roots.iter().any(|root| path.starts_with(root)),
+                "<KIRO_HOME>/{denied} must not be reachable from any write root: {roots:?}"
+            );
+        }
+        assert!(
+            !roots.contains(&kiro_home),
+            "the bare data root must never become writable: {roots:?}"
+        );
     }
 
     /// No relocation value may be tilde-expanded: the launched CLIs treat `~`

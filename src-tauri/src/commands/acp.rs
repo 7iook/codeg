@@ -525,6 +525,20 @@ pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), 
                 )))
             }
         }
+        registry::AgentDistribution::SystemBinary { cmd, .. } => {
+            // The user installs and updates this agent themselves, so the only
+            // gate is PATH resolvability.
+            if resolve_system_agent_binary(cmd).is_some() {
+                Ok(())
+            } else {
+                // INVARIANT: see note above — "is not installed" is a stable
+                // substring the frontend matches against.
+                Err(AcpError::SdkNotInstalled(format!(
+                    "{} is not installed. Please install it in Agent Settings.",
+                    meta.name
+                )))
+            }
+        }
     }
 }
 
@@ -613,6 +627,10 @@ async fn detect_local_version(agent_type: AgentType) -> Option<String> {
             None
         }
         registry::AgentDistribution::Uvx { .. } => binary_cache::uvx_prepared_version(agent_type),
+        // No codeg cache to consult: ask the user's own install directly.
+        registry::AgentDistribution::SystemBinary { cmd, .. } => {
+            system_binary_agent_version(agent_type, cmd).await
+        }
     }
 }
 
@@ -951,6 +969,16 @@ async fn collect_agent_diag(
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| format!("{cmd} (system CLI on PATH)"))
             });
+        }
+        registry::AgentDistribution::SystemBinary { cmd, .. } => {
+            diag.cmd = cmd.to_string();
+            diag.distribution = "system-binary";
+            diag.launchable = resolve_system_agent_binary(cmd).map(|p| p.to_string_lossy().to_string());
+            diag.detected_version =
+                tokio::time::timeout(DIAG_PROBE_TIMEOUT, probe_system_binary_version(cmd))
+                    .await
+                    .ok()
+                    .flatten();
         }
     }
 
@@ -1629,31 +1657,82 @@ mod diagnostics_tests {
     }
 }
 
-/// Process-local cache for dir-tree agents' system-binary `--version` probes,
-/// keyed by (path, mtime) so an upgrade re-probes but the status/list paths
-/// don't spawn a subprocess on every call.
-static SYSTEM_BINARY_VERSION_CACHE: std::sync::Mutex<
-    Option<(PathBuf, std::time::SystemTime, String)>,
-> = std::sync::Mutex::new(None);
+/// One cached `--version` probe: the binary it came from, that file's mtime at
+/// probe time, and the reported version.
+type ProbedVersion = (PathBuf, std::time::SystemTime, String);
 
-/// Version of a dir-tree agent's user-installed CLI (PATH / ~/.local/bin),
-/// via a cached `--version` probe. `None` when no system install exists or
-/// the probe fails.
+/// Process-local cache for system-installed CLIs' `--version` probes, keyed by
+/// the command name so agents sharing this path (dir-tree agents and
+/// `SystemBinary` ones) never evict each other's entry. The value is keyed by
+/// (path, mtime) so an upgrade re-probes but the status/list paths don't spawn
+/// a subprocess on every call.
+static SYSTEM_BINARY_VERSION_CACHE: std::sync::Mutex<Option<BTreeMap<String, ProbedVersion>>> =
+    std::sync::Mutex::new(None);
+
+/// Version of a user-installed CLI (PATH / ~/.local/bin) via a cached
+/// `--version` probe. `None` when no system install exists or the probe fails.
 pub(crate) async fn system_dir_agent_version(cmd: &str) -> Option<String> {
     let bin = resolve_system_agent_binary(cmd)?;
     let mtime = std::fs::metadata(&bin).ok()?.modified().ok()?;
-    if let Some((cached_bin, cached_mtime, version)) =
-        SYSTEM_BINARY_VERSION_CACHE.lock().ok()?.as_ref()
+    if let Some(entry) = SYSTEM_BINARY_VERSION_CACHE
+        .lock()
+        .ok()?
+        .as_ref()
+        .and_then(|m| m.get(cmd))
     {
+        let (cached_bin, cached_mtime, version) = entry;
         if *cached_bin == bin && *cached_mtime == mtime {
             return Some(version.clone());
         }
     }
     let version = probe_binary_version(&bin).await?;
     if let Ok(mut cache) = SYSTEM_BINARY_VERSION_CACHE.lock() {
-        *cache = Some((bin, mtime, version.clone()));
+        cache
+            .get_or_insert_with(BTreeMap::new)
+            .insert(cmd.to_string(), (bin, mtime, version.clone()));
     }
     Some(version)
+}
+
+/// `--version` of a `SystemBinary` agent's user-installed CLI, with the
+/// agent-specific prefix stripped so the UI shows a bare version.
+///
+/// Kiro's `kiro-cli --version` prints `kiro-cli-chat 2.14.2`; the registry
+/// reports no pinned version for this distribution, so whatever the user has
+/// installed is the only version there is.
+pub(crate) async fn system_binary_agent_version(
+    agent_type: AgentType,
+    cmd: &str,
+) -> Option<String> {
+    let raw = system_dir_agent_version(cmd).await?;
+    Some(strip_system_binary_version_prefix(agent_type, &raw))
+}
+
+/// Strip the vendor prefix from a `SystemBinary` agent's `--version` output.
+/// Pure so the prefix contract is unit-testable without spawning the CLI.
+pub(crate) fn strip_system_binary_version_prefix(agent_type: AgentType, raw: &str) -> String {
+    let raw = raw.trim();
+    let stripped = match agent_type {
+        // Observed output: "kiro-cli-chat 2.14.2".
+        AgentType::Kiro => raw
+            .strip_prefix("kiro-cli-chat")
+            .or_else(|| raw.strip_prefix("kiro-cli"))
+            .unwrap_or(raw),
+        _ => raw,
+    };
+    let stripped = stripped.trim();
+    if stripped.is_empty() {
+        raw.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+/// One-shot (uncached) `--version` probe used by the diagnostics report, which
+/// deliberately re-probes rather than trusting the status cache.
+async fn probe_system_binary_version(cmd: &str) -> Option<String> {
+    let bin = resolve_system_agent_binary(cmd)?;
+    probe_binary_version(&bin).await
 }
 
 /// Run `<binary> --version` and return the first non-empty stdout line.
@@ -6325,6 +6404,11 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
             ],
             project_rel_dirs: vec![".cursor/skills", ".agents/skills"],
         }),
+        // Kiro's reusable prompt unit is its custom agent definition
+        // (<KIRO_HOME>/agents/*.json), selected via `--agent`, not a skill
+        // directory — so it has no skill storage. codeg surfaces those agents
+        // in the Kiro config panel instead.
+        AgentType::Kiro => None,
     }
 }
 
@@ -7365,6 +7449,11 @@ fn cascade_update_agent_config(
             // against Cursor's own backend; there is no third-party
             // model-provider endpoint to cascade into.
         }
+        AgentType::Kiro => {
+            // Kiro authenticates via `kiro-cli login` or an API key injected as
+            // an environment variable from its own settings panel (env_json);
+            // there is no third-party model-provider endpoint to cascade into.
+        }
         AgentType::Codex => {
             let auth_path = codex_auth_json_path();
             let mut auth_obj = if auth_path.exists() {
@@ -8248,6 +8337,12 @@ pub(crate) async fn acp_get_agent_status_core(
             uvx_agent_launchable(*system_cmd),
             binary_cache::uvx_prepared_version(agent_type),
         ),
+        registry::AgentDistribution::SystemBinary { cmd, .. } => (
+            // Always "available" as a platform matter — readiness is expressed
+            // through installed_version, which is None until the CLI is on PATH.
+            true,
+            system_binary_agent_version(agent_type, cmd).await,
+        ),
     };
 
     Ok(crate::acp::types::AcpAgentStatus {
@@ -8332,6 +8427,11 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
                 uvx_agent_launchable(*system_cmd),
                 "uvx",
                 binary_cache::uvx_prepared_version(agent_type),
+            ),
+            registry::AgentDistribution::SystemBinary { cmd, .. } => (
+                true,
+                "system-binary",
+                system_binary_agent_version(agent_type, cmd).await,
             ),
         };
 
@@ -9480,6 +9580,9 @@ pub(crate) async fn acp_download_agent_binary_core(
         registry::AgentDistribution::Uvx { .. } => Err(AcpError::protocol(
             "download is only supported for binary agents",
         )),
+        registry::AgentDistribution::SystemBinary { .. } => Err(AcpError::protocol(
+            "download is only supported for binary agents",
+        )),
     };
 
     match &result {
@@ -9773,6 +9876,28 @@ pub(crate) async fn acp_prepare_npx_agent_core(
             emit_acp_agents_updated(emitter, "uvx_prepared", Some(agent_type));
             Ok(resolved)
         }
+        registry::AgentDistribution::SystemBinary { cmd, .. } => {
+            // codeg does not install this agent (ADR-0001): there is no package
+            // to fetch and no cache to warm. Report whatever the user already
+            // has on PATH, or fail with an actionable message.
+            let resolved = system_binary_agent_version(agent_type, cmd)
+                .await
+                .ok_or_else(|| {
+                    AcpError::SdkNotInstalled(format!(
+                        "{} is installed by the user: install `{cmd}` and make sure it is on PATH.",
+                        meta.name
+                    ))
+                })?;
+            agent_setting_service::set_installed_version(
+                &db.conn,
+                agent_type,
+                Some(resolved.clone()),
+            )
+            .await
+            .map_err(|e| AcpError::protocol(e.to_string()))?;
+            emit_acp_agents_updated(emitter, "system_binary_detected", Some(agent_type));
+            Ok(resolved)
+        }
     };
 
     match &result {
@@ -9863,6 +9988,15 @@ pub(crate) async fn acp_uninstall_agent_core(
             }
             registry::AgentDistribution::Uvx { .. } => {
                 binary_cache::clear_uvx_agent_prepared(agent_type)?;
+            }
+            registry::AgentDistribution::SystemBinary { .. } => {
+                // codeg never installed it, so there is nothing to remove. The
+                // frontend hides install/uninstall for this distribution; this
+                // arm only guards a stale call.
+                return Err(AcpError::protocol(format!(
+                    "{} is installed by the user; codeg cannot uninstall it",
+                    meta.name
+                )));
             }
         }
 

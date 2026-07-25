@@ -51,6 +51,16 @@ pub enum AgentDistribution {
         /// its official installer launch it without `uv`.
         system_cmd: Option<(&'static str, &'static [&'static str])>,
     },
+    /// Agents whose executable is installed and updated by the user, outside of
+    /// codeg. There is no pinned version, no download URL and no cache: codeg
+    /// only resolves `cmd` on PATH and reports whatever `--version` prints.
+    /// See docs/architecture/ADR-0001-agent-distribution-system-binary.md.
+    SystemBinary {
+        /// Command name resolved on PATH, e.g. "kiro-cli".
+        cmd: &'static str,
+        args: &'static [&'static str],
+        env: &'static [(&'static str, &'static str)],
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +109,8 @@ impl AcpAgentMeta {
             AgentDistribution::Npx { version, .. }
             | AgentDistribution::Binary { version, .. }
             | AgentDistribution::Uvx { version, .. } => Some(*version),
+            // The user owns the install, so codeg pins no version.
+            AgentDistribution::SystemBinary { .. } => None,
         }
     }
 }
@@ -144,6 +156,7 @@ pub fn all_acp_agents() -> Vec<AgentType> {
         AgentType::Pi,
         AgentType::Grok,
         AgentType::Cursor,
+        AgentType::Kiro,
     ]
 }
 
@@ -161,6 +174,7 @@ pub fn registry_id_for(agent_type: AgentType) -> &'static str {
         AgentType::Pi => "pi-acp",
         AgentType::Grok => "grok-build",
         AgentType::Cursor => "cursor",
+        AgentType::Kiro => "kiro",
     }
 }
 
@@ -178,6 +192,7 @@ pub fn from_registry_id(id: &str) -> Option<AgentType> {
         "pi-acp" => Some(AgentType::Pi),
         "grok-build" => Some(AgentType::Grok),
         "cursor" => Some(AgentType::Cursor),
+        "kiro" => Some(AgentType::Kiro),
         _ => None,
     }
 }
@@ -502,6 +517,24 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
                 }),
             },
         },
+        AgentType::Kiro => AcpAgentMeta {
+            agent_type,
+            // `true` because Kiro's `session/new` tolerates `mcpServers` — codeg
+            // still needs that field to inject its own `codeg-mcp` companion
+            // (delegation / ask_user_question / feedback). Kiro loads the USER's
+            // servers natively from its own config, so those are excluded by the
+            // skip list in `connection.rs::load_mcp_servers_for_agent`, not here:
+            // `supports_mcp: false` would drop the companion too. Same shape as
+            // Cursor / Grok / Kimi Code.
+            supports_mcp: true,
+            name: "Kiro",
+            description: "Kiro CLI (ACP via kiro-cli acp), installed by the user",
+            distribution: AgentDistribution::SystemBinary {
+                cmd: "kiro-cli",
+                args: &["acp"],
+                env: &[],
+            },
+        },
     }
 }
 
@@ -703,5 +736,56 @@ mod tests {
                 "unexpected supports_mcp for {agent_type:?}"
             );
         }
+    }
+
+    /// P-6: `registry_id_for` and `from_registry_id` are inverse for every
+    /// registered agent, and `get_agent_meta` never panics. Catches the silent
+    /// failure where a new agent is added to the enum but omitted from one of
+    /// the two hand-written id tables.
+    #[test]
+    fn registry_ids_round_trip_for_every_agent() {
+        for agent_type in all_acp_agents() {
+            let id = registry_id_for(agent_type);
+            assert_eq!(
+                from_registry_id(id),
+                Some(agent_type),
+                "registry id {id} does not map back to {agent_type:?}"
+            );
+            let meta = get_agent_meta(agent_type);
+            assert_eq!(meta.agent_type, agent_type);
+            assert!(!meta.name.is_empty(), "{agent_type:?} has no display name");
+        }
+    }
+
+    /// `all_acp_agents()` is a hand-written `vec![]`: an agent missing from it
+    /// disappears from every list with no compile error and no runtime error.
+    /// Pinning the count makes that omission fail here instead.
+    #[test]
+    fn all_acp_agents_covers_every_enum_variant() {
+        let agents = all_acp_agents();
+        assert_eq!(
+            agents.len(),
+            13,
+            "all_acp_agents() must list every AgentType variant"
+        );
+        assert!(agents.contains(&AgentType::Kiro));
+        let mut deduped = agents.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), agents.len(), "duplicate entry");
+    }
+
+    /// `SystemBinary` pins no version: codeg neither downloads nor caches it.
+    #[test]
+    fn system_binary_reports_no_registry_version() {
+        let meta = get_agent_meta(AgentType::Kiro);
+        match meta.distribution {
+            AgentDistribution::SystemBinary { cmd, args, .. } => {
+                assert_eq!(cmd, "kiro-cli");
+                assert_eq!(args, &["acp"]);
+            }
+            other => panic!("expected system-binary distribution, got {other:?}"),
+        }
+        assert_eq!(meta.registry_version(), None);
     }
 }

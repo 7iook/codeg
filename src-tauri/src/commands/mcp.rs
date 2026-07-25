@@ -2456,6 +2456,9 @@ pub fn read_servers_for_agent_type(
         AgentType::KimiCode => read_kimi_code_servers(),
         AgentType::Grok => read_grok_servers(),
         AgentType::Cursor => read_cursor_servers(),
+        // Kiro merges three scopes (agent > project > global); the panel reads
+        // and writes the global file. W1-P2 replaces this with the real reader.
+        AgentType::Kiro => Ok(BTreeMap::new()),
         // pi-acp drops ACP-wire MCP and pi has no native MCP (it needs a
         // third-party extension), so codeg manages no MCP servers for pi (v1).
         AgentType::Pi => Ok(BTreeMap::new()),

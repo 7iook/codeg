@@ -16,6 +16,7 @@ pub enum AgentType {
     Pi,
     Grok,
     Cursor,
+    Kiro,
 }
 
 impl fmt::Display for AgentType {
@@ -33,6 +34,7 @@ impl fmt::Display for AgentType {
             AgentType::Pi => write!(f, "Pi"),
             AgentType::Grok => write!(f, "Grok"),
             AgentType::Cursor => write!(f, "Cursor"),
+            AgentType::Kiro => write!(f, "Kiro"),
         }
     }
 }

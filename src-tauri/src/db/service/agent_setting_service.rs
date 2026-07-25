@@ -40,6 +40,7 @@ fn default_enabled(agent_type: AgentType) -> bool {
             | AgentType::Pi
             | AgentType::Grok
             | AgentType::Cursor
+            | AgentType::Kiro
     )
 }
 

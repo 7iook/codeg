@@ -7,6 +7,7 @@ pub mod gemini;
 pub mod grok;
 pub mod hermes;
 pub mod kimi_code;
+pub mod kiro;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi;

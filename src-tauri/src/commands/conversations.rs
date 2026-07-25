@@ -13,6 +13,7 @@ use crate::parsers::codebuddy::CodeBuddyParser;
 use crate::parsers::codex::CodexParser;
 use crate::parsers::gemini::GeminiParser;
 use crate::parsers::cursor::CursorParser;
+use crate::parsers::kiro::KiroParser;
 use crate::parsers::grok::GrokParser;
 use crate::parsers::hermes::HermesParser;
 use crate::parsers::kimi_code::KimiCodeParser;
@@ -289,6 +290,7 @@ pub async fn get_conversation(
             AgentType::Pi => Box::new(PiParser::new()),
             AgentType::Grok => Box::new(GrokParser::new()),
             AgentType::Cursor => Box::new(CursorParser::new()),
+            AgentType::Kiro => Box::new(KiroParser::new()),
         };
 
         parser
@@ -946,6 +948,7 @@ pub async fn get_folder_conversation_core(
                 AgentType::Pi => Box::new(PiParser::new()),
                 AgentType::Grok => Box::new(GrokParser::new()),
                 AgentType::Cursor => Box::new(CursorParser::new()),
+                AgentType::Kiro => Box::new(KiroParser::new()),
             };
             match parser.get_conversation(&eid) {
                 Ok(d) => Ok((
