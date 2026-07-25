@@ -240,6 +240,16 @@ WHERE 该变量未设置 THE 系统 SHALL 使用用户主目录下的 `.kiro`。
 
 4.5 THE 系统 SHALL 在 `load_mcp_servers_for_agent` 的转发跳过名单中包含 `AgentType::Kiro`。
 
+> **实装澄清（2026-07-26，实测纠正）**：跳过名单是实现本条的**唯一**机制。
+> `AcpAgentMeta::supports_mcp` **不是**「codeg 是否转发 MCP」的开关 —— Cursor / Grok /
+> Kimi Code 三者都是 `supports_mcp: true` 且同时在跳过名单里。该字段的真实语义是
+> 「该 agent 的 `session/new` 是否容忍 `mcpServers` 字段」，OpenClaw 是唯一容忍不了的。
+> 把 Kiro 设成 `supports_mcp: false` 会**连带丢掉 codeg 自己注入的 `codeg-mcp` 伴生进程**
+> （委派 / ask_user_question / feedback / session_info 全部失效），因为
+> `connection.rs` 用同一个标志同时门控用户 server 与伴生进程。
+> `registry.rs::only_openclaw_opts_out_of_mcp` 不变式测试会拦住这个错误。
+> 故 Kiro 的元数据是 `supports_mcp: true`。
+
 4.6 THE 系统 SHALL 使 Kiro 出现在 MCP 面板的 app 维度选项中。
 
 4.7 THE 系统 SHALL 以明文显示与编辑 Kiro MCP 配置中的 `env` 值与 `args` 元素。
@@ -321,6 +331,10 @@ HTTP 入口共用同一判断。
 
 6.2 THE 系统 SHALL 提供 effort 选择，其取值集合为 `low`、`medium`、`high`、`xhigh`、`max`，
 并将所选值作为 `--effort <EFFORT>` 传递。
+
+> **实测确认（`kiro-cli acp --help`，v2.14.2）**：四个维度的参数全部存在且拼写如本规格所记。
+> 另有本规格未覆盖的第五个参数 `--agent-engine <v1|v2|v3>`（默认 `v2`）——
+> 当前**有意不接线**：无需求覆盖，且默认值已是较新引擎。若将来要暴露，须新增 AC。
 
 6.3 THE 系统 SHALL 提供授权模式选择；WHEN 用户选择全部信任 THE 系统 SHALL 传递
 `--trust-all-tools`。
@@ -476,38 +490,28 @@ _Validates: Requirements 1.1, 1.2_
   且未显式声明该字段」时全局配置是否仍生效，影响 R4.1.2/4.1.3 的展示标注是否准确。
   验证方式：临时建一个测试 agent，分别在声明/不声明该字段时观察 `/mcp` 的加载结果。
 
-## 验证基线（executor 必读）
+## 验证基线（executor 必读 · 2026-07-26 rebase 后实测重写）
 
+- 仓库已 rebase 到上游 `e540a4fa`（v0.21.9）。
 - 后端：`cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib`
-  → **基线本身是红的**：`1648 passed; 8 failed`，EXIT=101。
+  → **基线全绿：`1673 passed; 0 failed`，EXIT=0**。
 
-  **允许失败的测试标识集合（穷举，比较集合而非数量）** —— 全部位于
-  `src-tauri/src/acp/file_system_runtime.rs`：
-
-  ```text
-  acp::file_system_runtime::tests::agent_data_roots_honor_runtime_env_relocation
-  acp::file_system_runtime::tests::blank_runtime_value_falls_through_to_the_next_candidate
-  acp::file_system_runtime::tests::cursor_relocation_respects_resolver_precedence
-  acp::file_system_runtime::tests::pi_session_dir_relocation_is_honored
-  acp::file_system_runtime::tests::relative_extra_roots_are_dropped
-  acp::file_system_runtime::tests::relocation_excludes_the_inactive_default_root
-  acp::file_system_runtime::tests::relocation_suffixes_match_the_agents_own_resolvers
-  acp::file_system_runtime::tests::whitespace_padded_extra_root_is_not_trimmed_into_filesystem_root
-  ```
-
-  **错误指纹**：断言失败，实际值为空集合 / 空 `Vec`。根因是上游 `2b017446` 引入的测试使用
-  `/tmp/...` 硬编码路径，而 `Path::is_absolute()` 在 Windows 对其返回 false，输入被
-  `extra_write_roots()` 过滤成 `[]`。
+  > **原「允许失败 8 项」waiver 已作废。** 上游 `df5ee401`
+  > (`fix(acp): correct the fs write policy for Windows builds and tests`)
+  > 修掉了那 8 个 `acp::file_system_runtime` 失败：根因确如本规格所记（测试 fixture 用
+  > `/tmp/...` 字面量，Windows 下 `Path::is_absolute()` 返 false 被 fail-closed 守卫过滤成 `[]`），
+  > 上游的修法是引入平台前缀 helper `absolute_path()`。**为 Requirement 8 新增的测试必须复用
+  > 该 helper**，不要自己拼 `/tmp`，也不要照抄邻近旧写法。
 
   **验收判据（三条同时成立）**：
-  1. 失败测试的标识集合 ⊆ 上述 8 项（**集合比较**，新回归顶替旧失败时总数仍为 8 但集合改变 → 判失败）。
+  1. `cargo test` EXIT=0，**零失败**（不再是集合比较——基线已无既有失败可豁免）。
   2. 本规格新增的所有测试全绿。
-  3. `acp::file_system_runtime` 模块内除上述 8 项外的测试全绿（Requirement 8 改动该模块，
-     不得引入同模块新回归）。
+  3. 新增测试数量 > 0 且能指名对应的 AC / Property。
 
-  为 Requirement 8 新增的测试必须使用 `std::env::temp_dir()` 或 `cfg!(windows)` 分支，
-  不得照抄邻近的 `/tmp` 写法。
-- 前端：`pnpm test` → EXIT=0，`218 files / 2728 tests` 全绿。
+- 前端：`pnpm test` → EXIT=0 全绿；`pnpm build` → EXIT=0。跑测试前先清 `NODE_ENV`。
+- 桌面 feature 的 `cargo check`（默认 feature）需要前端 `out/` 产物已存在，否则 build script 报
+  `resource path ..\out doesn't exist`。这是既有构建顺序依赖，不是回归。
 - **禁用 `cargo fmt` 的任何形式**：仓内无 `rustfmt.toml`，`cargo fmt --all -- --check` 实测重排
   90 文件 / 700 hunk；不带 `--all` 也覆盖整个 workspace。
 - 本仓无 pre-commit hook（`core.hooksPath` 为空，`.git/hooks` 只有 sample），门禁全靠自查。
+- **所有 file:line 已因上游 9 个 commit 漂移**：按符号名定位，不要按行号。

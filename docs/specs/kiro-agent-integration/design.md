@@ -22,6 +22,12 @@ one_line: 新增 SystemBinary 分布类型接入系统安装的 kiro-cli，复�
 
 ## Current-State Inventory
 
+> ⚠️ **2026-07-26 更新**：仓库已 rebase 到上游 `e540a4fa`（v0.21.9），**下表所有行号已漂移**。
+> 按符号名定位。已完成的实现与被实测推翻的条目见
+> `.agent-workspace/.archive/2026-07-26/kiro-agent/kiro-integration-execution-log.md`。
+> 其中两个要点：后端测试基线已变**全绿**（上游 `df5ee401` 修掉那 8 项）；
+> distribution 的编译强制点实测是 **17 处**，不是 9 处。
+
 基线 `feat/kiro-agent` @ `00bc59bc`，代码内容 == 上游 `2b017446`，**仓内零 Kiro 实现代码**。
 行号取自 `.agent-workspace/.archive/2026-07-25/kiro-agent/kiro-agent-recon.md` 的实测结果。
 
@@ -29,7 +35,7 @@ one_line: 新增 SystemBinary 分布类型接入系统安装的 kiro-cli，复�
 
 | 能力 | 位置 | 复用方式 |
 |---|---|---|
-| agent 枚举 | `src-tauri/src/models/agent.rs:6` (12 变体) + `:23` Display | 加变体 |
+| agent 枚举 | `models/agent.rs` `enum AgentType` + `impl Display` | 加变体 |
 | 分布类型 | `src-tauri/src/acp/registry.rs:4` (Npx/Binary/Uvx) | 加第四变体 |
 | 元数据表 | `registry.rs:189 get_agent_meta`（Cursor arm `:452`） | 加 arm |
 | 进程启动 | `acp/connection.rs:389 build_agent`（`:397` 分布 match） | 加分支 |
@@ -63,7 +69,7 @@ one_line: 新增 SystemBinary 分布类型接入系统安装的 kiro-cli，复�
 | MCP 配置文件 | 单一 `settings/mcp.json` | **三层合并**（官方文档核实）：`Agent > Project(.kiro/settings/mcp.json) > Global(~/.kiro/settings/mcp.json)`，**同名才覆盖、不同名叠加**。字段现名 `includeMcpJson`（boolean），`useLegacyMcpJson` 是上游 Amazon Q CLI 旧名（本机 6 个 agent 定义仍写旧名 → 当前版本可能忽略）。另有 `KIRO_HOME` 可重定向整个 `~/.kiro` |
 | 工具禁用粒度 | 未提及 | server 级 `disabledTools` / `disabled`；agent 级 `tools` 白名单 / `allowedTools` 免确认 / `toolsSettings`（如 `write.allowedPaths`） |
 | secret 载体 | 仅 `env` | `args` 数组同样承载（本机 `ace-local` 的 `--token`） |
-| 后端测试基线 | 1590 全绿 | **1648 passed / 8 failed，EXIT=101**（`acp::file_system_runtime`，`/tmp` 硬编码 + Windows `is_absolute()==false`） |
+| 后端测试基线 | 1590 全绿 | 上游 `df5ee401`（v0.21.9）修掉了 Windows `/tmp` fixture 问题，**现基线全绿 1673 passed / EXIT=0**（中间版本曾是 1648+8 failed）。新测试复用它引入的 `absolute_path()` helper |
 | `chat_channel::webhook` flaky | 已知噪声 | **不存在该测试模块**，1648 个测试零 chat_channel 失败 → 不列为已知噪声 |
 | Tailwind `@source not` | 已修 | `git grep "@source" -- src/` **零命中**，修复可能随丢失的 14 commit 一起没了 → 待验证风险 |
 | `tools/git-pre-commit.ps1` | 存在 | **本仓不存在**，`core.hooksPath` 为空 |

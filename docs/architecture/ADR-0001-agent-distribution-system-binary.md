@@ -1,6 +1,6 @@
 # ADR-0001 · Agent 分布类型：SystemBinary
 
-- **状态**：Proposed
+- **状态**：Accepted（2026-07-26 · W0 基座落地于 `4edb8f0d`）
 - **日期**：2026-07-26
 - **关联规格**：`docs/specs/kiro-agent-integration/`
 - **决策者**：项目所有者

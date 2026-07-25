@@ -25,21 +25,24 @@ one_line: 六波实施：基座 → 三路并行(parser/MCP/前端登记) → pa
 **契约**：`requirements.md`（8 需求 / 约 90 条 AC / 9 条 Correctness Property）+ `design.md`。
 `background.md` 是**上一轮的历史存档，非契约** —— 冲突处一律以前两份为准（它头部已列 9 条已推翻条目）。
 
-**仓库**：`F:\codeg-research`，分支 `feat/kiro-agent` @ `00bc59bc`（代码内容 == 上游 `2b017446`，
-**仓内零 Kiro 实现代码**）。所有 `file:line` 取自
-`.agent-workspace/.archive/2026-07-25/kiro-agent/kiro-agent-recon.md`（实测，非旧规格）。
+**仓库**：`F:\codeg-research`，分支 `feat/kiro-agent`。已 **rebase 到上游 `e540a4fa`（v0.21.9）**。
+
+> ⚠️ **本文件的 file:line 已全部漂移**（上游 9 个 commit）。**按符号名定位，不要按行号。**
+> 当前真实进展与已被实测推翻的条目，看
+> `.agent-workspace/.archive/2026-07-26/kiro-agent/kiro-integration-execution-log.md`（接管入口）。
 
 ### 三条硬红线
 
 1. **禁用 `cargo fmt` 的任何形式**。仓内无 `rustfmt.toml`，`cargo fmt --all -- --check` 实测重排
    **90 文件 / 700 hunk**；不带 `--all` 也覆盖整个 workspace。要格式化只能 `rustfmt --check <单文件>`
    人工核对，或手写规范格式。
-2. **后端测试基线是红的**。`cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib`
-   → `1648 passed; 8 failed`，EXIT=101。**这 8 个不是你弄坏的**（上游 `2b017446` 引入的测试用
-   `/tmp` 硬编码路径，Windows `Path::is_absolute()` 返 false）。验收判据见 requirements
-   §验证基线：**失败测试标识集合 ⊆ 那 8 项（集合比较，不是数量比较）**。
+2. **后端测试基线是绿的**（原本写「红的 · 允许 8 项失败」已作废）。
+   `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib`
+   → 基线 `1673 passed; 0 failed`，EXIT=0。上游 `df5ee401` 已修掉那 8 个 Windows `/tmp` fixture
+   失败并引入平台安全 helper `absolute_path()` —— R8 新测试直接复用它。
+   **验收判据：EXIT=0 且零失败**（不再是集合比较）。本轮当前已到 **1692 passed / 0 failed**。
 3. **本仓无 pre-commit hook**（`core.hooksPath` 为空，`.git/hooks` 只有 sample）。格式、大文件、
-   swallow、layering 全无自动检查 —— 每波自己跑验收命令。
+   swallow、layering 全无自动检查 —— 每波自己跑验收命令。clippy 必须零警告（CI 用 `-D warnings`）。
 
 ### 验收命令（每波结束都跑）
 
@@ -112,8 +115,12 @@ pnpm test   # 前端；基线 EXIT=0 / 218 files / 2728 tests 全绿
   ⚠️ **漏了这一行 = Kiro 完全不出现在任何列表，且零报错**（design.md CCV 表首条）
 - `registry.rs:163` `registry_id_for` 加 arm → `"kiro"`
 - `registry.rs:180` `from_registry_id` 加 arm（否则 `:185` 的 `debug_assert_eq!` 在 debug 下 panic）
-- `registry.rs:189` `get_agent_meta` 加 arm：`name` / `description` / `supports_mcp: false`
-  （Kiro 从自己的配置原生加载 MCP，不经 ACP 线缆转发）/ `distribution: SystemBinary { cmd: "kiro-cli", args: &["acp"], env: &[] }`
+- `registry.rs:189` `get_agent_meta` 加 arm：`name` / `description` / **`supports_mcp: true`**
+  （实测纠正：该字段语义是「`session/new` 是否容忍 `mcpServers` 字段」，**不是**「codeg 是否转发」。
+  Cursor/Grok/KimiCode 均为 `true` 且同时在转发跳过名单里。设 `false` 会连带丢掉 `codeg-mcp` 伴生进程
+  （委派 / ask_user_question 全废），且会被 `only_openclaw_opts_out_of_mcp` 不变式测试拦住。
+  「不双重注册」由 W2-S2 的跳过名单实现）
+  / `distribution: SystemBinary { cmd: "kiro-cli", args: &["acp"], env: &[] }`
 - _Requirements: 1.1, 1.2, 4.5_
 - _Properties: P-6_
 
