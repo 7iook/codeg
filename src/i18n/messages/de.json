@@ -1860,6 +1860,8 @@
       "hash": "Hash-Wert",
       "copyHash": "Hash kopieren",
       "copyMessage": "Nachricht kopieren",
+      "showMore": "Mehr anzeigen",
+      "showLess": "Weniger anzeigen",
       "author": "Autor",
       "noFileChangeDetails": "Keine Details zu Dateiänderungen verfügbar.",
       "loadingFiles": "Dateien werden geladen...",

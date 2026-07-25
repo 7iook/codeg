@@ -1860,6 +1860,8 @@
       "hash": "Empreinte",
       "copyHash": "Copier le hash",
       "copyMessage": "Copier le message",
+      "showMore": "Afficher plus",
+      "showLess": "Afficher moins",
       "author": "Auteur",
       "noFileChangeDetails": "Aucun détail de changement de fichier disponible.",
       "loadingFiles": "Chargement des fichiers...",

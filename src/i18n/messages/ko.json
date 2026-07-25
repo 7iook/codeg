@@ -1860,6 +1860,8 @@
       "hash": "해시",
       "copyHash": "해시 복사",
       "copyMessage": "메시지 복사",
+      "showMore": "더보기",
+      "showLess": "접기",
       "author": "작성자",
       "noFileChangeDetails": "파일 변경 상세 정보가 없습니다.",
       "loadingFiles": "파일 로딩 중…",
