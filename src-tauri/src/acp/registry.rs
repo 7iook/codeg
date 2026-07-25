@@ -194,8 +194,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Claude Code",
             description: "ACP wrapper for Anthropic's Claude",
             distribution: AgentDistribution::Npx {
-                version: "0.61.0",
-                package: "@agentclientprotocol/claude-agent-acp@0.61.0",
+                version: "0.62.0",
+                package: "@agentclientprotocol/claude-agent-acp@0.62.0",
                 cmd: "claude-agent-acp",
                 args: &[],
                 env: &[],
@@ -628,8 +628,8 @@ mod tests {
     fn registry_pins_current_acp_agent_versions() {
         assert_npx_version(
             AgentType::ClaudeCode,
-            "0.61.0",
-            "@agentclientprotocol/claude-agent-acp@0.61.0",
+            "0.62.0",
+            "@agentclientprotocol/claude-agent-acp@0.62.0",
             Some("22.0.0"),
         );
         assert_npx_version(
