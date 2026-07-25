@@ -1123,10 +1123,10 @@
   box-shadow: inset 0 0 0 1px var(--border);
 }
 
-/* 折叠态用户消息底部渐隐：遮罩内容本身而非叠加层，跟 .qa-marquee-viewport /
-   .browser-tab-label 同技术，天然适配纯色 bg-secondary 或开工作区背景图后的
-   半透明 ws-msg-secondary。不属于下面的 ws- 门控家族，始终生效。 */
-.collapsed-user-message-fade {
+/* 折叠态内容底部渐隐（会话用户消息、提交 tab 的提交信息…）：遮罩内容本身而非叠加层，跟
+   .qa-marquee-viewport / .browser-tab-label 同技术，天然适配纯色 bg-secondary 或开工作区
+   背景图后的半透明 ws-msg-secondary。不属于下面的 ws- 门控家族，始终生效。 */
+.collapsed-content-fade {
   -webkit-mask-image: linear-gradient(
     to bottom,
     #000 calc(100% - 2.5rem),

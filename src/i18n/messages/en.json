@@ -1832,6 +1832,8 @@
       "hash": "Hash",
       "copyHash": "Copy hash",
       "copyMessage": "Copy message",
+      "showMore": "Show more",
+      "showLess": "Show less",
       "author": "Author",
       "noFileChangeDetails": "No file change details available.",
       "loadingFiles": "Loading files...",

@@ -1832,6 +1832,8 @@
       "hash": "Hash del commit",
       "copyHash": "Copiar hash",
       "copyMessage": "Copiar mensaje",
+      "showMore": "Mostrar más",
+      "showLess": "Mostrar menos",
       "author": "Autor",
       "noFileChangeDetails": "No hay detalles de cambios de archivo disponibles.",
       "loadingFiles": "Cargando archivos...",

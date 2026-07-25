@@ -1832,6 +1832,8 @@
       "hash": "Hash",
       "copyHash": "复制哈希",
       "copyMessage": "复制提交消息",
+      "showMore": "展开",
+      "showLess": "收起",
       "author": "作者",
       "noFileChangeDetails": "暂无文件变更详情。",
       "loadingFiles": "正在加载文件…",

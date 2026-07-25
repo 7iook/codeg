@@ -1832,6 +1832,8 @@
       "hash": "Hash",
       "copyHash": "複製雜湊",
       "copyMessage": "複製提交訊息",
+      "showMore": "展開",
+      "showLess": "收合",
       "author": "作者",
       "noFileChangeDetails": "暫無檔案變更詳情。",
       "loadingFiles": "正在載入檔案…",

@@ -1832,6 +1832,8 @@
       "hash": "ハッシュ",
       "copyHash": "ハッシュをコピー",
       "copyMessage": "メッセージをコピー",
+      "showMore": "もっと見る",
+      "showLess": "折りたたむ",
       "author": "作成者",
       "noFileChangeDetails": "ファイル変更の詳細はありません。",
       "loadingFiles": "ファイルを読み込み中…",
