@@ -55,3 +55,15 @@ src-tauri/binaries/
 
 # pnpm local store (pnpm 11+)
 .pnpm-store/
+.ace-tool/
+
+# Git worktrees (local working copies; never commit)
+.worktrees/
+
+# Agent workspace: keep archived reports, drop transient logs/patches
+.agent-workspace/*
+!.agent-workspace/.archive/
+.agent-workspace/.archive/**/*.log
+
+# Session test leftovers
+2026-*-*.txt
