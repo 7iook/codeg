@@ -8744,6 +8744,31 @@ pub async fn acp_clear_binary_cache(agent_type: AgentType) -> Result<(), AcpErro
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Single admission point for every path that persists an agent's `env_json`.
+///
+/// Kiro's API key lives in that column, so writing it is a Kiro credential
+/// operation and must clear the same gate as its MCP config (R5.3). Desktop
+/// always passes; over HTTP the default is deny. Keyed on Kiro alone, so the
+/// other twelve agents are untouched (R5.5), and called BEFORE any write so a
+/// refusal leaves the stored settings exactly as they were (R5.4).
+///
+/// R5.1 asks for the decision to live at the read/write function-family layer
+/// rather than at each entry point. There are two parallel `_core` writers to
+/// this column (`acp_update_agent_env_core` and
+/// `acp_update_agent_preferences_core`) — a hand-copied check in each is how the
+/// preferences path came to be missed, so both funnel through here and any third
+/// writer inherits the gate by calling it.
+pub(crate) fn ensure_agent_env_write_allowed(agent_type: AgentType) -> Result<(), AcpError> {
+    if agent_type != AgentType::Kiro {
+        return Ok(());
+    }
+    crate::commands::mcp::ensure_kiro_credential_access(
+        crate::commands::mcp::KiroCredentialOp::WriteApiKey,
+    )
+    .map_err(|e| AcpError::protocol(e.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn acp_update_agent_preferences_core(
     agent_type: AgentType,
     enabled: bool,
@@ -8755,6 +8780,8 @@ pub(crate) async fn acp_update_agent_preferences_core(
     db: &AppDatabase,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
+    ensure_agent_env_write_allowed(agent_type)?;
+
     let default = agent_setting_service::AgentDefaultInput {
         agent_type,
         registry_id: registry::registry_id_for(agent_type).to_string(),
@@ -8885,17 +8912,9 @@ pub(crate) async fn acp_update_agent_env_core(
     db: &AppDatabase,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
-    // Kiro's API key lives in this env map, so writing it is a Kiro credential
-    // operation and goes through the same admission gate as its MCP config
-    // (R5.3). Desktop always passes; over HTTP the default is DENY. Keyed on
-    // Kiro alone, so the other 12 agents are untouched (R5.5). Placed before any
-    // write so a refusal leaves the stored settings exactly as they were (R5.4).
-    if agent_type == AgentType::Kiro {
-        crate::commands::mcp::ensure_kiro_credential_access(
-            crate::commands::mcp::KiroCredentialOp::WriteApiKey,
-        )
-        .map_err(|e| AcpError::protocol(e.to_string()))?;
-    }
+    // Funnelled through the shared admission point so every writer to this
+    // column inherits the same decision (see `ensure_agent_env_write_allowed`).
+    ensure_agent_env_write_allowed(agent_type)?;
 
     let default = agent_setting_service::AgentDefaultInput {
         agent_type,
@@ -10937,6 +10956,53 @@ mod tests {
         assert!(
             crate::acp::connection::KIRO_API_KEY_ENVS.contains(&"KIRO_API_KEY"),
             "the redaction list must cover the key the launch path injects"
+        );
+    }
+
+    /// EVERY writer to `agent_setting.env_json` must clear the admission gate.
+    ///
+    /// The gate was originally hand-copied into `acp_update_agent_env_core` only,
+    /// and `acp_update_agent_preferences_core` — a second, independently-routed
+    /// HTTP write path to the same column — was left open, so a LAN client could
+    /// POST a Kiro API key while the default policy denied it. Calling the gate
+    /// function directly (as the test above does) cannot catch an ungated caller,
+    /// which is why this test asserts on the SOURCE of every writer instead.
+    ///
+    /// If a third writer appears, add it to `WRITERS` and route it through
+    /// `ensure_agent_env_write_allowed`.
+    #[test]
+    fn every_env_json_writer_goes_through_the_admission_point() {
+        let source = include_str!("acp.rs");
+
+        const WRITERS: [&str; 2] = [
+            "pub(crate) async fn acp_update_agent_env_core(",
+            "pub(crate) async fn acp_update_agent_preferences_core(",
+        ];
+
+        for writer in WRITERS {
+            let start = source
+                .find(writer)
+                .unwrap_or_else(|| panic!("writer not found — was it renamed? {writer}"));
+            // The gate must be the FIRST thing the body does, before any
+            // `ensure_defaults` / `update` reaches the database (R5.4).
+            let body = &source[start..];
+            let gate = body
+                .find("ensure_agent_env_write_allowed(agent_type)?")
+                .unwrap_or_else(|| panic!("{writer} does not call the admission point"));
+            let first_write = body
+                .find("agent_setting_service::ensure_defaults")
+                .expect("writer should reach the settings service");
+            assert!(
+                gate < first_write,
+                "{writer} must gate BEFORE it touches the store"
+            );
+        }
+
+        // And the choke point must actually consult the credential gate rather
+        // than being a stub that returns Ok.
+        assert!(
+            source.contains("KiroCredentialOp::WriteApiKey"),
+            "the admission point must ask for the WriteApiKey decision"
         );
     }
 

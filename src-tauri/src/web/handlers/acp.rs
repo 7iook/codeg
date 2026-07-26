@@ -607,24 +607,29 @@ pub struct AcpUpdateAgentPreferencesParams {
     pub codex_config_toml: Option<String>,
 }
 
+/// Wrapped in `with_http_entry_point`: this is the SECOND write path to
+/// `env_json` (alongside `acp_update_agent_env`), so it carries Kiro's API key
+/// too and the gate must see that the request arrived over HTTP (R5.3 / R5.4).
 pub async fn acp_update_agent_preferences(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpUpdateAgentPreferencesParams>,
 ) -> Result<Json<usize>, AppCommandError> {
     let db = &state.db;
     let emitter = state.emitter.clone();
-    let affected = acp_commands::acp_update_agent_preferences_and_refresh(
-        params.agent_type,
-        params.enabled,
-        params.env,
-        params.config_json,
-        params.opencode_auth_json,
-        params.codex_auth_json,
-        params.codex_config_toml,
-        db,
-        &state.connection_manager,
-        &state.data_dir,
-        &emitter,
+    let affected = crate::commands::mcp::with_http_entry_point(
+        acp_commands::acp_update_agent_preferences_and_refresh(
+            params.agent_type,
+            params.enabled,
+            params.env,
+            params.config_json,
+            params.opencode_auth_json,
+            params.codex_auth_json,
+            params.codex_config_toml,
+            db,
+            &state.connection_manager,
+            &state.data_dir,
+            &emitter,
+        ),
     )
     .await
     .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
