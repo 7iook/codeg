@@ -333,13 +333,36 @@ function SubAgentSessionBody({
 
   // Single persisted-detail fetch on mount, always `preserveLive: true` so the
   // bridged/promoted reply is never wiped — the render-time projection above
-  // handles dedup against the persisted copy. No settle-time refetch: when the
-  // child finishes, `completeTurn` promotes its (complete) live reply into
-  // localTurns, which the projection keeps showing; replacing it from the DB
-  // would race the still-lagging transcript and could blank the reply.
+  // handles dedup against the persisted copy. No refetch on the live bridge's
+  // own settle edge: `completeTurn` promotes the (complete) live reply into
+  // localTurns and a DB refetch would race the still-lagging transcript. The
+  // ONE settle-time refetch is the session-update effect below, which covers
+  // rounds the bridge never saw — and stays `preserveLive` for the same
+  // reason.
   useEffect(() => {
     refetchDetail(childConversationId, { preserveLive: true })
   }, [childConversationId, refetchDetail])
+
+  // Settle-time transcript refresh for CONTINUED rounds: when a continuation
+  // of THIS child settles (`delegation_session_update` — the 2.8a replacement
+  // for the suppressed second completion), re-fetch the persisted detail.
+  // The live bridge only covers rounds whose connection events reach this
+  // dialog; a round it missed (user-origin settle, coalesced events) would
+  // otherwise stay frozen at the mount-time snapshot until reopen.
+  // `preserveLive: true` keeps any bridged reply, same as the mount fetch.
+  useAcpEvent(
+    useCallback(
+      (envelope) => {
+        if (
+          envelope.type === "delegation_session_update" &&
+          envelope.child_conversation_id === childConversationId
+        ) {
+          refetchDetail(childConversationId, { preserveLive: true })
+        }
+      },
+      [childConversationId, refetchDetail]
+    )
+  )
 
   // Reader only — its built-in auto-fetch is disabled; the effect above is
   // the sole fetch path. `detail.summary` is also the only place the child's

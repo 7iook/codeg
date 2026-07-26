@@ -86,9 +86,18 @@ pub trait DelegationEventEmitter: Send + Sync {
     /// routing ids — and consumers re-query `get_delegation_status` /
     /// the availability endpoint as the authoritative source (Requirement
     /// 8.4: the event is an increment notification, not a state carrier).
+    ///
+    /// `child_connection_id` is the fan-out fallback: USER-originated
+    /// continuations carry the synthetic `USER_ENTRY_CONNECTION_ID` as
+    /// `parent_connection_id`, which never resolves to a live connection —
+    /// without the fallback those turns settle with zero frontend push and
+    /// the sub-agent dialog (composer availability + transcript refresh)
+    /// only catches up on a remount.
+    #[allow(clippy::too_many_arguments)]
     async fn emit_session_update(
         &self,
         parent_connection_id: &str,
+        child_connection_id: &str,
         child_conversation_id: i32,
         task_id: &str,
         turn_id: &str,
@@ -134,6 +143,7 @@ impl DelegationEventEmitter for NoopEventEmitter {
     async fn emit_session_update(
         &self,
         _parent_connection_id: &str,
+        _child_connection_id: &str,
         _child_conversation_id: i32,
         _task_id: &str,
         _turn_id: &str,
@@ -226,17 +236,28 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
     async fn emit_session_update(
         &self,
         parent_connection_id: &str,
+        child_connection_id: &str,
         child_conversation_id: i32,
         task_id: &str,
         turn_id: &str,
         turn_version: u64,
         origin: TurnOrigin,
     ) {
-        let Some((state_arc, emitter)) = self
+        // Prefer the parent's stream (parent-agent-originated turns), fall
+        // back to the CHILD's own stream: user-originated turns carry a
+        // synthetic parent id that never resolves, but the event is
+        // child-addressed (`child_conversation_id`), so the child fan-out
+        // reaches the sub-agent dialog on the desktop firehose and on the
+        // child's attach stream in web mode alike. Both gone → no listener.
+        let resolved = match self
             .manager
             .get_state_and_emitter(parent_connection_id)
             .await
-        else {
+        {
+            Some(pair) => Some(pair),
+            None => self.manager.get_state_and_emitter(child_connection_id).await,
+        };
+        let Some((state_arc, emitter)) = resolved else {
             return;
         };
         emit_with_state(
@@ -295,6 +316,7 @@ pub mod mock {
     #[derive(Debug, Clone)]
     pub struct SessionUpdateCall {
         pub parent_connection_id: String,
+        pub child_connection_id: String,
         pub child_conversation_id: i32,
         pub task_id: String,
         pub turn_id: String,
@@ -378,6 +400,7 @@ pub mod mock {
         async fn emit_session_update(
             &self,
             parent_connection_id: &str,
+            child_connection_id: &str,
             child_conversation_id: i32,
             task_id: &str,
             turn_id: &str,
@@ -386,6 +409,7 @@ pub mod mock {
         ) {
             self.session_updates.lock().await.push(SessionUpdateCall {
                 parent_connection_id: parent_connection_id.to_string(),
+                child_connection_id: child_connection_id.to_string(),
                 child_conversation_id,
                 task_id: task_id.to_string(),
                 turn_id: turn_id.to_string(),
