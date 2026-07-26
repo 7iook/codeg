@@ -20,6 +20,7 @@
 | slug | 标题 | status | rounds | last review | related ADR | tags | 一句话 |
 |------|------|------|------|------|------|------|------|
 | [kiro-agent-integration](./kiro-agent-integration/design.md) | Kiro CLI 作为 ACP agent 接入 codeg · 设计 | converged | 3 | NEEDS_CHANGES | ADR-0001 | acp, agent-integration, kiro, mcp | 新增 SystemBinary 分布类型接入系统安装的 kiro-cli，复用 Cursor/Grok 的既有模式完成注册、会话解析、MCP 接管与启动参数注入。 |
+| [delegation-continue-session](./delegation-continue-session/design.md) | 委托子代理从一次性改为可续聊 + 用户侧交互入口 · 设计 | drafting | 0 | UNKNOWN | — | delegation, subagent, acp, lifecycle, broker | 拆掉 broker 的 one-shot 销毁让终态子会话保留可复用，对齐上游 PR |
 
 <!-- END AUTO-INDEX -->
 
