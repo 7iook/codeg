@@ -13,6 +13,7 @@ import {
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
+import { KiroMcpScopePanel } from "@/components/settings/kiro-mcp-scope-panel"
 import { Button } from "@/components/ui/button"
 import {
   ContextMenu,
@@ -1691,8 +1692,15 @@ export function McpSettings() {
           ) : null}
 
           {!selection ? (
-            <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
-              {t("selectLeftMcp")}
+            <div className="h-full min-h-0 space-y-4 overflow-auto">
+              <div className="text-sm text-muted-foreground">
+                {t("selectLeftMcp")}
+              </div>
+              {/* Kiro is the only agent that merges several scopes, and codeg
+               * writes just one of them — so the overlap has to be visible
+               * somewhere. The empty right pane is where it fits: this is a
+               * whole-config view, not a detail of the selected server. */}
+              <KiroMcpScopePanel />
             </div>
           ) : null}
         </section>

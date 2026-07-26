@@ -156,16 +156,16 @@ pnpm test   # 前端；基线 EXIT=0 / 218 files / 2728 tests 全绿
   显式拒绝 `<KIRO_HOME>/settings/` 与 `<KIRO_HOME>/agents/`
 - `<KIRO_HOME>` 解析：`KIRO_HOME` 环境变量优先，未设置则用户主目录 `.kiro`
 - ⚠️ **新测试必须用 `std::env::temp_dir()` 或 `cfg!(windows)` 分支**，
-  **不要照抄邻近测试的 `/tmp` 写法**（那 8 个已知失败就是这个原因）
+  **不要照抄邻近测试的 `/tmp` 写法**（上游 `df5ee401` 已修掉原先那 8 个同因失败并引入 `absolute_path()` 平台安全 helper）
 - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 4.1.6_
 - _Properties: P-2c_
 
 ### W0 验收
 
 - [ ] `cargo build --no-default-features` EXIT=0
-- [ ] `cargo test --no-default-features --lib` 失败集合 ⊆ 已知 8 项
-- [ ] `git grep -n "AgentType::Kiro" -- src-tauri/src` 命中数 ≥ 8
-- [ ] ADR-0001 翻 Accepted
+- [x] `cargo test --no-default-features --lib` 全绿 · EXIT=0（基线本就全绿 1673；上游 `df5ee401` 已修掉原先那 8 个 Windows `/tmp` fixture 失败。**不再用「失败集合 ⊆ 已知 N 项」判据**：基线红时那种写法允许新回归顶替旧失败而总数不变，门禁不可证伪）
+- [x] `git grep -n "AgentType::Kiro" -- src-tauri/src` 命中数 ≥ 8（实测 10 个文件）
+- [x] ADR-0001 翻 Accepted（`e7e02c6c`）
 
 ---
 
@@ -415,12 +415,18 @@ codeg 显式设置优先于继承的同名变量；认证失败呈现 Kiro 原�
 
 ## 全局收尾
 
-- [ ] 全波验收命令通过（失败集合 ⊆ 已知 8 项 / 前端全绿）
-- [ ] **变体再扫描**：`git grep -n "AgentType::Cursor" -- src-tauri/src` 得到 13 个文件的分布，
-      逐一核对 Kiro 是否也需要（Cursor 是最近新增的 agent，是最好的对照样本）
-- [ ] ADR-0001 翻 `Accepted`
-- [ ] `docs/specs/README.md`（本轮 bootstrap 生成，AUTO-INDEX 标记）与 charter 三件套一起提交
-- [ ] 提交时 `git add` 只加自己改的文件，**禁 `git add .` / `-A`**
+- [x] 全波验收命令通过（后端 1734 passed / 0 failed · EXIT=0；前端 222 files / 2784 tests 全绿；
+      `tsc --noEmit` 干净；clippy 零警告。⚠️ `pnpm eslint` 本机不可作门：`core.autocrlf=true`
+      导致全仓 ~215063 个 `Delete ␍`，与本任务改动无关）
+- [x] **变体再扫描**：已完成。对照 `AgentType::Cursor` 的 13 文件分布，Kiro 少 4 处且各有理由：
+      `acp/types.rs`（仅注释提及，非登记点）· `experts.rs`/`office_tools.rs`/`science.rs`/`custom_skills.rs`
+      的 `const ALL` 切片（四处均有 `skill_storage_spec(*a).is_some()` 过滤，Kiro 返 `None` 自动排除）
+      · `parsers/cursor.rs`（parser 自有文件，不适用）。另 `remote_registry.rs` 全仓不存在。
+      审查另抓出一处我漏的真实静默点：`conversations.rs` 的 `list_conversations_sync` 手写 tuple 表
+      漏 Kiro → 已修（`b798a513`，抽成 `build_parser_table()` + 对齐 `all_acp_agents()` 的防漂移门）
+- [x] ADR-0001 翻 `Accepted`（`e7e02c6c`）
+- [x] `docs/specs/README.md`（本轮 bootstrap 生成，AUTO-INDEX 标记）与 charter 三件套一起提交
+- [x] 提交时 `git add` 只加自己改的文件，**禁 `git add .` / `-A`**
       （工作区有一个不属于本任务的 `2026-07-25-204440-*.txt` 会话导出文件）
 - [ ] 改动索引过的项目 → `codegraph sync F:\codeg-research`
 

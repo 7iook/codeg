@@ -536,7 +536,27 @@
       "deployed": "배포됨",
       "notDeployed": "미배포"
     },
-    "selectLeftMcp": "왼쪽에서 MCP를 선택하세요."
+    "selectLeftMcp": "왼쪽에서 MCP를 선택하세요.",
+    "kiroScopes": {
+      "title": "Kiro MCP 범위",
+      "description": "Kiro는 세 가지 범위의 MCP 서버를 병합합니다. 이름이 같은 항목은 우선순위에 따라 덮어쓰이고, 이름이 다르면 모두 활성화됩니다. codeg는 세 범위를 모두 읽지만 전역 파일만 씁니다.",
+      "writeTarget": "codeg가 읽고 쓰는 파일",
+      "hotReload": "저장하면 다음 턴 경계에서 적용됩니다. Kiro가 `mcp.json`을 스스로 다시 불러오므로 실행 중인 세션을 재시작할 필요가 없습니다.",
+      "workspaceLabel": "프로젝트 범위",
+      "workspaceNone": "전역만 (프로젝트 미선택)",
+      "readOnly": "읽기 전용",
+      "shadowedBy": "다음 범위의 동일 이름 항목을 덮어씁니다: {scopes}",
+      "agentSource": "에이전트 `{name}` 출처",
+      "keysSet": "값은 숨겨졌습니다. 설정된 키: {keys}",
+      "empty": "어떤 범위에도 MCP 서버가 설정되지 않았습니다.",
+      "loadFailed": "범위를 읽지 못했습니다: {message}",
+      "scopeFailed": "이 범위의 파일을 파싱할 수 없어 항목이 적용되지 않았습니다:",
+      "scope": {
+        "agent": "에이전트",
+        "project": "프로젝트",
+        "global": "전역"
+      }
+    }
   },
   "AcpAgentSettings": {
     "title": "Agent SDK 관리",

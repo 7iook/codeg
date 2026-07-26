@@ -536,7 +536,27 @@
       "deployed": "デプロイ済み",
       "notDeployed": "未デプロイ"
     },
-    "selectLeftMcp": "左側でMCPを選択してください。"
+    "selectLeftMcp": "左側でMCPを選択してください。",
+    "kiroScopes": {
+      "title": "Kiro の MCP スコープ",
+      "description": "Kiro は 3 つのスコープの MCP サーバーをマージします。同名のエントリは優先順位で上書きされ、名前が異なるものはすべて有効になります。codeg は 3 つすべてを読み取り、グローバルファイルのみを書き込みます。",
+      "writeTarget": "codeg が読み書きするファイル",
+      "hotReload": "保存すると次のターン境界で反映されます。Kiro が自動で `mcp.json` を再読み込みするため、実行中のセッションを再起動する必要はありません。",
+      "workspaceLabel": "プロジェクトスコープ",
+      "workspaceNone": "グローバルのみ（プロジェクト未選択）",
+      "readOnly": "読み取り専用",
+      "shadowedBy": "次のスコープの同名エントリを上書きしています: {scopes}",
+      "agentSource": "エージェント `{name}` から",
+      "keysSet": "値は非表示です。設定されているキー: {keys}",
+      "empty": "どのスコープにも MCP サーバーが設定されていません。",
+      "loadFailed": "スコープを読み取れませんでした: {message}",
+      "scopeFailed": "このスコープのファイルを解析できないため、エントリが反映されていません:",
+      "scope": {
+        "agent": "エージェント",
+        "project": "プロジェクト",
+        "global": "グローバル"
+      }
+    }
   },
   "AcpAgentSettings": {
     "title": "Agent SDK 管理",

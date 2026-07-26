@@ -536,7 +536,27 @@
       "deployed": "Deployed",
       "notDeployed": "Not Deployed"
     },
-    "selectLeftMcp": "Select an MCP on the left."
+    "selectLeftMcp": "Select an MCP on the left.",
+    "kiroScopes": {
+      "title": "Kiro MCP scopes",
+      "description": "Kiro merges MCP servers from three scopes. Same-name entries override by precedence; different names all stay active. codeg reads all three and writes only the global file.",
+      "writeTarget": "codeg reads and writes",
+      "hotReload": "Saving takes effect at the next turn boundary. Kiro reloads `mcp.json` on its own, so there is no need to restart a running session.",
+      "workspaceLabel": "Project scope",
+      "workspaceNone": "Global only (no project selected)",
+      "readOnly": "Read-only",
+      "shadowedBy": "Overrides the entry in: {scopes}",
+      "agentSource": "From agent `{name}`",
+      "keysSet": "Values hidden. Keys set: {keys}",
+      "empty": "No MCP servers configured in any scope.",
+      "loadFailed": "Could not read the scopes: {message}",
+      "scopeFailed": "This scope's file did not parse, so its entries are missing:",
+      "scope": {
+        "agent": "Agent",
+        "project": "Project",
+        "global": "Global"
+      }
+    }
   },
   "AcpAgentSettings": {
     "title": "Agent SDK Management",

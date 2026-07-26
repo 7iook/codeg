@@ -536,7 +536,27 @@
       "deployed": "已部署",
       "notDeployed": "未部署"
     },
-    "selectLeftMcp": "请选择左侧 MCP。"
+    "selectLeftMcp": "请选择左侧 MCP。",
+    "kiroScopes": {
+      "title": "Kiro MCP 作用域",
+      "description": "Kiro 会合并三个作用域的 MCP server：同名条目按优先级覆盖，不同名的全部生效。codeg 读取三个作用域，但只写全局文件。",
+      "writeTarget": "codeg 读写的文件",
+      "hotReload": "保存后在下一个轮次边界生效。Kiro 会自行重新加载 `mcp.json`，无需重启正在运行的会话。",
+      "workspaceLabel": "项目作用域",
+      "workspaceNone": "仅全局（未选择项目）",
+      "readOnly": "只读",
+      "shadowedBy": "覆盖了这些作用域中的同名条目：{scopes}",
+      "agentSource": "来自 agent `{name}`",
+      "keysSet": "已隐藏值。已设置的键：{keys}",
+      "empty": "三个作用域中都没有配置 MCP server。",
+      "loadFailed": "读取作用域失败：{message}",
+      "scopeFailed": "该作用域的文件解析失败，其中的条目未生效：",
+      "scope": {
+        "agent": "Agent",
+        "project": "项目",
+        "global": "全局"
+      }
+    }
   },
   "AcpAgentSettings": {
     "title": "Agent SDK管理",

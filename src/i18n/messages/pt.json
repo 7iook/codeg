@@ -536,7 +536,27 @@
       "deployed": "Implantado",
       "notDeployed": "Não implantado"
     },
-    "selectLeftMcp": "Selecione um MCP à esquerda."
+    "selectLeftMcp": "Selecione um MCP à esquerda.",
+    "kiroScopes": {
+      "title": "Escopos MCP do Kiro",
+      "description": "O Kiro combina servidores MCP de três escopos. Entradas com o mesmo nome são sobrescritas por precedência; nomes diferentes permanecem todos ativos. O codeg lê os três e grava apenas o arquivo global.",
+      "writeTarget": "o codeg lê e grava",
+      "hotReload": "Salvar tem efeito no próximo limite de turno. O Kiro recarrega o `mcp.json` por conta própria, então não é preciso reiniciar uma sessão em andamento.",
+      "workspaceLabel": "Escopo do projeto",
+      "workspaceNone": "Apenas global (nenhum projeto selecionado)",
+      "readOnly": "Somente leitura",
+      "shadowedBy": "Sobrescreve a entrada de: {scopes}",
+      "agentSource": "Do agente `{name}`",
+      "keysSet": "Valores ocultos. Chaves definidas: {keys}",
+      "empty": "Nenhum servidor MCP configurado em nenhum escopo.",
+      "loadFailed": "Não foi possível ler os escopos: {message}",
+      "scopeFailed": "O arquivo deste escopo não foi analisado, portanto suas entradas estão ausentes:",
+      "scope": {
+        "agent": "Agente",
+        "project": "Projeto",
+        "global": "Global"
+      }
+    }
   },
   "AcpAgentSettings": {
     "title": "Gerenciamento do SDK de agentes",

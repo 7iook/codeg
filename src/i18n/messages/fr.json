@@ -536,7 +536,27 @@
       "deployed": "Déployé",
       "notDeployed": "Non déployé"
     },
-    "selectLeftMcp": "Sélectionnez un MCP à gauche."
+    "selectLeftMcp": "Sélectionnez un MCP à gauche.",
+    "kiroScopes": {
+      "title": "Portées MCP de Kiro",
+      "description": "Kiro fusionne les serveurs MCP de trois portées. Les entrées de même nom sont remplacées par ordre de priorité ; les noms différents restent tous actifs. codeg lit les trois et n'écrit que le fichier global.",
+      "writeTarget": "codeg lit et écrit",
+      "hotReload": "L'enregistrement prend effet à la prochaine limite de tour. Kiro recharge `mcp.json` de lui-même : inutile de redémarrer une session en cours.",
+      "workspaceLabel": "Portée du projet",
+      "workspaceNone": "Global uniquement (aucun projet sélectionné)",
+      "readOnly": "Lecture seule",
+      "shadowedBy": "Remplace l'entrée de : {scopes}",
+      "agentSource": "De l'agent `{name}`",
+      "keysSet": "Valeurs masquées. Clés définies : {keys}",
+      "empty": "Aucun serveur MCP configuré dans aucune portée.",
+      "loadFailed": "Impossible de lire les portées : {message}",
+      "scopeFailed": "Le fichier de cette portée n'a pas pu être analysé, ses entrées sont donc absentes :",
+      "scope": {
+        "agent": "Agent",
+        "project": "Projet",
+        "global": "Global"
+      }
+    }
   },
   "AcpAgentSettings": {
     "title": "Gestion du SDK des agents",

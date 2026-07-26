@@ -3350,9 +3350,13 @@ fn remove_cursor_server_at(path: &Path, id: &str) -> Result<bool, AppCommandErro
 // definition, which also carries `prompt` / `tools` / `hooks` and whose scope
 // semantics are "override for this agent", not "this agent's server list".
 //
-// Because Kiro loads these files natively at launch, `Kiro` is on the ACP
+// Because Kiro owns the lifecycle of these servers itself, `Kiro` is on the ACP
 // forward skip list in `connection.rs` (like Hermes/Kimi/Grok/Cursor) so the
-// same servers aren't double-registered over `session/new`.
+// same servers aren't double-registered over `session/new`. It does not merely
+// read them at startup: a file watcher on `mcp.json` and the `.kiro/agents`
+// directories reconciles running servers at the next idle boundary (between
+// turns) without restarting the session, so a write here reaches a live session
+// on its own — which is also why the panel tells the user not to restart.
 //
 // Entry shape (per the docs): local = `command` + optional `args`/`env`;
 // remote = `url` + optional `headers`/`oauth`/`oauthScopes`. Both may carry

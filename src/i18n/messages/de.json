@@ -536,7 +536,27 @@
       "deployed": "Bereitgestellt",
       "notDeployed": "Nicht bereitgestellt"
     },
-    "selectLeftMcp": "Wähle links ein MCP aus."
+    "selectLeftMcp": "Wähle links ein MCP aus.",
+    "kiroScopes": {
+      "title": "Kiro-MCP-Bereiche",
+      "description": "Kiro führt MCP-Server aus drei Bereichen zusammen. Einträge mit gleichem Namen werden nach Vorrang überschrieben; unterschiedliche Namen bleiben alle aktiv. codeg liest alle drei und schreibt nur die globale Datei.",
+      "writeTarget": "codeg liest und schreibt",
+      "hotReload": "Das Speichern wird an der nächsten Zuggrenze wirksam. Kiro lädt `mcp.json` selbst neu, ein Neustart einer laufenden Sitzung ist nicht nötig.",
+      "workspaceLabel": "Projektbereich",
+      "workspaceNone": "Nur global (kein Projekt ausgewählt)",
+      "readOnly": "Nur lesen",
+      "shadowedBy": "Überschreibt den Eintrag in: {scopes}",
+      "agentSource": "Von Agent `{name}`",
+      "keysSet": "Werte verborgen. Gesetzte Schlüssel: {keys}",
+      "empty": "In keinem Bereich sind MCP-Server konfiguriert.",
+      "loadFailed": "Die Bereiche konnten nicht gelesen werden: {message}",
+      "scopeFailed": "Die Datei dieses Bereichs ließ sich nicht parsen, daher fehlen ihre Einträge:",
+      "scope": {
+        "agent": "Agent",
+        "project": "Projekt",
+        "global": "Global"
+      }
+    }
   },
   "AcpAgentSettings": {
     "title": "Agent SDK-Verwaltung",
