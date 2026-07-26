@@ -160,6 +160,10 @@ pub fn build_router(
             post(handlers::conversations::update_conversation_pinned),
         )
         .route(
+            "/conversation_session_file",
+            post(handlers::conversations::conversation_session_file),
+        )
+        .route(
             "/delete_conversation",
             post(handlers::conversations::delete_conversation),
         )

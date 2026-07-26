@@ -1565,7 +1565,11 @@
       "subsessionBadge": "فرعية",
       "subsessionBadgeTitle": "جلسة فرعية مفوّضة من محادثة رئيسية",
       "subsessionCountLabel": "{count} فرعية",
-      "subsessionCountHint": "يحتوي على {count} جلسات فرعية مفوّضة — فعّل «إظهار الجلسات الفرعية المفوّضة» في خيارات العرض لتوسيعها."
+      "subsessionCountHint": "يحتوي على {count} جلسات فرعية مفوّضة — فعّل «إظهار الجلسات الفرعية المفوّضة» في خيارات العرض لتوسيعها.",
+      "copySessionId": "نسخ معرّف الجلسة",
+      "copyResumeCommand": "نسخ أمر الاستئناف",
+      "copySessionFilePath": "نسخ مسار ملف الجلسة",
+      "revealSessionFile": "إظهار ملف الجلسة"
     },
     "search": {
       "dialogTitle": "بحث",

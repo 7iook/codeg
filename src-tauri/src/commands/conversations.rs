@@ -1817,6 +1817,40 @@ pub async fn update_conversation_title(
     Ok(())
 }
 
+/// Locate the on-disk transcript file backing a conversation, by its
+/// `(agent_type, external_id)` session identity. First tier: Claude Code only
+/// (its parser already exposes a session-file scan, and delegation
+/// sub-sessions are Claude children too); other agents answer `None` and the
+/// UI hides the file actions. Extend per parser as locate functions land.
+pub async fn conversation_session_file_core(
+    conn: &sea_orm::DatabaseConnection,
+    conversation_id: i32,
+) -> Result<Option<String>, AppCommandError> {
+    let Some(summary) = conversation_service::get_by_id_optional(conn, conversation_id)
+        .await
+        .map_err(AppCommandError::from)?
+    else {
+        return Ok(None);
+    };
+    let Some(external_id) = summary.external_id.as_deref() else {
+        return Ok(None);
+    };
+    if summary.agent_type != crate::models::AgentType::ClaudeCode {
+        return Ok(None);
+    }
+    Ok(crate::parsers::claude::find_session_file(external_id)
+        .map(|p| p.to_string_lossy().into_owned()))
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn conversation_session_file(
+    db: tauri::State<'_, AppDatabase>,
+    conversation_id: i32,
+) -> Result<Option<String>, AppCommandError> {
+    conversation_session_file_core(&db.conn, conversation_id).await
+}
+
 pub async fn update_conversation_pinned_core(
     conn: &sea_orm::DatabaseConnection,
     conversation_id: i32,

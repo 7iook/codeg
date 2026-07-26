@@ -1565,7 +1565,11 @@
       "subsessionBadge": "Sub",
       "subsessionBadgeTitle": "Subsesión delegada de una conversación principal",
       "subsessionCountLabel": "{count} sub",
-      "subsessionCountHint": "Tiene {count} subsesiones delegadas: activa «Mostrar subsesiones delegadas» en las opciones de vista para desplegarlas."
+      "subsessionCountHint": "Tiene {count} subsesiones delegadas: activa «Mostrar subsesiones delegadas» en las opciones de vista para desplegarlas.",
+      "copySessionId": "Copiar ID de sesión",
+      "copyResumeCommand": "Copiar comando de reanudación",
+      "copySessionFilePath": "Copiar ruta del archivo de sesión",
+      "revealSessionFile": "Mostrar archivo de sesión"
     },
     "search": {
       "dialogTitle": "Buscar",

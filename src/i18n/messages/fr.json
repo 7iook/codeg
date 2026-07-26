@@ -1565,7 +1565,11 @@
       "subsessionBadge": "Sous",
       "subsessionBadgeTitle": "Sous-session déléguée d'une conversation parente",
       "subsessionCountLabel": "{count} sous",
-      "subsessionCountHint": "Contient {count} sous-sessions déléguées — activez « Afficher les sous-sessions déléguées » dans les options d'affichage pour les déplier."
+      "subsessionCountHint": "Contient {count} sous-sessions déléguées — activez « Afficher les sous-sessions déléguées » dans les options d'affichage pour les déplier.",
+      "copySessionId": "Copier l'ID de session",
+      "copyResumeCommand": "Copier la commande de reprise",
+      "copySessionFilePath": "Copier le chemin du fichier de session",
+      "revealSessionFile": "Afficher le fichier de session"
     },
     "search": {
       "dialogTitle": "Rechercher",

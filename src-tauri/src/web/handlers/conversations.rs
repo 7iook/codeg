@@ -341,6 +341,22 @@ pub async fn update_conversation_pinned(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationSessionFileParams {
+    pub conversation_id: i32,
+}
+
+pub async fn conversation_session_file(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<ConversationSessionFileParams>,
+) -> Result<Json<Option<String>>, AppCommandError> {
+    let path =
+        conv_commands::conversation_session_file_core(&state.db.conn, params.conversation_id)
+            .await?;
+    Ok(Json(path))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeleteConversationParams {
     pub conversation_id: i32,
 }

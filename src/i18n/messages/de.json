@@ -1565,7 +1565,11 @@
       "subsessionBadge": "Sub",
       "subsessionBadgeTitle": "Delegierte Untersitzung einer übergeordneten Konversation",
       "subsessionCountLabel": "{count} Sub",
-      "subsessionCountHint": "Enthält {count} delegierte Untersitzungen — aktiviere „Delegierte Untersitzungen anzeigen“ in den Ansichtsoptionen, um sie aufzuklappen."
+      "subsessionCountHint": "Enthält {count} delegierte Untersitzungen — aktiviere „Delegierte Untersitzungen anzeigen“ in den Ansichtsoptionen, um sie aufzuklappen.",
+      "copySessionId": "Sitzungs-ID kopieren",
+      "copyResumeCommand": "Fortsetzungsbefehl kopieren",
+      "copySessionFilePath": "Sitzungsdateipfad kopieren",
+      "revealSessionFile": "Sitzungsdatei anzeigen"
     },
     "search": {
       "dialogTitle": "Suchen",

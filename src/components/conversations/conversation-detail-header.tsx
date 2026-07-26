@@ -2,23 +2,31 @@
 
 import { memo, useCallback, useState } from "react"
 import {
+  Check,
   ChevronRight,
   Circle,
+  Copy,
   EllipsisVertical,
+  FileText,
+  FolderOpen,
   Info,
   Pencil,
   Pin,
   PinOff,
   SquarePen,
+  Terminal,
   Trash2,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
 import {
+  conversationSessionFile,
   deleteConversation,
   updateConversationPinned,
   updateConversationStatus,
   updateConversationTitle,
 } from "@/lib/api"
+import { getAgentResumeCommand } from "@/lib/agent-resume-command"
+import { isDesktop, revealItemInDir } from "@/lib/platform"
 import { formatConversationTitle } from "@/lib/conversation-title"
 import { ConversationHeaderFolderPicker } from "@/components/chat/conversation-context-bar"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
@@ -146,6 +154,69 @@ export const ConversationDetailHeader = memo(function ConversationDetailHeader({
   const displayTitle =
     formatConversationTitle(title) || t("untitledConversation")
 
+  // Agent session identity for the id badge + copy actions. Narrow primitive
+  // selectors (mirrors the pinned_at read above) so streaming never re-renders
+  // the header.
+  const externalId = useAppWorkspaceStore(
+    (s) =>
+      (conversationId != null &&
+        s.conversations.find((c) => c.id === conversationId)?.external_id) ||
+      null
+  )
+  const agentType = useAppWorkspaceStore(
+    (s) =>
+      (conversationId != null &&
+        s.conversations.find((c) => c.id === conversationId)?.agent_type) ||
+      null
+  )
+  const resumeCommand =
+    agentType != null ? getAgentResumeCommand(agentType, externalId) : null
+
+  // Which copy action last succeeded (badge check-mark feedback), reset after
+  // a beat. Values: "id" | "resume" | "path".
+  const [copied, setCopied] = useState<string | null>(null)
+  const copyText = useCallback((text: string, kind: string) => {
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(kind)
+        setTimeout(() => setCopied((c) => (c === kind ? null : c)), 1500)
+      })
+      .catch((err) => {
+        console.error("[ConversationDetailHeader] copy:", err)
+      })
+  }, [])
+
+  const handleCopySessionId = useCallback(() => {
+    if (externalId) copyText(externalId, "id")
+  }, [externalId, copyText])
+
+  const handleCopyResumeCommand = useCallback(() => {
+    if (resumeCommand) copyText(resumeCommand, "resume")
+  }, [resumeCommand, copyText])
+
+  const handleCopySessionFilePath = useCallback(() => {
+    if (conversationId == null) return
+    conversationSessionFile(conversationId)
+      .then((path) => {
+        if (path) copyText(path, "path")
+      })
+      .catch((err) => {
+        console.error("[ConversationDetailHeader] session file path:", err)
+      })
+  }, [conversationId, copyText])
+
+  const handleRevealSessionFile = useCallback(() => {
+    if (conversationId == null) return
+    conversationSessionFile(conversationId)
+      .then((path) => {
+        if (path) return revealItemInDir(path)
+      })
+      .catch((err) => {
+        console.error("[ConversationDetailHeader] reveal session file:", err)
+      })
+  }, [conversationId])
+
   const handleTogglePin = useCallback(() => {
     if (conversationId == null) return
     const next = !isPinned
@@ -256,6 +327,22 @@ export const ConversationDetailHeader = memo(function ConversationDetailHeader({
         >
           {displayTitle}
         </span>
+        {externalId && (
+          <button
+            type="button"
+            onClick={handleCopySessionId}
+            className="flex shrink-0 items-center gap-1 rounded border border-border/50 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground transition-colors hover:text-foreground"
+            title={externalId}
+            aria-label={t("copySessionId")}
+          >
+            {copied === "id" ? (
+              <Check className="h-3 w-3" />
+            ) : (
+              <Copy className="h-3 w-3" />
+            )}
+            {externalId.slice(0, 8)}
+          </button>
+        )}
       </div>
       <div className="flex shrink-0 items-center">
         <DropdownMenu>
@@ -297,6 +384,37 @@ export const ConversationDetailHeader = memo(function ConversationDetailHeader({
               <Info className="h-4 w-4" />
               {tDetails("menuLabel")}
             </DropdownMenuItem>
+            {externalId && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={handleCopySessionId}>
+                  <Copy className="h-4 w-4" />
+                  {t("copySessionId")}
+                </DropdownMenuItem>
+                {resumeCommand && (
+                  <DropdownMenuItem onSelect={handleCopyResumeCommand}>
+                    <Terminal className="h-4 w-4" />
+                    {t("copyResumeCommand")}
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  disabled={!persisted}
+                  onSelect={handleCopySessionFilePath}
+                >
+                  <FileText className="h-4 w-4" />
+                  {t("copySessionFilePath")}
+                </DropdownMenuItem>
+                {isDesktop() && (
+                  <DropdownMenuItem
+                    disabled={!persisted}
+                    onSelect={handleRevealSessionFile}
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    {t("revealSessionFile")}
+                  </DropdownMenuItem>
+                )}
+              </>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuSub>
               <DropdownMenuSubTrigger disabled={!persisted}>

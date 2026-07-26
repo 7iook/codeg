@@ -1565,7 +1565,11 @@
       "subsessionBadge": "Sub",
       "subsessionBadgeTitle": "Delegated sub-session of a parent conversation",
       "subsessionCountLabel": "{count} sub",
-      "subsessionCountHint": "Has {count} delegated sub-sessions — enable \"Show delegated sub-sessions\" in the view options to expand them."
+      "subsessionCountHint": "Has {count} delegated sub-sessions — enable \"Show delegated sub-sessions\" in the view options to expand them.",
+      "copySessionId": "Copy session ID",
+      "copyResumeCommand": "Copy resume command",
+      "copySessionFilePath": "Copy session file path",
+      "revealSessionFile": "Show session file"
     },
     "search": {
       "dialogTitle": "Search",

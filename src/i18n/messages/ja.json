@@ -1565,7 +1565,11 @@
       "subsessionBadge": "子",
       "subsessionBadgeTitle": "親会話から委任されたサブセッション",
       "subsessionCountLabel": "子 {count}",
-      "subsessionCountHint": "委任サブセッションが {count} 件あります —— 表示オプションで「委任サブセッションを表示」を有効にすると展開できます。"
+      "subsessionCountHint": "委任サブセッションが {count} 件あります —— 表示オプションで「委任サブセッションを表示」を有効にすると展開できます。",
+      "copySessionId": "セッション ID をコピー",
+      "copyResumeCommand": "再開コマンドをコピー",
+      "copySessionFilePath": "セッションファイルのパスをコピー",
+      "revealSessionFile": "セッションファイルを表示"
     },
     "search": {
       "dialogTitle": "検索",

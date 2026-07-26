@@ -1565,7 +1565,11 @@
       "subsessionBadge": "子會話",
       "subsessionBadgeTitle": "由主會話委派產生的子會話",
       "subsessionCountLabel": "{count} 子",
-      "subsessionCountHint": "含 {count} 個委派子會話 —— 在顯示選項裡勾選「顯示委派子會話」即可展開。"
+      "subsessionCountHint": "含 {count} 個委派子會話 —— 在顯示選項裡勾選「顯示委派子會話」即可展開。",
+      "copySessionId": "複製會話 ID",
+      "copyResumeCommand": "複製恢復命令",
+      "copySessionFilePath": "複製會話檔案路徑",
+      "revealSessionFile": "顯示會話檔案"
     },
     "search": {
       "dialogTitle": "搜尋",

@@ -2249,6 +2249,17 @@ export async function updateConversationPinned(
   })
 }
 
+/** Absolute path of the transcript file backing this conversation, or null
+ *  when the agent's parser has no locate support yet (UI hides the file
+ *  actions). First tier: Claude Code sessions (incl. delegation children). */
+export async function conversationSessionFile(
+  conversationId: number
+): Promise<string | null> {
+  return getTransport().call("conversation_session_file", {
+    conversationId,
+  })
+}
+
 export async function deleteConversation(
   conversationId: number
 ): Promise<void> {

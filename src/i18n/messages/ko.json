@@ -1565,7 +1565,11 @@
       "subsessionBadge": "하위",
       "subsessionBadgeTitle": "상위 대화가 위임해 생성한 하위 세션",
       "subsessionCountLabel": "하위 {count}",
-      "subsessionCountHint": "위임 하위 세션 {count}개가 있습니다 —— 보기 옵션에서 '위임 하위 세션 표시'를 켜면 펼칠 수 있습니다."
+      "subsessionCountHint": "위임 하위 세션 {count}개가 있습니다 —— 보기 옵션에서 '위임 하위 세션 표시'를 켜면 펼칠 수 있습니다.",
+      "copySessionId": "세션 ID 복사",
+      "copyResumeCommand": "재개 명령 복사",
+      "copySessionFilePath": "세션 파일 경로 복사",
+      "revealSessionFile": "세션 파일 표시"
     },
     "search": {
       "dialogTitle": "검색",
