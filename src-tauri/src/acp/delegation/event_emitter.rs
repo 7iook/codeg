@@ -33,6 +33,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
+use crate::acp::delegation::broker::TurnOrigin;
 use crate::acp::manager::ConnectionManager;
 use crate::acp::types::{AcpEvent, DelegationResultSummary};
 use crate::models::AgentType;
@@ -77,6 +78,23 @@ pub trait DelegationEventEmitter: Send + Sync {
         agent_type: AgentType,
         result: DelegationResultSummary,
     );
+
+    /// Publish the session-scoped `AcpEvent::DelegationSessionUpdate` for a
+    /// settled CONTINUED turn (turn_version > 1). Replaces the suppressed
+    /// second `DelegationCompleted` (Requirement 2.8a): the payload is
+    /// session-addressed — `(task_id, turn_id, turn_version, origin)` plus
+    /// routing ids — and consumers re-query `get_delegation_status` /
+    /// the availability endpoint as the authoritative source (Requirement
+    /// 8.4: the event is an increment notification, not a state carrier).
+    async fn emit_session_update(
+        &self,
+        parent_connection_id: &str,
+        child_conversation_id: i32,
+        task_id: &str,
+        turn_id: &str,
+        turn_version: u64,
+        origin: TurnOrigin,
+    );
 }
 
 /// Default emitter used when the broker is constructed via the short-form
@@ -110,6 +128,17 @@ impl DelegationEventEmitter for NoopEventEmitter {
         _child_conversation_id: i32,
         _agent_type: AgentType,
         _result: DelegationResultSummary,
+    ) {
+    }
+
+    async fn emit_session_update(
+        &self,
+        _parent_connection_id: &str,
+        _child_conversation_id: i32,
+        _task_id: &str,
+        _turn_id: &str,
+        _turn_version: u64,
+        _origin: TurnOrigin,
     ) {
     }
 }
@@ -193,6 +222,37 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
         )
         .await;
     }
+
+    async fn emit_session_update(
+        &self,
+        parent_connection_id: &str,
+        child_conversation_id: i32,
+        task_id: &str,
+        turn_id: &str,
+        turn_version: u64,
+        origin: TurnOrigin,
+    ) {
+        let Some((state_arc, emitter)) = self
+            .manager
+            .get_state_and_emitter(parent_connection_id)
+            .await
+        else {
+            return;
+        };
+        emit_with_state(
+            &state_arc,
+            &emitter,
+            AcpEvent::DelegationSessionUpdate {
+                parent_connection_id: parent_connection_id.to_string(),
+                child_conversation_id,
+                task_id: task_id.to_string(),
+                turn_id: turn_id.to_string(),
+                turn_version,
+                origin,
+            },
+        )
+        .await;
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -208,6 +268,7 @@ pub mod mock {
     pub struct MockEventEmitter {
         pub calls: Mutex<Vec<EmitCall>>,
         pub started_calls: Mutex<Vec<EmitStartedCall>>,
+        pub session_updates: Mutex<Vec<SessionUpdateCall>>,
     }
 
     #[derive(Debug, Clone)]
@@ -231,6 +292,16 @@ pub mod mock {
         pub task_id: String,
     }
 
+    #[derive(Debug, Clone)]
+    pub struct SessionUpdateCall {
+        pub parent_connection_id: String,
+        pub child_conversation_id: i32,
+        pub task_id: String,
+        pub turn_id: String,
+        pub turn_version: u64,
+        pub origin: TurnOrigin,
+    }
+
     impl MockEventEmitter {
         pub fn new() -> Self {
             Self::default()
@@ -250,6 +321,14 @@ pub mod mock {
 
         pub async fn started_count(&self) -> usize {
             self.started_calls.lock().await.len()
+        }
+
+        pub async fn session_update_snapshot(&self) -> Vec<SessionUpdateCall> {
+            self.session_updates.lock().await.clone()
+        }
+
+        pub async fn session_update_count(&self) -> usize {
+            self.session_updates.lock().await.len()
         }
     }
 
@@ -293,6 +372,25 @@ pub mod mock {
                 child_conversation_id,
                 agent_type,
                 result,
+            });
+        }
+
+        async fn emit_session_update(
+            &self,
+            parent_connection_id: &str,
+            child_conversation_id: i32,
+            task_id: &str,
+            turn_id: &str,
+            turn_version: u64,
+            origin: TurnOrigin,
+        ) {
+            self.session_updates.lock().await.push(SessionUpdateCall {
+                parent_connection_id: parent_connection_id.to_string(),
+                child_conversation_id,
+                task_id: task_id.to_string(),
+                turn_id: turn_id.to_string(),
+                turn_version,
+                origin,
             });
         }
     }
