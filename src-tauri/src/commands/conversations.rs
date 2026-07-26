@@ -158,17 +158,15 @@ pub async fn save_opened_tabs(
     .await
 }
 
-/// Synchronous implementation shared by list_conversations, list_folders, and get_stats.
-fn list_conversations_sync(
-    agent_type: Option<AgentType>,
-    search: Option<String>,
-    sort_by: Option<String>,
-    folder_path: Option<String>,
-) -> Vec<ConversationSummary> {
-    let mut all_conversations = Vec::new();
-    let mut seen_keys = HashSet::new();
-
-    let parsers: Vec<(AgentType, Box<dyn AgentParser>)> = vec![
+/// Every locally-parsable agent paired with its parser, in listing order.
+///
+/// Hand-written, and an omission here is SILENT: the missing agent's sessions
+/// still open through `get_conversation` but never appear in the sidebar, the
+/// stats, the folder list, or the import scan. `parser_table_agent_types` +
+/// `every_registered_agent_has_a_parser_in_the_listing_table` pin it against
+/// `all_acp_agents()` so the next addition fails a test instead.
+fn build_parser_table() -> Vec<(AgentType, Box<dyn AgentParser>)> {
+    vec![
         (AgentType::ClaudeCode, Box::new(ClaudeParser::new())),
         (AgentType::Codex, Box::new(CodexParser::new())),
         (AgentType::OpenCode, Box::new(OpenCodeParser::new())),
@@ -181,7 +179,28 @@ fn list_conversations_sync(
         (AgentType::Pi, Box::new(PiParser::new())),
         (AgentType::Grok, Box::new(GrokParser::new())),
         (AgentType::Cursor, Box::new(CursorParser::new())),
-    ];
+        (AgentType::Kiro, Box::new(KiroParser::new())),
+    ]
+}
+
+/// The agent types `build_parser_table` covers. Reads the real table rather
+/// than a second hand-maintained list, so it cannot drift from it.
+#[cfg(test)]
+fn parser_table_agent_types() -> Vec<AgentType> {
+    build_parser_table().into_iter().map(|(at, _)| at).collect()
+}
+
+/// Synchronous implementation shared by list_conversations, list_folders, and get_stats.
+fn list_conversations_sync(
+    agent_type: Option<AgentType>,
+    search: Option<String>,
+    sort_by: Option<String>,
+    folder_path: Option<String>,
+) -> Vec<ConversationSummary> {
+    let mut all_conversations = Vec::new();
+    let mut seen_keys = HashSet::new();
+
+    let parsers: Vec<(AgentType, Box<dyn AgentParser>)> = build_parser_table();
 
     for (at, parser) in &parsers {
         if let Some(ref filter) = agent_type {
@@ -1944,6 +1963,34 @@ fn parse_error_to_app_error(error: ParseError) -> AppCommandError {
 mod tests {
     use super::*;
     use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+
+    /// `list_conversations_sync` builds its parser table as a hand-written
+    /// `vec![]`, so an agent missing from it is a SILENT omission: the agent's
+    /// sessions still open fine through `get_conversation`, but they never appear
+    /// in the sidebar, the stats, the folder list, or the import scan — with no
+    /// compile error and no runtime error anywhere.
+    ///
+    /// Kiro shipped omitted from exactly this list and it was caught in review,
+    /// not by the suite. Pinning the count against the registry means the next
+    /// agent fails here instead.
+    #[test]
+    fn every_registered_agent_has_a_parser_in_the_listing_table() {
+        let registered = crate::acp::registry::all_acp_agents();
+        let listed = parser_table_agent_types();
+
+        for agent_type in &registered {
+            assert!(
+                listed.contains(agent_type),
+                "{agent_type:?} is missing from list_conversations_sync's parser table — \
+                 its conversations would silently never appear in any listing"
+            );
+        }
+        assert_eq!(
+            listed.len(),
+            registered.len(),
+            "parser table and registry disagree: {listed:?} vs {registered:?}"
+        );
+    }
 
     // ──────────────────────────────────────────────────────────────────────
     // Delegation meta injection for historical reload. Parsers always emit
