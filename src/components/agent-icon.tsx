@@ -381,6 +381,30 @@ const CursorMonoIcon = memo(function CursorMonoIcon({
   )
 })
 
+const KiroColorIcon = memo(function KiroColorIcon({ size = "1em" }: IconProps) {
+  // Kiro's mark is a ghost, drawn white on the Kiro Purple squircle (#9046FF,
+  // the brand's COLOR_PRIMARY). Hand-authored here rather than pulled from a
+  // remote asset: dome head, scalloped hem, two eyes.
+  return (
+    <svg
+      height={size}
+      style={baseSvgStyle}
+      viewBox="0 0 24 24"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <title>Kiro</title>
+      <rect width="24" height="24" rx="5.3" fill="#9046FF" />
+      <path
+        d="M12 4.6c-3.14 0-5.35 2.32-5.35 5.36v8.03c0 .5.58.77.96.45l1.2-1.02a.72.72 0 01.94 0l1.19 1.01a.72.72 0 00.94 0l1.2-1.01a.72.72 0 01.93 0l1.2 1.01a.72.72 0 00.94 0l1.2-1.01a.72.72 0 01.93 0l1.2 1.02c.38.32.96.05.96-.45V9.96c0-3.04-2.2-5.36-5.34-5.36H12z"
+        fill="#FFFFFF"
+      />
+      <circle cx="10.1" cy="10.5" r="1.2" fill="#9046FF" />
+      <circle cx="14.5" cy="10.5" r="1.2" fill="#9046FF" />
+    </svg>
+  )
+})
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyIcon = React.ComponentType<any>
 
@@ -391,6 +415,7 @@ const COLOR_ICONS: Partial<Record<AgentType, AnyIcon>> = {
   open_claw: OpenClawColorIcon,
   kimi_code: KimiCodeColorIcon,
   pi: PiColorIcon,
+  kiro: KiroColorIcon,
 }
 
 const MONO_ICONS: Partial<Record<AgentType, AnyIcon>> = {

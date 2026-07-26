@@ -11,6 +11,7 @@ export type AgentType =
   | "pi"
   | "grok"
   | "cursor"
+  | "kiro"
 
 export type AppErrorCode =
   | "invalid_input"
@@ -580,6 +581,7 @@ export const AGENT_DISPLAY_ORDER: AgentType[] = [
   "pi",
   "grok",
   "cursor",
+  "kiro",
 ]
 
 const AGENT_DISPLAY_ORDER_INDEX = new Map(
@@ -605,6 +607,7 @@ export const ALL_AGENT_TYPES: AgentType[] = [
   "pi",
   "grok",
   "cursor",
+  "kiro",
 ]
 
 export const MODEL_PROVIDER_AGENT_TYPES: AgentType[] = [
@@ -897,6 +900,7 @@ export const AGENT_LABELS: Record<AgentType, string> = {
   pi: "Pi",
   grok: "Grok",
   cursor: "Cursor",
+  kiro: "Kiro",
 }
 
 export const AGENT_COLORS: Record<AgentType, string> = {
@@ -912,6 +916,10 @@ export const AGENT_COLORS: Record<AgentType, string> = {
   pi: "bg-[#0D9488]",
   grok: "bg-neutral-900",
   cursor: "bg-zinc-800",
+  // Kiro Purple (#9046FF) — the official brand swatch. The only neighbour in
+  // this palette is cline's `purple-500` (#A855F7), which is magenta-leaning
+  // where Kiro's is blue-leaning violet, so the two stay separable.
+  kiro: "bg-[#9046FF]",
 }
 
 // ACP connection status (matches Rust ConnectionStatus)
@@ -2325,6 +2333,7 @@ export type McpAppType =
   | "kimi_code"
   | "grok"
   | "cursor"
+  | "kiro"
 
 export interface LocalMcpServer {
   id: string
