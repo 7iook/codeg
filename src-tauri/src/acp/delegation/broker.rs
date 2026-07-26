@@ -3399,15 +3399,16 @@ impl DelegationBroker {
             return;
         };
         // USER-originated continuations carry the synthetic
-        // `USER_ENTRY_CONNECTION_ID` as `parent_connection_id`, which the
-        // emitter's `get_state_and_emitter` fan-out lookup never resolves —
-        // for those turns this emit is an INTENTIONAL silent no-op, not a
-        // missed wire-up: the parent AI collects user-origin turn results by
-        // POLLING `get_delegation_status` (design §2.8b), never via a push
-        // on a parent connection stream.
+        // `USER_ENTRY_CONNECTION_ID` as `parent_connection_id`, which never
+        // resolves on the parent fan-out — the emitter then falls back to
+        // the CHILD connection's stream so the sub-agent dialog (composer
+        // availability + transcript refresh) still receives the settle push.
+        // The parent AI side of a user-origin turn remains poll-only
+        // (design §2.8b): it collects results via `get_delegation_status`.
         self.event_emitter
             .emit_session_update(
                 &task.parent_connection_id,
+                &task.child_connection_id,
                 task.child_conversation_id,
                 &task.task_id,
                 turn_id,
@@ -11413,7 +11414,15 @@ mod tests {
             manager: Arc::new(manager.clone_ref()),
         };
         real_emitter
-            .emit_session_update("parent-conn", 42, "task-su", "turn-su", 2, TurnOrigin::User)
+            .emit_session_update(
+                "parent-conn",
+                "child-conn-su",
+                42,
+                "task-su",
+                "turn-su",
+                2,
+                TurnOrigin::User,
+            )
             .await;
 
         let envelope = tokio::time::timeout(Duration::from_millis(500), stream_rx.recv())
@@ -11456,6 +11465,68 @@ mod tests {
         assert_eq!(json["type"], "delegation_session_update");
         assert_eq!(json["origin"], "user");
         assert_eq!(json["turn_version"], 2);
+    }
+
+    #[tokio::test]
+    async fn real_emitter_session_update_falls_back_to_child_stream_for_user_origin() {
+        // A USER-originated continuation settles with the synthetic
+        // `USER_ENTRY_CONNECTION_ID` as parent — that id never resolves, so
+        // before the fallback the settle push was silently dropped and the
+        // sub-agent dialog only caught up on remount. The emitter must now
+        // fan the event out on the CHILD's stream instead.
+        use crate::acp::delegation::event_emitter::{
+            ConnectionManagerEventEmitter, DelegationEventEmitter,
+        };
+        use crate::acp::manager::ConnectionManager;
+        use crate::acp::types::AcpEvent;
+        use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
+
+        let manager = ConnectionManager::new();
+        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let child_emitter = EventEmitter::test_web_only(broadcaster);
+        manager
+            .insert_test_connection("child-conn-fb", AgentType::ClaudeCode, None, child_emitter)
+            .await;
+        let (child_state, _) = manager
+            .get_state_and_emitter("child-conn-fb")
+            .await
+            .expect("child just inserted");
+        let mut stream_rx = child_state.read().await.event_stream().subscribe();
+
+        let real_emitter = ConnectionManagerEventEmitter {
+            manager: Arc::new(manager.clone_ref()),
+        };
+        // Parent id is the synthetic user-entry marker: resolves to nothing.
+        real_emitter
+            .emit_session_update(
+                crate::commands::delegation::USER_ENTRY_CONNECTION_ID,
+                "child-conn-fb",
+                77,
+                "task-fb",
+                "turn-fb",
+                3,
+                TurnOrigin::User,
+            )
+            .await;
+
+        let envelope = tokio::time::timeout(Duration::from_millis(500), stream_rx.recv())
+            .await
+            .expect("child stream should receive the fallback DelegationSessionUpdate")
+            .expect("envelope recv must not error");
+        assert_eq!(envelope.connection_id, "child-conn-fb");
+        match &envelope.payload {
+            AcpEvent::DelegationSessionUpdate {
+                child_conversation_id,
+                task_id,
+                turn_version,
+                ..
+            } => {
+                assert_eq!(*child_conversation_id, 77);
+                assert_eq!(task_id, "task-fb");
+                assert_eq!(*turn_version, 3);
+            }
+            other => panic!("expected DelegationSessionUpdate, got {other:?}"),
+        }
     }
 
     #[tokio::test]
