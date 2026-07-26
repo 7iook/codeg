@@ -38,6 +38,7 @@ import type {
   CursorStructuredConfig,
   CursorAuthStatus,
   CursorModelsResult,
+  KiroCustomAgent,
   CodexModelInfo,
   AgentSkillScope,
   AgentSkillLayout,
@@ -527,6 +528,16 @@ export async function acpCursorListModels(
   apiKey?: string
 ): Promise<CursorModelsResult> {
   return getTransport().call("acp_cursor_list_models", { apiKey })
+}
+
+/**
+ * List the Kiro custom agents available to `--agent`, by scanning
+ * `<KIRO_HOME>/agents/*.json`. No params: the scan is rooted at the single
+ * `<KIRO_HOME>` resolution point. A missing or empty directory yields `[]`
+ * rather than an error, so the settings panel stays usable on a fresh install.
+ */
+export async function acpListKiroCustomAgents(): Promise<KiroCustomAgent[]> {
+  return getTransport().call("acp_list_kiro_custom_agents", {})
 }
 
 /**

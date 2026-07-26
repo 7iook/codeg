@@ -1949,6 +1949,14 @@ export interface CursorModelsResult {
   error: string | null
 }
 
+/** One selectable Kiro custom agent, discovered by scanning
+ * `<KIRO_HOME>/agents/*.json`. `id` is the file stem — exactly the value passed
+ * to `kiro-cli acp --agent`. Serialized camelCase by the backend. */
+export interface KiroCustomAgent {
+  id: string
+  description: string | null
+}
+
 // Lightweight agent status returned by acp_get_agent_status
 export interface AcpAgentStatus {
   agent_type: AgentType
