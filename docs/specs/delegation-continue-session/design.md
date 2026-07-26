@@ -3,13 +3,13 @@
 slug: delegation-continue-session
 title: 委托子代理从一次性改为可续聊 + 用户侧交互入口 · 设计
 # ═══ LIFECYCLE ═══
-status: converged
+status: shipped
 review_rounds_done: 3
 last_review_status: NEEDS_CHANGES
 last_review_p0: 1
 created: 2026-07-26
 last_updated: 2026-07-26
-shipped_commit: null
+shipped_commit: 2505e164
 # ═══ RELATIONSHIPS ═══
 related_adrs: []
 related_specs: [kiro-agent-integration]
