@@ -488,6 +488,10 @@ pub fn build_router(
         // ─── MCP ───
         .route("/mcp_scan_local", post(handlers::mcp::mcp_scan_local))
         .route(
+            "/mcp_kiro_scoped_view",
+            post(handlers::mcp::mcp_kiro_scoped_view),
+        )
+        .route(
             "/mcp_list_marketplaces",
             post(handlers::mcp::mcp_list_marketplaces),
         )

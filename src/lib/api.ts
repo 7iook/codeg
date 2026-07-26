@@ -39,6 +39,7 @@ import type {
   CursorAuthStatus,
   CursorModelsResult,
   KiroCustomAgent,
+  KiroMcpView,
   CodexModelInfo,
   AgentSkillScope,
   AgentSkillLayout,
@@ -1313,6 +1314,24 @@ export async function deleteAccountToken(accountId: string): Promise<void> {
 
 export async function mcpScanLocal(): Promise<LocalMcpServer[]> {
   return getTransport().call("mcp_scan_local")
+}
+
+/**
+ * Kiro's MCP servers across all three scopes (agent > project > global), each
+ * annotated with its source and whether a higher-precedence scope shadows it,
+ * plus the absolute path codeg reads and writes.
+ *
+ * Pass the current workspace to include the project scope; omit it when no
+ * workspace is open. Over HTTP this is denied by default — Kiro credentials are
+ * returned in plaintext, so only the desktop entry point may read them unless
+ * the operator opts in.
+ */
+export async function mcpKiroScopedView(params?: {
+  workspacePath?: string | null
+}): Promise<KiroMcpView> {
+  return getTransport().call("mcp_kiro_scoped_view", {
+    workspacePath: params?.workspacePath ?? null,
+  })
 }
 
 export async function mcpListMarketplaces(): Promise<McpMarketplaceProvider[]> {

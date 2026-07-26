@@ -33,11 +33,14 @@ pub async fn acp_get_agent_status(
     Ok(Json(result))
 }
 
+/// Wrapped in `with_http_entry_point` because the payload carries every agent's
+/// `env`, including Kiro's API key: the gate withholds that one entry over HTTP
+/// while the rest of the list stays usable on a LAN (R5.3 / R5.6).
 pub async fn acp_list_agents(
     Extension(state): Extension<Arc<AppState>>,
 ) -> Result<Json<Vec<AcpAgentInfo>>, AppCommandError> {
     let db = &state.db;
-    let result = acp_commands::acp_list_agents_core(db)
+    let result = crate::commands::mcp::with_http_entry_point(acp_commands::acp_list_agents_core(db))
         .await
         .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
     Ok(Json(result))
@@ -637,21 +640,26 @@ pub struct AcpUpdateAgentEnvParams {
     pub model_provider_id: Option<i32>,
 }
 
+/// Wrapped in `with_http_entry_point`: this is the write path for Kiro's API key
+/// (it lives in the same `env` map), so the credential gate must see that the
+/// request arrived over HTTP and refuse before anything is persisted (R5.3/R5.4).
 pub async fn acp_update_agent_env(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpUpdateAgentEnvParams>,
 ) -> Result<Json<usize>, AppCommandError> {
     let db = &state.db;
     let emitter = state.emitter.clone();
-    let affected = acp_commands::acp_update_agent_env_and_refresh(
-        params.agent_type,
-        params.enabled,
-        params.env,
-        params.model_provider_id,
-        db,
-        &state.connection_manager,
-        &state.data_dir,
-        &emitter,
+    let affected = crate::commands::mcp::with_http_entry_point(
+        acp_commands::acp_update_agent_env_and_refresh(
+            params.agent_type,
+            params.enabled,
+            params.env,
+            params.model_provider_id,
+            db,
+            &state.connection_manager,
+            &state.data_dir,
+            &emitter,
+        ),
     )
     .await
     .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;

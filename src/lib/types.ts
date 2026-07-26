@@ -2349,6 +2349,39 @@ export interface LocalMcpServer {
   apps: McpAppType[]
 }
 
+/** Which of Kiro's three MCP config scopes an entry came from. */
+export type KiroMcpScope = "global" | "project" | "agent"
+
+/** One row of Kiro's MCP display list: the entry that takes effect, plus where
+ * it came from and what it shadowed. Mirrors `KiroMcpScopedServer` in Rust. */
+export interface KiroMcpScopedServer {
+  id: string
+  spec: Record<string, unknown>
+  scope: KiroMcpScope
+  /** Lower-precedence scopes that also define this id; empty when unique. */
+  shadowed_scopes: KiroMcpScope[]
+  /** Only global-scope entries are editable through codeg's panel. */
+  editable: boolean
+  /** Which agent definition contributed it, when `scope === "agent"`. */
+  agent_name?: string | null
+}
+
+/** A scope whose file exists but does not parse: that scope is reported failed
+ * while the others still display. */
+export interface KiroMcpScopeFailure {
+  scope: KiroMcpScope
+  path: string
+  reason: string
+}
+
+/** Payload behind the Kiro MCP panel. Mirrors `KiroMcpView` in Rust. */
+export interface KiroMcpView {
+  /** Absolute path of the file codeg reads and writes. */
+  write_target: string
+  servers: KiroMcpScopedServer[]
+  scope_failures: KiroMcpScopeFailure[]
+}
+
 export interface McpMarketplaceProvider {
   id: string
   name: string

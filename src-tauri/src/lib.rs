@@ -1214,6 +1214,7 @@ mod tauri_app {
                 terminal_commands::terminal_kill,
                 terminal_commands::terminal_list,
                 mcp_commands::mcp_scan_local,
+                mcp_commands::mcp_kiro_scoped_view,
                 mcp_commands::mcp_list_marketplaces,
                 mcp_commands::mcp_search_marketplace,
                 mcp_commands::mcp_get_marketplace_server_detail,

@@ -59,6 +59,145 @@ pub enum McpAppType {
     KimiCode,
     Grok,
     Cursor,
+    Kiro,
+}
+
+// ---------------------------------------------------------------------------
+// Kiro credential admission gate (Requirement 5)
+//
+// The desktop entry point (Tauri commands) and the HTTP entry point
+// (`web/handlers/mcp.rs`, default port 3080, bindable on a non-loopback
+// address) share ONE set of read/write functions, so the admission decision
+// lives here — at the function-family layer — rather than in a separate
+// runtime-mode module. "Plaintext env values / args, no masking" (R4.7 /
+// R4.13) was decided for an operator who already has filesystem access to
+// this machine; a LAN browser request does not satisfy that premise, so the
+// entry point is what differs, not the data.
+//
+// The gate is evaluated INSIDE the Kiro read/write family (including the
+// `_at` test-injection variants), which is the only place every caller funnels
+// through. `mcp_set_server_apps` is a non-atomic remove-then-upsert sequence
+// (pre-existing upstream behavior); a gate that returned `Err` midway would
+// leave "old entry deleted, new entry never written", so the write commands
+// additionally pre-check before touching anything.
+// ---------------------------------------------------------------------------
+
+/// Which entry point the current request arrived through. Absent marker means
+/// desktop: the server-only binary marks every HTTP request in
+/// `web::router::build_router`, and the desktop binary marks its embedded web
+/// server's requests through the same middleware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpEntryPoint {
+    Desktop,
+    Http,
+}
+
+tokio::task_local! {
+    static MCP_ENTRY_POINT: McpEntryPoint;
+}
+
+/// Run `fut` with the current entry point marked as HTTP. Task-locals do not
+/// propagate into `tokio::spawn`ed tasks, so a handler that spawns its work
+/// would fall back to `Desktop`; none of the MCP handlers do, and the gate is
+/// re-checked inside the read/write family rather than once at the edge.
+pub async fn with_http_entry_point<F>(fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    MCP_ENTRY_POINT.scope(McpEntryPoint::Http, fut).await
+}
+
+/// The entry point of the current task, defaulting to `Desktop` when unmarked.
+pub(crate) fn current_entry_point() -> McpEntryPoint {
+    MCP_ENTRY_POINT
+        .try_with(|value| *value)
+        .unwrap_or(McpEntryPoint::Desktop)
+}
+
+/// Env flag controlling whether non-desktop entry points may touch Kiro
+/// credentials (R5.2). Absent / unrecognized ⇒ DENY.
+pub(crate) const KIRO_HTTP_CREDENTIAL_ACCESS_ENV: &str = "CODEG_KIRO_HTTP_CREDENTIAL_ACCESS";
+
+/// Whether the operator opted into LAN access to Kiro credentials. Read at call
+/// time (not cached) so flipping the flag takes effect without a restart.
+fn kiro_http_credential_access_allowed() -> bool {
+    kiro_access_flag_enabled(&std::env::var(KIRO_HTTP_CREDENTIAL_ACCESS_ENV).unwrap_or_default())
+}
+
+/// Parse the flag's raw value. Split out from the env read so it is testable
+/// without mutating process env (which races other tests in the same binary).
+/// Anything that is not an explicit affirmative denies.
+fn kiro_access_flag_enabled(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "allow"
+    )
+}
+
+/// The four Kiro credential operations the gate covers (R5.3). The two API-key
+/// variants are for the `commands::acp` side to call with the same decision
+/// function; MCP config read/write is enforced in this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KiroCredentialOp {
+    ReadMcpConfig,
+    WriteMcpConfig,
+    ReadApiKey,
+    WriteApiKey,
+}
+
+impl KiroCredentialOp {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::ReadMcpConfig => "read Kiro MCP configuration",
+            Self::WriteMcpConfig => "write Kiro MCP configuration",
+            Self::ReadApiKey => "read the stored Kiro API key",
+            Self::WriteApiKey => "write the Kiro API key",
+        }
+    }
+}
+
+/// Pure admission decision: the whole gate in one testable function.
+///
+/// The refusal message names the operation and the flag only — never an `env`
+/// value, an `args` element, or key material (R5.3.1).
+fn kiro_admission_decision(
+    entry: McpEntryPoint,
+    http_access_allowed: bool,
+    op: KiroCredentialOp,
+) -> Result<(), AppCommandError> {
+    if entry == McpEntryPoint::Desktop || http_access_allowed {
+        return Ok(());
+    }
+    Err(AppCommandError::permission_denied(format!(
+        "refused to {} over the network entry point: Kiro credentials are desktop-only \
+         unless {KIRO_HTTP_CREDENTIAL_ACCESS_ENV} is enabled",
+        op.describe()
+    ))
+    .with_i18n(
+        "errors.kiroCredentialsDesktopOnly",
+        mcp_i18n_params([("operation", op.describe())]),
+    ))
+}
+
+/// Gate the current request against `op`, using the ambient entry point.
+pub(crate) fn ensure_kiro_credential_access(op: KiroCredentialOp) -> Result<(), AppCommandError> {
+    kiro_admission_decision(
+        current_entry_point(),
+        kiro_http_credential_access_allowed(),
+        op,
+    )
+}
+
+/// Pre-check for the write commands: refuse BEFORE the first mutation when the
+/// selected apps include Kiro and this entry point may not touch it (R5.4).
+fn ensure_kiro_admission_for_apps(
+    apps: &[McpAppType],
+    op: KiroCredentialOp,
+) -> Result<(), AppCommandError> {
+    if apps.contains(&McpAppType::Kiro) {
+        ensure_kiro_credential_access(op)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +282,25 @@ pub struct McpMarketplaceServerDetail {
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn mcp_scan_local() -> Result<Vec<LocalMcpServer>, AppCommandError> {
     scan_local_servers()
+}
+
+/// The Kiro MCP panel's display payload: all three scopes merged, each entry
+/// annotated with its source scope and whether a higher-precedence scope
+/// shadows it, plus the absolute path codeg reads and writes (R4.1.2–4.1.5).
+///
+/// `workspace` supplies the Project scope root; `None` skips that scope, which
+/// is what a window with no workspace open should send. Callers pass the current
+/// workspace so switching it re-resolves the scope (R4.1.10).
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn mcp_kiro_scoped_view(
+    workspace_path: Option<String>,
+) -> Result<KiroMcpView, AppCommandError> {
+    let workspace = workspace_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(Path::new);
+    read_kiro_scoped_view(workspace)
 }
 
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
@@ -354,6 +512,9 @@ pub async fn mcp_install_from_marketplace(
     }
     // A selected-but-excluded app can't host this transport; remove any stale entry
     // for this id there so it can't win scan precedence and reclassify the spec.
+    // Both the removal and the write below can touch Kiro's config, so decide
+    // before the first mutation (R5.4).
+    ensure_kiro_admission_for_apps(&normalized_apps, KiroCredentialOp::WriteMcpConfig)?;
     for app in excluded {
         tracing::warn!(
             "[MCP] {app:?} cannot host server '{server_id}' (transport unsupported); removing any stale entry"
@@ -400,19 +561,12 @@ pub async fn mcp_upsert_local_server(
             "none of the selected agents can host this MCP server's transport (e.g. Codex does not support SSE)",
         ));
     }
-    let all_apps = [
-        McpAppType::ClaudeCode,
-        McpAppType::Codex,
-        McpAppType::Gemini,
-        McpAppType::OpenClaw,
-        McpAppType::OpenCode,
-        McpAppType::Cline,
-        McpAppType::Hermes,
-        McpAppType::CodeBuddy,
-        McpAppType::KimiCode,
-        McpAppType::Grok,
-        McpAppType::Cursor,
-    ];
+    let all_apps = all_mcp_app_types();
+
+    // The loop below removes from the non-targeted apps and writes to the
+    // targeted ones; either direction can touch Kiro's config, so gate before
+    // the first mutation (R5.4).
+    ensure_kiro_admission_for_apps(&all_apps, KiroCredentialOp::WriteMcpConfig)?;
 
     for app in all_apps {
         if target_set.contains(&app) {
@@ -457,6 +611,14 @@ pub async fn mcp_set_server_apps(
     }
     let current_set = current.apps.iter().copied().collect::<BTreeSet<_>>();
 
+    // This command is a non-atomic remove-then-upsert (pre-existing upstream
+    // behavior): a gate that returned Err between the two loops would leave
+    // "old entry deleted, new entry never written". Decide before either loop,
+    // covering both the app being removed from and the app being added to
+    // (R5.4 / P-4).
+    let touched: Vec<McpAppType> = current_set.union(&target_set).copied().collect();
+    ensure_kiro_admission_for_apps(&touched, KiroCredentialOp::WriteMcpConfig)?;
+
     for app in current_set.difference(&target_set) {
         remove_server_for_app(*app, &server_id)?;
     }
@@ -475,30 +637,48 @@ pub async fn mcp_remove_server(
 ) -> Result<bool, AppCommandError> {
     let target_apps = match apps {
         Some(selected) => normalize_apps(selected),
-        None => vec![
-            McpAppType::ClaudeCode,
-            McpAppType::Codex,
-            McpAppType::Gemini,
-            McpAppType::OpenClaw,
-            McpAppType::OpenCode,
-            McpAppType::Cline,
-            McpAppType::Hermes,
-            McpAppType::CodeBuddy,
-            McpAppType::KimiCode,
-            McpAppType::Grok,
-            McpAppType::Cursor,
-        ],
+        None => all_mcp_app_types(),
     };
 
     if target_apps.is_empty() {
         return Ok(false);
     }
 
+    // Refuse before the first removal so a denied gate cannot delete the
+    // non-Kiro entries and then fail (R5.4).
+    ensure_kiro_admission_for_apps(&target_apps, KiroCredentialOp::WriteMcpConfig)?;
+
     let mut removed = false;
     for app in target_apps {
         removed |= remove_server_for_app(app, &server_id)?;
     }
     Ok(removed)
+}
+
+/// Every app codeg can write MCP config for.
+///
+/// Two dispatch sites (`upsert_server_for_app` / `remove_server_for_app`) are
+/// `match` arms the compiler forces you to extend when a variant is added. The
+/// "write to the targeted apps, remove from the rest" default in
+/// `mcp_upsert_local_server` and the "remove from every app" default in
+/// `mcp_remove_server` used to be two hand-written lists that would silently
+/// omit a new variant — no compile error, no runtime error, just an agent the
+/// panel quietly never touches. They funnel through this one list instead.
+fn all_mcp_app_types() -> Vec<McpAppType> {
+    vec![
+        McpAppType::ClaudeCode,
+        McpAppType::Codex,
+        McpAppType::Gemini,
+        McpAppType::OpenClaw,
+        McpAppType::OpenCode,
+        McpAppType::Cline,
+        McpAppType::Hermes,
+        McpAppType::CodeBuddy,
+        McpAppType::KimiCode,
+        McpAppType::Grok,
+        McpAppType::Cursor,
+        McpAppType::Kiro,
+    ]
 }
 
 fn normalize_apps(apps: Vec<McpAppType>) -> Vec<McpAppType> {
@@ -2409,6 +2589,32 @@ fn scan_local_servers() -> Result<Vec<LocalMcpServer>, AppCommandError> {
         entry.1.insert(McpAppType::Cursor);
     }
 
+    // Kiro's GLOBAL scope only — the scope codeg writes. Agent- and
+    // Project-scope entries are read-only and surface through
+    // `read_kiro_scoped_view`, not through the cross-agent scan (listing them
+    // here would offer to unbind entries codeg must not touch). A denied
+    // credential gate must not blank the whole panel for the other 12 agents,
+    // so treat a refusal as "no Kiro entries" and let every other app scan.
+    match read_kiro_servers() {
+        Ok(servers) => {
+            for (id, spec) in servers {
+                let entry = merged
+                    .entry(id)
+                    .or_insert_with(|| (spec.clone(), BTreeSet::new()));
+                entry.1.insert(McpAppType::Kiro);
+            }
+        }
+        Err(err)
+            if matches!(
+                err.code,
+                crate::app_error::AppErrorCode::PermissionDenied
+            ) =>
+        {
+            tracing::debug!("[MCP] Kiro entries omitted from scan: {}", err.message);
+        }
+        Err(err) => return Err(err),
+    }
+
     Ok(merged
         .into_iter()
         .map(|(id, (spec, apps))| LocalMcpServer {
@@ -2437,6 +2643,7 @@ fn upsert_server_for_app(app: McpAppType, id: &str, spec: &Value) -> Result<(), 
         McpAppType::KimiCode => upsert_kimi_code_server(id, spec),
         McpAppType::Grok => upsert_grok_server(id, spec),
         McpAppType::Cursor => upsert_cursor_server(id, spec),
+        McpAppType::Kiro => upsert_kiro_server(id, spec),
     }
 }
 
@@ -2456,9 +2663,10 @@ pub fn read_servers_for_agent_type(
         AgentType::KimiCode => read_kimi_code_servers(),
         AgentType::Grok => read_grok_servers(),
         AgentType::Cursor => read_cursor_servers(),
-        // Kiro merges three scopes (agent > project > global); the panel reads
-        // and writes the global file. W1-P2 replaces this with the real reader.
-        AgentType::Kiro => Ok(BTreeMap::new()),
+        // Kiro merges three scopes (agent > project > global); this reader
+        // returns the GLOBAL scope — the one codeg writes. The scope-annotated
+        // display list is `read_kiro_scoped_view`.
+        AgentType::Kiro => read_kiro_servers(),
         // pi-acp drops ACP-wire MCP and pi has no native MCP (it needs a
         // third-party extension), so codeg manages no MCP servers for pi (v1).
         AgentType::Pi => Ok(BTreeMap::new()),
@@ -3123,6 +3331,481 @@ fn remove_cursor_server_at(path: &Path, id: &str) -> Result<bool, AppCommandErro
 }
 
 // ---------------------------------------------------------------------------
+// Kiro CLI  (<KIRO_HOME>/settings/mcp.json  →  top-level `mcpServers`)
+//
+// Kiro merges MCP servers from THREE scopes, precedence `Agent > Project >
+// Global` (kiro.dev/docs/cli/mcp/configuration):
+//
+//   Agent   `<KIRO_HOME>/agents/<name>.json` / `<workspace>/.kiro/agents/<name>.json`
+//           → their `mcpServers`
+//   Project `<workspace>/.kiro/settings/mcp.json`
+//   Global  `<KIRO_HOME>/settings/mcp.json`
+//
+// Same-name servers override; different names ACCUMULATE (the official example
+// has agent `fetch` + workspace `git` + global `aws` all live at once), so an
+// agent definition embedding `mcpServers` does not replace the global file.
+//
+// codeg reads all three for DISPLAY (each entry annotated with its scope and
+// flagged when shadowed) but WRITES only the Global file — never an agent
+// definition, which also carries `prompt` / `tools` / `hooks` and whose scope
+// semantics are "override for this agent", not "this agent's server list".
+//
+// Because Kiro loads these files natively at launch, `Kiro` is on the ACP
+// forward skip list in `connection.rs` (like Hermes/Kimi/Grok/Cursor) so the
+// same servers aren't double-registered over `session/new`.
+//
+// Entry shape (per the docs): local = `command` + optional `args`/`env`;
+// remote = `url` + optional `headers`/`oauth`/`oauthScopes`. Both may carry
+// `disabled` / `autoApprove` / `disabledTools` / `timeout`. There is NO
+// `type`/`transport` discriminator — Kiro discriminates on shape — so the
+// reader strips any foreign `type` and lets canonicalize re-infer it, and the
+// writer emits no `type`.
+// ---------------------------------------------------------------------------
+
+/// Fields Kiro models on a `mcpServers` entry, plus everything else the round
+/// trip must preserve verbatim (R4.2 / R4.4.5): unknown keys ride through.
+const KIRO_DROPPED_WRITE_KEYS: &[&str] = &["type"];
+
+fn kiro_mcp_json_path() -> PathBuf {
+    crate::parsers::kiro::resolve_kiro_home_dir()
+        .join("settings")
+        .join("mcp.json")
+}
+
+fn read_kiro_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
+    ensure_kiro_credential_access(KiroCredentialOp::ReadMcpConfig)?;
+    read_kiro_servers_at(&kiro_mcp_json_path())
+}
+
+/// Read one Kiro-shaped `mcpServers` file. A missing file is an empty set, not
+/// an error; an invalid entry is skipped (logged without its values) rather
+/// than failing the whole file.
+fn read_kiro_servers_at(path: &Path) -> Result<BTreeMap<String, Value>, AppCommandError> {
+    let root = read_json_file(path)?;
+    Ok(kiro_servers_from_root(&root))
+}
+
+/// Extract + canonicalize the `mcpServers` map of an already-parsed root.
+fn kiro_servers_from_root(root: &Value) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    let Some(servers) = root.get("mcpServers").and_then(Value::as_object) else {
+        return out;
+    };
+
+    for (id, spec) in servers {
+        // Kiro discriminates on shape (`command` ⇒ local, `url` ⇒ remote); drop
+        // any foreign `type` so canonicalize re-infers it the way Kiro will.
+        let mut spec = spec.clone();
+        if let Some(obj) = spec.as_object_mut() {
+            obj.remove("type");
+        }
+        match canonicalize_spec(&spec, &format!("Kiro config '{id}'")) {
+            Ok(mut normalized) => {
+                kiro_restore_remote_env(&spec, &mut normalized);
+                out.insert(id.to_string(), normalized);
+            }
+            Err(_) => {
+                // Never log the entry itself: `env` values and `args` elements
+                // are credentials (R5.3.1). The id is enough to locate it.
+                eprintln!("[MCP] skip invalid Kiro MCP entry id={id}");
+            }
+        }
+    }
+
+    out
+}
+
+/// Re-attach `env` to a canonicalized REMOTE entry.
+///
+/// `canonicalize_spec`'s passthrough loop skips `env` unconditionally and only
+/// the stdio branch puts it back, so a remote entry loses it. Kiro documents
+/// `env` as a valid property on remote servers (kiro.dev/docs/cli/mcp/
+/// configuration), and R4.2 requires unrecognized/optional fields to survive the
+/// round trip, so restore it here rather than changing the shared canonical
+/// contract for all 13 agents.
+fn kiro_restore_remote_env(source: &Value, normalized: &mut Value) {
+    let is_remote = matches!(
+        normalized.get("type").and_then(Value::as_str),
+        Some("http") | Some("sse")
+    );
+    if !is_remote || normalized.get("env").is_some() {
+        return;
+    }
+    let Some(env) = source.get("env").filter(|value| value.is_object()) else {
+        return;
+    };
+    if let Some(obj) = normalized.as_object_mut() {
+        obj.insert("env".to_string(), env.clone());
+    }
+}
+
+/// Convert codeg's canonical spec into a Kiro `mcpServers` entry: everything
+/// except the canonical-only `type` discriminator, which Kiro has no field for.
+fn canonical_to_kiro_entry(spec: &Value) -> Result<Value, AppCommandError> {
+    let mut canonical = canonicalize_spec(spec, "Kiro write")?;
+    kiro_restore_remote_env(spec, &mut canonical);
+    let Some(obj) = canonical.as_object() else {
+        return Ok(canonical);
+    };
+    let mut out = Map::new();
+    for (key, value) in obj {
+        if KIRO_DROPPED_WRITE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        out.insert(key.clone(), value.clone());
+    }
+    Ok(Value::Object(out))
+}
+
+fn upsert_kiro_server(id: &str, spec: &Value) -> Result<(), AppCommandError> {
+    upsert_kiro_server_at(&kiro_mcp_json_path(), id, spec)
+}
+
+fn upsert_kiro_server_at(path: &Path, id: &str, spec: &Value) -> Result<(), AppCommandError> {
+    ensure_kiro_credential_access(KiroCredentialOp::WriteMcpConfig)?;
+    // Canonicalize BEFORE reading the target so a rejected spec can't leave a
+    // half-applied state, and validate the target parses (R4.8).
+    let entry = canonical_to_kiro_entry(spec)?;
+    let (mut root, fingerprint) = read_kiro_root_for_write(path)?;
+
+    let obj = root.as_object_mut().ok_or_else(|| {
+        mcp_configuration_invalid(format!("invalid JSON root in {}", path.display()))
+    })?;
+    if !obj.get("mcpServers").map(Value::is_object).unwrap_or(false) {
+        obj.insert("mcpServers".to_string(), Value::Object(Map::new()));
+    }
+    let map = obj
+        .get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            mcp_configuration_invalid(format!("invalid mcpServers in {}", path.display()))
+        })?;
+    // Only the operated-on entry is replaced; every sibling entry and every
+    // top-level key outside `mcpServers` stays byte-for-byte (R4.4.1 / R4.11).
+    map.insert(id.to_string(), entry);
+
+    write_kiro_root_checked(path, &root, &fingerprint)
+}
+
+fn remove_kiro_server(id: &str) -> Result<bool, AppCommandError> {
+    remove_kiro_server_at(&kiro_mcp_json_path(), id)
+}
+
+fn remove_kiro_server_at(path: &Path, id: &str) -> Result<bool, AppCommandError> {
+    ensure_kiro_credential_access(KiroCredentialOp::WriteMcpConfig)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let (mut root, fingerprint) = read_kiro_root_for_write(path)?;
+    let Some(obj) = root.as_object_mut() else {
+        return Ok(false);
+    };
+    let Some(servers) = obj.get_mut("mcpServers").and_then(Value::as_object_mut) else {
+        return Ok(false);
+    };
+    if servers.remove(id).is_none() {
+        return Ok(false);
+    }
+    write_kiro_root_checked(path, &root, &fingerprint)?;
+    Ok(true)
+}
+
+/// Content fingerprint of the target file, recorded at read time and re-checked
+/// at write time (R4.9). `None` = the file did not exist; a file appearing
+/// between read and write is itself a conflict.
+type KiroFingerprint = Option<String>;
+
+fn kiro_fingerprint_of(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        })
+}
+
+fn read_kiro_fingerprint(path: &Path) -> Result<KiroFingerprint, AppCommandError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(kiro_fingerprint_of(&bytes))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(AppCommandError::io(err)),
+    }
+}
+
+/// Parse the target and capture its fingerprint in one pass. Refuses a file that
+/// exists but is not valid JSON (R4.8) — a `.bak` sibling is never a source.
+fn read_kiro_root_for_write(path: &Path) -> Result<(Value, KiroFingerprint), AppCommandError> {
+    let fingerprint = read_kiro_fingerprint(path)?;
+    let mut root = read_json_file(path)?;
+    if !root.is_object() {
+        if fingerprint.is_some() {
+            return Err(mcp_configuration_invalid(format!(
+                "invalid JSON root at {}: expected object",
+                path.display()
+            )));
+        }
+        root = json!({});
+    }
+    Ok((root, fingerprint))
+}
+
+/// Verify the fingerprint still holds, then land the file by writing a temp file
+/// in the SAME directory and atomically replacing the target (R4.10). On any
+/// failure the target keeps its previous bytes, and unrelated files in the
+/// directory (`permissions.yaml`, `mcp.json.bak*`) are untouched.
+fn write_kiro_root_checked(
+    path: &Path,
+    root: &Value,
+    expected: &KiroFingerprint,
+) -> Result<(), AppCommandError> {
+    let current = read_kiro_fingerprint(path)?;
+    if &current != expected {
+        return Err(AppCommandError::already_exists(format!(
+            "{} changed since it was read; refusing to overwrite",
+            path.display()
+        ))
+        .with_i18n("errors.kiroMcpConfigConflict", BTreeMap::new()));
+    }
+
+    let serialized = serde_json::to_string_pretty(root).map_err(|e| {
+        mcp_configuration_invalid(format!(
+            "failed to serialize JSON for {}: {e}",
+            path.display()
+        ))
+    })?;
+    let parent = path.parent().ok_or_else(|| {
+        mcp_configuration_invalid(format!("{} has no parent directory", path.display()))
+    })?;
+    fs::create_dir_all(parent).map_err(AppCommandError::io)?;
+
+    // Same-directory temp file so the replace is a rename within one volume.
+    // A unique suffix keeps concurrent writers from clobbering each other's
+    // staging file; the file name deliberately does NOT end in `.bak`.
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mcp.json".to_string());
+    let temp_path = parent.join(format!(
+        ".{file_name}.codeg-tmp-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(err) = fs::write(&temp_path, format!("{serialized}\n")) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(AppCommandError::io(err));
+    }
+    if let Err(err) = fs::rename(&temp_path, path) {
+        // Target still holds its pre-write bytes; drop the staging file so a
+        // failed write leaves nothing behind.
+        let _ = fs::remove_file(&temp_path);
+        return Err(AppCommandError::io(err));
+    }
+    Ok(())
+}
+
+// ── Three-scope merge for display ───────────────────────────────────────────
+
+/// Which of Kiro's three scopes an entry came from. Ordered by precedence so
+/// `Agent > Project > Global` is a plain comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KiroMcpScope {
+    Global,
+    Project,
+    Agent,
+}
+
+/// One row of the display list: the effective entry plus where it came from and
+/// what it shadowed.
+#[derive(Debug, Clone, Serialize)]
+pub struct KiroMcpScopedServer {
+    pub id: String,
+    /// The entry that actually takes effect.
+    pub spec: Value,
+    /// Scope the effective entry came from.
+    pub scope: KiroMcpScope,
+    /// Lower-precedence scopes that also define this id and are therefore
+    /// shadowed. Empty when the id is unique across scopes.
+    pub shadowed_scopes: Vec<KiroMcpScope>,
+    /// Whether codeg's panel may edit this entry: only Global is writable —
+    /// Agent and Project entries are read-only (R4.1.4).
+    pub editable: bool,
+    /// Which agent definition contributed it, when `scope == Agent`. Kept
+    /// because several agent definitions can each contribute a different id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+}
+
+/// A scope whose file exists but failed to parse (R4.1.12): the scope is marked
+/// failed and the others still display.
+#[derive(Debug, Clone, Serialize)]
+pub struct KiroMcpScopeFailure {
+    pub scope: KiroMcpScope,
+    /// Absolute path of the unparsable file.
+    pub path: String,
+    /// Parser message. Never contains entry values — the file never parsed, so
+    /// no `env` value or `args` element was read out of it.
+    pub reason: String,
+}
+
+/// Display payload for the Kiro MCP panel.
+#[derive(Debug, Clone, Serialize)]
+pub struct KiroMcpView {
+    /// Absolute path of the read/write target shown in the panel (R4.1.5).
+    pub write_target: String,
+    pub servers: Vec<KiroMcpScopedServer>,
+    pub scope_failures: Vec<KiroMcpScopeFailure>,
+}
+
+/// Collect the three scopes for `workspace` (project scope is skipped when
+/// `None`) and merge them for display.
+pub fn read_kiro_scoped_view(workspace: Option<&Path>) -> Result<KiroMcpView, AppCommandError> {
+    ensure_kiro_credential_access(KiroCredentialOp::ReadMcpConfig)?;
+    let kiro_home = crate::parsers::kiro::resolve_kiro_home_dir();
+    Ok(build_kiro_scoped_view(&kiro_home, workspace))
+}
+
+/// Pure-ish assembly of the view from explicit roots — the test-injection
+/// variant (mirrors the `_at` convention of the other readers).
+fn build_kiro_scoped_view(kiro_home: &Path, workspace: Option<&Path>) -> KiroMcpView {
+    let global_path = kiro_home.join("settings").join("mcp.json");
+    let mut failures = Vec::new();
+    let mut contributions: Vec<(KiroMcpScope, Option<String>, BTreeMap<String, Value>)> = Vec::new();
+
+    // Global.
+    contributions.push((
+        KiroMcpScope::Global,
+        None,
+        read_scope_file(&global_path, KiroMcpScope::Global, &mut failures),
+    ));
+
+    // Project (missing workspace or missing file ⇒ empty set, not an error).
+    if let Some(workspace) = workspace {
+        let project_path = workspace.join(".kiro").join("settings").join("mcp.json");
+        contributions.push((
+            KiroMcpScope::Project,
+            None,
+            read_scope_file(&project_path, KiroMcpScope::Project, &mut failures),
+        ));
+    }
+
+    // Agent definitions from both locations. Each is a separate contribution so
+    // its `agent_name` survives into the row.
+    let mut agent_dirs = vec![kiro_home.join("agents")];
+    if let Some(workspace) = workspace {
+        agent_dirs.push(workspace.join(".kiro").join("agents"));
+    }
+    for dir in agent_dirs {
+        for (agent_name, path) in kiro_agent_definition_files(&dir) {
+            let servers = read_scope_file(&path, KiroMcpScope::Agent, &mut failures);
+            if !servers.is_empty() {
+                contributions.push((KiroMcpScope::Agent, Some(agent_name), servers));
+            }
+        }
+    }
+
+    // Merge: highest-precedence contribution wins an id; the rest are recorded
+    // as shadowed. `includeMcpJson` (older upstream name `useLegacyMcpJson`) has
+    // no documented default, so we deliberately do NOT decide whether an agent
+    // definition suppresses the lower scopes — we annotate the overlap and take
+    // accumulate-unless-same-name as the baseline, which is what the docs state.
+    let mut rows: BTreeMap<String, KiroMcpScopedServer> = BTreeMap::new();
+    for (scope, agent_name, servers) in contributions {
+        for (id, spec) in servers {
+            match rows.get_mut(&id) {
+                Some(existing) if existing.scope >= scope => {
+                    existing.shadowed_scopes.push(scope);
+                }
+                Some(existing) => {
+                    let demoted = existing.scope;
+                    existing.spec = spec;
+                    existing.scope = scope;
+                    existing.editable = scope == KiroMcpScope::Global;
+                    existing.agent_name = agent_name.clone();
+                    existing.shadowed_scopes.push(demoted);
+                }
+                None => {
+                    rows.insert(
+                        id.clone(),
+                        KiroMcpScopedServer {
+                            id,
+                            spec,
+                            scope,
+                            shadowed_scopes: Vec::new(),
+                            editable: scope == KiroMcpScope::Global,
+                            agent_name: agent_name.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let mut servers: Vec<_> = rows.into_values().collect();
+    for row in &mut servers {
+        row.shadowed_scopes.sort_unstable();
+        row.shadowed_scopes.dedup();
+    }
+
+    KiroMcpView {
+        write_target: global_path.to_string_lossy().to_string(),
+        servers,
+        scope_failures: failures,
+    }
+}
+
+/// Read one scope file's `mcpServers`. Missing ⇒ empty; unparsable ⇒ empty plus
+/// a recorded failure for that scope only.
+fn read_scope_file(
+    path: &Path,
+    scope: KiroMcpScope,
+    failures: &mut Vec<KiroMcpScopeFailure>,
+) -> BTreeMap<String, Value> {
+    if !path.exists() {
+        return BTreeMap::new();
+    }
+    match read_json_file(path) {
+        Ok(root) => kiro_servers_from_root(&root),
+        Err(err) => {
+            failures.push(KiroMcpScopeFailure {
+                scope,
+                path: path.to_string_lossy().to_string(),
+                reason: err.message.clone(),
+            });
+            BTreeMap::new()
+        }
+    }
+}
+
+/// `(agent name, path)` for every `*.json` in an agents directory. A missing
+/// directory yields nothing. `.bak` and other extensions are ignored so a
+/// backup can never act as a config source.
+fn kiro_agent_definition_files(dir: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        out.push((name.to_string(), path));
+    }
+    out.sort();
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Hermes Agent  (~/.hermes/config.yaml  →  mcp_servers)
 //
 // Hermes reads the `mcp_servers` section of its own config.yaml natively at
@@ -3378,6 +4061,7 @@ fn remove_server_for_app(app: McpAppType, id: &str) -> Result<bool, AppCommandEr
         McpAppType::KimiCode => remove_kimi_code_server(id),
         McpAppType::Grok => remove_grok_server(id),
         McpAppType::Cursor => remove_cursor_server(id),
+        McpAppType::Kiro => remove_kiro_server(id),
     }
 }
 
@@ -5952,5 +6636,809 @@ mod tests {
             let canonical = canonicalize_spec(&spec, "expected").expect("canonical");
             assert_eq!(back, canonical, "round-trip mismatch for {spec}");
         }
+    }
+
+    // ── Kiro MCP (Requirement 4 / 5) ────────────────────────────────────────
+    //
+    // Fixtures live under `std::env::temp_dir()` (never a hardcoded `/tmp`,
+    // which `Path::is_absolute()` rejects on Windows).
+
+    /// A unique scratch directory under the platform temp dir, removed on drop.
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "codeg-kiro-{tag}-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp tree");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        /// Write `contents` to `rel`, creating parents.
+        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create parents");
+            std::fs::write(&path, contents).expect("write fixture");
+            path
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn kiro_mcp_json_path_is_the_global_settings_file() {
+        // The write target is <KIRO_HOME>/settings/mcp.json, resolved through
+        // the single `resolve_kiro_home_dir` (R4.1 / R4.1.7), and it is NOT an
+        // agent definition file (R4.1.1).
+        let path = kiro_mcp_json_path();
+        assert!(path.ends_with(Path::new("settings").join("mcp.json")), "{path:?}");
+        assert_eq!(
+            path.parent().and_then(Path::parent),
+            Some(crate::parsers::kiro::resolve_kiro_home_dir().as_path())
+        );
+        assert!(!path.to_string_lossy().contains("agents"));
+    }
+
+    #[test]
+    fn kiro_mcp_json_round_trips_and_preserves_unrecognized_fields() {
+        // P-2: read(write(c)) == c, including Kiro-specific and unknown fields.
+        let tree = TempTree::new("roundtrip");
+        let path = tree.path().join("settings").join("mcp.json");
+
+        // Missing file → empty set, and removing is a no-op (R4.1.11).
+        assert!(read_kiro_servers_at(&path).expect("read missing").is_empty());
+        assert!(!remove_kiro_server_at(&path, "absent").expect("remove missing"));
+
+        let spec = json!({
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-bravesearch"],
+            "env": {"BRAVE_API_KEY": "plaintext-secret"},
+            "disabled": false,
+            "autoApprove": ["search"],
+            "disabledTools": ["dangerous_tool"],
+            "timeout": 120000,
+            "someFutureKiroField": {"nested": [1, 2, 3]},
+        });
+        upsert_kiro_server_at(&path, "web-search", &spec).expect("upsert");
+
+        let servers = read_kiro_servers_at(&path).expect("read back");
+        assert_eq!(servers.len(), 1);
+        let stored = servers.get("web-search").expect("entry present");
+        // Kiro-specific + unrecognized fields survive verbatim (R4.2 / R4.4.5).
+        for key in [
+            "disabled",
+            "autoApprove",
+            "disabledTools",
+            "timeout",
+            "someFutureKiroField",
+        ] {
+            assert_eq!(
+                stored.get(key),
+                spec.get(key),
+                "field {key} must round-trip verbatim"
+            );
+        }
+        // `env` values and `args` elements are stored in plaintext, unmasked,
+        // with no placeholder write-back (R4.7 / R4.13).
+        assert_eq!(
+            stored.pointer("/env/BRAVE_API_KEY").and_then(Value::as_str),
+            Some("plaintext-secret")
+        );
+        assert_eq!(stored.get("args"), spec.get("args"));
+
+        // On disk the entry sits under `mcpServers` and carries no `type`
+        // discriminator (Kiro has no such field; it keys off shape).
+        let root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        let on_disk = root.pointer("/mcpServers/web-search").expect("on disk");
+        assert!(on_disk.get("type").is_none(), "no type key on disk");
+        assert_eq!(on_disk.get("command").and_then(Value::as_str), Some("npx"));
+
+        // A second read is stable (idempotent canonicalization).
+        assert_eq!(read_kiro_servers_at(&path).expect("read twice"), servers);
+    }
+
+    #[test]
+    fn kiro_remote_entry_round_trips_oauth_and_headers() {
+        // Remote servers carry url/headers/oauth/oauthScopes/env (R4.4.5).
+        let tree = TempTree::new("remote");
+        let path = tree.path().join("settings").join("mcp.json");
+
+        let spec = json!({
+            "url": "https://api.example.com/mcp",
+            "headers": {"Authorization": "Bearer plaintext"},
+            "env": {"REMOTE_TOKEN": "also-plaintext"},
+            "oauth": {"clientId": "cid", "redirectUri": "http://127.0.0.1:8080/cb"},
+            "oauthScopes": ["read", "write"],
+            "disabled": true,
+        });
+        upsert_kiro_server_at(&path, "remote", &spec).expect("upsert remote");
+
+        let servers = read_kiro_servers_at(&path).expect("read back");
+        let stored = servers.get("remote").expect("remote present");
+        // url-only ⇒ streamable HTTP (Kiro discriminates on shape).
+        assert_eq!(stored.get("type").and_then(Value::as_str), Some("http"));
+        for key in ["headers", "env", "oauth", "oauthScopes", "disabled"] {
+            assert_eq!(stored.get(key), spec.get(key), "field {key} must survive");
+        }
+    }
+
+    #[test]
+    fn kiro_remove_after_upsert_leaves_every_other_entry_field_for_field() {
+        // P-2: remove(upsert(c, s), s.id) equals c on all other entries, and
+        // every top-level key outside `mcpServers` is preserved (R4.4.1 / R4.11).
+        let tree = TempTree::new("remove");
+        let original = json!({
+            "$schema": "https://example.com/kiro-mcp.schema.json",
+            "unrelatedTopLevel": {"keep": "me"},
+            "mcpServers": {
+                "keeper": {
+                    "command": "keeper-bin",
+                    "args": ["--flag"],
+                    "env": {"K": "v"},
+                    "autoApprove": ["*"],
+                    "weirdField": 42,
+                },
+                "remote-keeper": {
+                    "url": "https://keep.example.com/mcp",
+                    "oauthScopes": ["read"],
+                },
+            },
+        });
+        let path = tree.write(
+            "settings/mcp.json",
+            &serde_json::to_string_pretty(&original).expect("serialize"),
+        );
+
+        let before = read_kiro_servers_at(&path).expect("read before");
+        upsert_kiro_server_at(&path, "temp", &json!({"command": "temp-bin"})).expect("upsert");
+        assert!(remove_kiro_server_at(&path, "temp").expect("remove"));
+
+        assert_eq!(
+            read_kiro_servers_at(&path).expect("read after"),
+            before,
+            "the other entries must be unchanged field-for-field"
+        );
+
+        // Top-level keys outside `mcpServers` survive, and the surviving raw
+        // entries keep their unknown fields byte-equal.
+        let after_root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(after_root.get("$schema"), original.get("$schema"));
+        assert_eq!(
+            after_root.get("unrelatedTopLevel"),
+            original.get("unrelatedTopLevel")
+        );
+        assert_eq!(
+            after_root.pointer("/mcpServers/keeper"),
+            original.pointer("/mcpServers/keeper")
+        );
+        assert_eq!(
+            after_root.pointer("/mcpServers/remote-keeper"),
+            original.pointer("/mcpServers/remote-keeper")
+        );
+        assert!(after_root.pointer("/mcpServers/temp").is_none());
+
+        // A second remove is a no-op that does not rewrite the file.
+        let bytes = std::fs::read(&path).expect("bytes");
+        assert!(!remove_kiro_server_at(&path, "temp").expect("remove again"));
+        assert_eq!(std::fs::read(&path).expect("bytes again"), bytes);
+    }
+
+    #[test]
+    fn kiro_write_is_refused_when_the_target_is_not_valid_json() {
+        // R4.8: an existing but unparsable target is refused, bytes untouched.
+        let tree = TempTree::new("badjson");
+        let path = tree.write("settings/mcp.json", "{ this is not json");
+        let before = std::fs::read(&path).expect("before");
+
+        let err = upsert_kiro_server_at(&path, "srv", &json!({"command": "bin"}))
+            .expect_err("must refuse");
+        assert!(matches!(
+            err.code,
+            crate::app_error::AppErrorCode::ConfigurationInvalid
+        ));
+        assert_eq!(std::fs::read(&path).expect("after"), before);
+
+        let err = remove_kiro_server_at(&path, "srv").expect_err("remove must refuse too");
+        assert!(matches!(
+            err.code,
+            crate::app_error::AppErrorCode::ConfigurationInvalid
+        ));
+        assert_eq!(std::fs::read(&path).expect("after remove"), before);
+    }
+
+    #[test]
+    fn kiro_fingerprint_conflict_refuses_the_write_and_leaves_bytes_unchanged() {
+        // P-2b: a file modified between read and write yields a conflict error
+        // and the file keeps the concurrent writer's bytes (R4.9).
+        let tree = TempTree::new("cas");
+        let path = tree.write(
+            "settings/mcp.json",
+            "{\n  \"mcpServers\": {\n    \"a\": { \"command\": \"a-bin\" }\n  }\n}\n",
+        );
+
+        // Capture the fingerprint as a reader would...
+        let (mut root, stale) = read_kiro_root_for_write(&path).expect("read for write");
+        // ...then let a concurrent writer change the file.
+        std::fs::write(
+            &path,
+            "{\n  \"mcpServers\": {\n    \"b\": { \"command\": \"b-bin\" }\n  }\n}\n",
+        )
+        .expect("concurrent write");
+        let concurrent = std::fs::read(&path).expect("concurrent bytes");
+
+        root.as_object_mut()
+            .expect("object")
+            .insert("injected".to_string(), json!(true));
+        let err = write_kiro_root_checked(&path, &root, &stale).expect_err("must conflict");
+        assert!(matches!(
+            err.code,
+            crate::app_error::AppErrorCode::AlreadyExists
+        ));
+        assert_eq!(
+            std::fs::read(&path).expect("after conflict"),
+            concurrent,
+            "a conflicted write must not overwrite the file"
+        );
+
+        // A fresh fingerprint lets the same write through.
+        let (root, fresh) = read_kiro_root_for_write(&path).expect("re-read");
+        write_kiro_root_checked(&path, &root, &fresh).expect("write with fresh fingerprint");
+    }
+
+    #[test]
+    fn kiro_write_conflict_also_covers_a_file_created_after_the_read() {
+        // The fingerprint of a missing file is `None`; a file appearing between
+        // read and write is a conflict, not a silent overwrite.
+        let tree = TempTree::new("cas-created");
+        let path = tree.path().join("settings").join("mcp.json");
+        let (root, absent) = read_kiro_root_for_write(&path).expect("read missing");
+        assert!(absent.is_none());
+
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, "{\"mcpServers\":{}}\n").expect("someone else created it");
+        let theirs = std::fs::read(&path).expect("their bytes");
+
+        let err = write_kiro_root_checked(&path, &root, &absent).expect_err("must conflict");
+        assert!(matches!(
+            err.code,
+            crate::app_error::AppErrorCode::AlreadyExists
+        ));
+        assert_eq!(std::fs::read(&path).expect("after"), theirs);
+    }
+
+    #[test]
+    fn kiro_failed_write_leaves_the_target_bytes_unchanged() {
+        // P-2b: a simulated landing failure (the temp file cannot be renamed
+        // because the "target" is a non-empty directory) leaves the target as it
+        // was, and does not leave staging files behind (R4.10).
+        let tree = TempTree::new("atomic");
+        let good = tree.write(
+            "settings/mcp.json",
+            "{\n  \"mcpServers\": {\n    \"a\": { \"command\": \"a-bin\" }\n  }\n}\n",
+        );
+        let before = std::fs::read(&good).expect("before");
+
+        // A path that is a non-empty DIRECTORY can never be landed on: the
+        // fingerprint read fails on Windows (os error 5) and the final rename
+        // fails everywhere. Either way the write must abort without side effects.
+        let blocked = tree.path().join("settings").join("blocked.json");
+        std::fs::create_dir_all(blocked.join("occupied")).expect("mkdir occupied");
+        let err = match read_kiro_fingerprint(&blocked) {
+            Ok(fingerprint) => {
+                write_kiro_root_checked(&blocked, &json!({"mcpServers": {}}), &fingerprint)
+                    .expect_err("landing on a directory must fail")
+            }
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err.code,
+            crate::app_error::AppErrorCode::IoError
+                | crate::app_error::AppErrorCode::PermissionDenied
+                | crate::app_error::AppErrorCode::AlreadyExists
+        ));
+
+        // The real config file is untouched, and no staging file is left in the
+        // directory (the writer removes its temp file on failure).
+        assert_eq!(std::fs::read(&good).expect("after"), before);
+        let leftovers: Vec<String> = std::fs::read_dir(tree.path().join("settings"))
+            .expect("read dir")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains("codeg-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging files left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn kiro_writer_leaves_unrelated_files_in_the_settings_directory_alone() {
+        // The real <KIRO_HOME>/settings also holds permissions.yaml and
+        // mcp.json.bak* files: the writer must not touch them, and a `.bak` is
+        // never a config source.
+        let tree = TempTree::new("siblings");
+        let path = tree.write("settings/mcp.json", "{\"mcpServers\":{}}\n");
+        let perms = tree.write("settings/permissions.yaml", "allow: []\n");
+        let bak = tree.write(
+            "settings/mcp.json.bak-20260704-reqable",
+            "{\"mcpServers\":{\"from-backup\":{\"command\":\"nope\"}}}\n",
+        );
+        let perms_before = std::fs::read(&perms).expect("perms before");
+        let bak_before = std::fs::read(&bak).expect("bak before");
+
+        upsert_kiro_server_at(&path, "srv", &json!({"command": "bin"})).expect("upsert");
+
+        assert_eq!(std::fs::read(&perms).expect("perms after"), perms_before);
+        assert_eq!(std::fs::read(&bak).expect("bak after"), bak_before);
+        // The backup's entry never enters the read set.
+        let servers = read_kiro_servers_at(&path).expect("read");
+        assert!(servers.contains_key("srv"));
+        assert!(!servers.contains_key("from-backup"));
+    }
+
+    // ── Kiro three-scope merge for display (R4.1.2 / 4.1.3 / 4.1.4 / 4.1.12) ─
+
+    /// Find one row by id.
+    fn scoped_row<'a>(view: &'a KiroMcpView, id: &str) -> &'a KiroMcpScopedServer {
+        view.servers
+            .iter()
+            .find(|row| row.id == id)
+            .unwrap_or_else(|| panic!("row {id} missing; got {:?}", view.servers))
+    }
+
+    #[test]
+    fn kiro_three_scopes_accumulate_different_names_and_shadow_same_names() {
+        // Official example: agent `fetch` + workspace `git` + global `aws` are
+        // all live at once; a same-named server is overridden by the higher
+        // scope, precedence Agent > Project > Global.
+        let home = TempTree::new("scopes-home");
+        let workspace = TempTree::new("scopes-ws");
+
+        home.write(
+            "settings/mcp.json",
+            r#"{"mcpServers":{
+                 "aws": {"command": "global-aws"},
+                 "shared": {"command": "global-shared"},
+                 "global-only": {"command": "global-only-bin"}
+               }}"#,
+        );
+        workspace.write(
+            ".kiro/settings/mcp.json",
+            r#"{"mcpServers":{
+                 "git": {"command": "project-git"},
+                 "shared": {"command": "project-shared"}
+               }}"#,
+        );
+        home.write(
+            "agents/main.json",
+            r#"{"name":"main","useLegacyMcpJson":true,
+                "mcpServers":{"fetch": {"command": "agent-fetch"},
+                              "shared": {"command": "agent-shared"}}}"#,
+        );
+
+        let view = build_kiro_scoped_view(home.path(), Some(workspace.path()));
+        assert!(view.scope_failures.is_empty());
+        assert_eq!(
+            view.write_target,
+            home.path()
+                .join("settings")
+                .join("mcp.json")
+                .to_string_lossy()
+                .to_string(),
+            "the panel always shows the global file as the write target (R4.1.5)"
+        );
+
+        // Different names accumulate across all three scopes.
+        let ids: Vec<&str> = view.servers.iter().map(|row| row.id.as_str()).collect();
+        for expected in ["aws", "git", "fetch", "global-only", "shared"] {
+            assert!(ids.contains(&expected), "missing {expected} in {ids:?}");
+        }
+
+        // Scope annotation + editability (only Global is editable — R4.1.4).
+        let aws = scoped_row(&view, "aws");
+        assert_eq!(aws.scope, KiroMcpScope::Global);
+        assert!(aws.editable);
+        assert!(aws.shadowed_scopes.is_empty());
+
+        let git = scoped_row(&view, "git");
+        assert_eq!(git.scope, KiroMcpScope::Project);
+        assert!(!git.editable, "project entries are read-only in codeg");
+
+        let fetch = scoped_row(&view, "fetch");
+        assert_eq!(fetch.scope, KiroMcpScope::Agent);
+        assert!(!fetch.editable, "agent entries are read-only in codeg");
+        assert_eq!(fetch.agent_name.as_deref(), Some("main"));
+
+        // Same name in all three: agent wins, the other two are flagged
+        // shadowed, and the effective spec is the winner's (R4.1.3).
+        let shared = scoped_row(&view, "shared");
+        assert_eq!(shared.scope, KiroMcpScope::Agent);
+        assert_eq!(
+            shared.spec.get("command").and_then(Value::as_str),
+            Some("agent-shared")
+        );
+        assert_eq!(
+            shared.shadowed_scopes,
+            vec![KiroMcpScope::Global, KiroMcpScope::Project]
+        );
+        assert!(!shared.editable);
+    }
+
+    #[test]
+    fn kiro_missing_scope_files_are_empty_sets_not_errors() {
+        // R4.1.11: no project file, no agents dir, not even a global file.
+        let home = TempTree::new("scopes-empty-home");
+        let workspace = TempTree::new("scopes-empty-ws");
+
+        let view = build_kiro_scoped_view(home.path(), Some(workspace.path()));
+        assert!(view.servers.is_empty());
+        assert!(view.scope_failures.is_empty());
+
+        // Global-only, and no workspace at all (project scope skipped).
+        home.write("settings/mcp.json", r#"{"mcpServers":{"a":{"command":"a"}}}"#);
+        let view = build_kiro_scoped_view(home.path(), None);
+        assert_eq!(view.servers.len(), 1);
+        assert_eq!(view.servers[0].scope, KiroMcpScope::Global);
+        assert!(view.scope_failures.is_empty());
+    }
+
+    #[test]
+    fn kiro_one_corrupt_scope_file_marks_that_scope_and_keeps_the_others() {
+        // R4.1.12: a scope that exists but is invalid JSON is marked failed
+        // while the remaining scopes still display.
+        let home = TempTree::new("scopes-corrupt-home");
+        let workspace = TempTree::new("scopes-corrupt-ws");
+
+        home.write("settings/mcp.json", r#"{"mcpServers":{"aws":{"command":"a"}}}"#);
+        workspace.write(".kiro/settings/mcp.json", "{ broken json");
+        home.write(
+            "agents/reviewer.json",
+            r#"{"name":"reviewer","mcpServers":{"fetch":{"command":"f"}}}"#,
+        );
+
+        let view = build_kiro_scoped_view(home.path(), Some(workspace.path()));
+        assert_eq!(view.scope_failures.len(), 1);
+        let failure = &view.scope_failures[0];
+        assert_eq!(failure.scope, KiroMcpScope::Project);
+        assert!(failure.path.ends_with("mcp.json"), "{}", failure.path);
+        assert!(!failure.reason.is_empty());
+
+        // The other two scopes still produced rows.
+        let ids: Vec<&str> = view.servers.iter().map(|row| row.id.as_str()).collect();
+        assert!(ids.contains(&"aws"));
+        assert!(ids.contains(&"fetch"));
+    }
+
+    #[test]
+    fn kiro_agent_definitions_without_mcp_servers_contribute_nothing() {
+        // `main.json` on this machine uses the OLD name `useLegacyMcpJson: true`
+        // and embeds no `mcpServers`; `includeMcpJson`'s default is undocumented,
+        // so we neither assert a default nor let such a file suppress the lower
+        // scopes — accumulate-unless-same-name is the baseline.
+        let home = TempTree::new("scopes-agentless");
+        home.write("settings/mcp.json", r#"{"mcpServers":{"aws":{"command":"a"}}}"#);
+        home.write(
+            "agents/main.json",
+            r#"{"name":"main","prompt":"p","tools":["fs_read"],"useLegacyMcpJson":true}"#,
+        );
+        // A non-JSON file in the agents dir is ignored entirely.
+        home.write("agents/notes.md", "not a definition");
+
+        let view = build_kiro_scoped_view(home.path(), None);
+        assert_eq!(view.servers.len(), 1);
+        assert_eq!(view.servers[0].id, "aws");
+        assert_eq!(view.servers[0].scope, KiroMcpScope::Global);
+        assert!(view.servers[0].editable);
+        assert!(view.scope_failures.is_empty());
+    }
+
+    #[test]
+    fn kiro_workspace_agent_definitions_are_read_too() {
+        // Agent scope covers BOTH `<KIRO_HOME>/agents` and
+        // `<workspace>/.kiro/agents`.
+        let home = TempTree::new("scopes-wsagent-home");
+        let workspace = TempTree::new("scopes-wsagent-ws");
+        home.write("settings/mcp.json", r#"{"mcpServers":{}}"#);
+        workspace.write(
+            ".kiro/agents/local.json",
+            r#"{"name":"local","mcpServers":{"ws-fetch":{"command":"wf"}}}"#,
+        );
+
+        let view = build_kiro_scoped_view(home.path(), Some(workspace.path()));
+        let row = scoped_row(&view, "ws-fetch");
+        assert_eq!(row.scope, KiroMcpScope::Agent);
+        assert_eq!(row.agent_name.as_deref(), Some("local"));
+        assert!(!row.editable);
+    }
+
+    // ── Kiro credential admission gate (Requirement 5) ───────────────────────
+
+    const KIRO_OPS: [KiroCredentialOp; 4] = [
+        KiroCredentialOp::ReadMcpConfig,
+        KiroCredentialOp::WriteMcpConfig,
+        KiroCredentialOp::ReadApiKey,
+        KiroCredentialOp::WriteApiKey,
+    ];
+
+    #[test]
+    fn kiro_gate_denies_all_four_http_operations_by_default() {
+        // R5.2 default DENY + R5.3 all four operations, with a clear reason.
+        for op in KIRO_OPS {
+            let err = kiro_admission_decision(McpEntryPoint::Http, false, op)
+                .expect_err("must deny by default");
+            assert!(matches!(
+                err.code,
+                crate::app_error::AppErrorCode::PermissionDenied
+            ));
+            assert!(
+                err.message.contains(op.describe()),
+                "reason must name the operation: {}",
+                err.message
+            );
+            assert_eq!(
+                err.i18n_key.as_deref(),
+                Some("errors.kiroCredentialsDesktopOnly")
+            );
+        }
+    }
+
+    #[test]
+    fn kiro_gate_allows_desktop_always_and_http_only_when_enabled() {
+        for op in KIRO_OPS {
+            // Desktop is allowed regardless of the flag.
+            kiro_admission_decision(McpEntryPoint::Desktop, false, op).expect("desktop denied");
+            kiro_admission_decision(McpEntryPoint::Desktop, true, op).expect("desktop denied");
+            // HTTP passes only with the opt-in.
+            kiro_admission_decision(McpEntryPoint::Http, true, op).expect("opt-in denied");
+        }
+    }
+
+    #[test]
+    fn kiro_gate_refusal_never_echoes_credential_material() {
+        // R5.3.1: no `env` value, `args` element, or key plaintext in the
+        // message, detail, or i18n params.
+        for op in KIRO_OPS {
+            let err = kiro_admission_decision(McpEntryPoint::Http, false, op).expect_err("deny");
+            let rendered = format!(
+                "{} {:?} {:?}",
+                err.message, err.detail, err.i18n_params
+            );
+            for secret in ["plaintext-secret", "Bearer", "sk-", "BRAVE_API_KEY"] {
+                assert!(
+                    !rendered.contains(secret),
+                    "refusal leaked {secret}: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kiro_entry_point_defaults_to_desktop_and_scopes_to_http() {
+        // The task-local marker is what distinguishes the two entry points.
+        assert_eq!(current_entry_point(), McpEntryPoint::Desktop);
+        let observed = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                with_http_entry_point(async { current_entry_point() }).await
+            });
+        assert_eq!(observed, McpEntryPoint::Http);
+    }
+
+    #[test]
+    fn kiro_gate_denial_leaves_the_config_bytes_unchanged() {
+        // P-4: when the decision is deny, the file is byte-identical before and
+        // after every attempted operation.
+        let tree = TempTree::new("gate-bytes");
+        let path = tree.write(
+            "settings/mcp.json",
+            "{\n  \"mcpServers\": {\n    \"a\": { \"command\": \"a-bin\" }\n  }\n}\n",
+        );
+        let before = std::fs::read(&path).expect("before");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(with_http_entry_point(async {
+            // Read is refused.
+            let err = read_kiro_servers_at_gated(&path).expect_err("read must be refused");
+            assert!(matches!(
+                err.code,
+                crate::app_error::AppErrorCode::PermissionDenied
+            ));
+            // Both writes are refused.
+            upsert_kiro_server_at(&path, "new", &json!({"command": "b"}))
+                .expect_err("upsert must be refused");
+            remove_kiro_server_at(&path, "a").expect_err("remove must be refused");
+        }));
+
+        assert_eq!(
+            std::fs::read(&path).expect("after"),
+            before,
+            "a denied gate must not touch the file"
+        );
+    }
+
+    /// Read helper that goes through the gate the way `read_kiro_servers` does,
+    /// but against an injected path (the production reader resolves KIRO_HOME).
+    fn read_kiro_servers_at_gated(path: &Path) -> Result<BTreeMap<String, Value>, AppCommandError> {
+        ensure_kiro_credential_access(KiroCredentialOp::ReadMcpConfig)?;
+        read_kiro_servers_at(path)
+    }
+
+    #[test]
+    fn kiro_gate_flag_parsing_defaults_to_deny() {
+        // Only explicit affirmatives open the flag; anything else denies (R5.2).
+        // Parsed through the pure helper so this test never mutates process env
+        // (which would race the gate checks in the tests running alongside it).
+        for raw in ["1", "true", "TRUE", " yes ", "allow"] {
+            assert!(kiro_access_flag_enabled(raw), "{raw:?} should enable");
+        }
+        for raw in ["0", "false", "", " ", "maybe", "deny", "2"] {
+            assert!(!kiro_access_flag_enabled(raw), "{raw:?} should deny");
+        }
+        // The env name itself is part of the operator-facing contract.
+        assert_eq!(
+            KIRO_HTTP_CREDENTIAL_ACCESS_ENV,
+            "CODEG_KIRO_HTTP_CREDENTIAL_ACCESS"
+        );
+    }
+
+    #[test]
+    fn kiro_gate_does_not_affect_the_other_twelve_apps() {
+        // P-5 / R5.5: for every non-Kiro app the pre-mutation check is a no-op
+        // whatever the flag says, and non-Kiro read/write keeps working from the
+        // HTTP entry point.
+        let non_kiro = [
+            McpAppType::ClaudeCode,
+            McpAppType::Codex,
+            McpAppType::Gemini,
+            McpAppType::OpenClaw,
+            McpAppType::OpenCode,
+            McpAppType::Cline,
+            McpAppType::Hermes,
+            McpAppType::CodeBuddy,
+            McpAppType::KimiCode,
+            McpAppType::Grok,
+            McpAppType::Cursor,
+        ];
+        for app in non_kiro {
+            ensure_kiro_admission_for_apps(&[app], KiroCredentialOp::WriteMcpConfig)
+                .unwrap_or_else(|err| panic!("{app:?} must not be gated: {}", err.message));
+        }
+        // Kiro in the list is what trips it (from the HTTP entry point).
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(with_http_entry_point(async {
+            for app in non_kiro {
+                ensure_kiro_admission_for_apps(&[app], KiroCredentialOp::WriteMcpConfig)
+                    .unwrap_or_else(|err| panic!("{app:?} must not be gated: {}", err.message));
+            }
+            ensure_kiro_admission_for_apps(
+                &[McpAppType::ClaudeCode, McpAppType::Kiro],
+                KiroCredentialOp::WriteMcpConfig,
+            )
+            .expect_err("a list containing Kiro must be gated");
+
+            // A non-Kiro agent's own file still round-trips under the gate.
+            let tree = TempTree::new("gate-other-app");
+            let other = tree.path().join("mcp.json");
+            upsert_kimi_code_server_at(&other, "ctx7", &json!({"command": "npx"}))
+                .expect("non-Kiro write must not be gated");
+            assert!(read_kimi_code_servers_at(&other)
+                .expect("non-Kiro read must not be gated")
+                .contains_key("ctx7"));
+            assert!(remove_kimi_code_server_at(&other, "ctx7").expect("non-Kiro remove"));
+        }));
+    }
+
+    #[test]
+    fn kiro_scan_omission_branch_is_fed_a_real_permission_denied_error() {
+        // `scan_local_servers` treats a denied Kiro read as "no Kiro entries" so
+        // the panel still lists the other 12 agents over HTTP (R5.5 / R5.6)
+        // instead of failing wholesale. That branch keys on PermissionDenied, so
+        // pin that `read_kiro_servers` really produces that code from the HTTP
+        // entry point — otherwise the branch would be dead and the error would
+        // propagate, blanking the panel. Skipped if the operator has opted into
+        // LAN credential access in this shell, where a refusal is not expected.
+        if kiro_http_credential_access_allowed() {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let err = runtime.block_on(with_http_entry_point(async {
+            read_kiro_servers().expect_err("HTTP read must be refused")
+        }));
+        assert!(matches!(
+            err.code,
+            crate::app_error::AppErrorCode::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn kiro_app_type_serializes_to_the_frontend_string() {
+        // The `McpAppType` contract is hand-written on three other layers
+        // (types.ts union, mcp-settings option value, option key), so the
+        // backend variant's wire string is pinned here.
+        assert_eq!(
+            serde_json::to_value(McpAppType::Kiro).expect("serialize"),
+            json!("kiro")
+        );
+        assert_eq!(
+            serde_json::from_value::<McpAppType>(json!("kiro")).expect("deserialize"),
+            McpAppType::Kiro
+        );
+    }
+
+    #[test]
+    fn kiro_is_wired_into_every_app_dispatch_site() {
+        // Two of the five wiring sites are compiler-forced `match` arms; the
+        // hand-written app lists are not, so assert Kiro is in the shared list
+        // both of them now use.
+        let all_apps = all_mcp_app_types();
+        assert!(all_apps.contains(&McpAppType::Kiro), "{all_apps:?}");
+        // `scan_local_servers` reads Kiro through `read_kiro_servers`, which is
+        // the only reader keyed to `McpAppType::Kiro`; `read_servers_for_agent_type`
+        // must no longer return the empty placeholder for it.
+        let tree = TempTree::new("scan-wired");
+        let path = tree.write(
+            "settings/mcp.json",
+            r#"{"mcpServers":{"scanned":{"command":"s"}}}"#,
+        );
+        assert!(read_kiro_servers_at(&path)
+            .expect("read")
+            .contains_key("scanned"));
+    }
+
+    /// The three-scope view must be reachable from a real command, not just from
+    /// tests. A fully-tested reader with no production caller is dead code — the
+    /// exact failure this suite is meant to prevent.
+    #[tokio::test]
+    async fn kiro_scoped_view_is_reachable_through_its_command() {
+        let view = mcp_kiro_scoped_view(None)
+            .await
+            .expect("desktop entry point is always admitted");
+        // The panel needs the absolute read/write target (R4.1.5) whether or not
+        // the file exists yet.
+        assert!(
+            view.write_target.ends_with("mcp.json"),
+            "write_target should name the global config file: {}",
+            view.write_target
+        );
+        assert!(Path::new(&view.write_target).is_absolute());
+
+        // A blank workspace path means "no workspace open" and must be treated as
+        // "skip the Project scope", not as a relative path rooted at codeg's cwd.
+        let blank = mcp_kiro_scoped_view(Some("   ".to_string()))
+            .await
+            .expect("blank workspace is not an error");
+        assert_eq!(blank.write_target, view.write_target);
+    }
+
+    /// Over HTTP the same command must be refused by default (R5.3), and the
+    /// refusal must not leak any entry value (R5.3.1).
+    #[tokio::test]
+    async fn kiro_scoped_view_is_denied_over_http_by_default() {
+        let err = with_http_entry_point(mcp_kiro_scoped_view(None))
+            .await
+            .expect_err("HTTP must be denied unless the operator opts in");
+        let message = err.to_string();
+        assert!(
+            message.contains(KIRO_HTTP_CREDENTIAL_ACCESS_ENV),
+            "the refusal should name the flag that would allow it: {message}"
+        );
     }
 }

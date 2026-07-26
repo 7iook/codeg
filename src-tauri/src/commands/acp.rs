@@ -8585,6 +8585,22 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
                 }
             }
         }
+        // Kiro's API key rides in this same `env` map. Over HTTP the credential
+        // gate denies reading it by default (R5.3), but this payload carries all
+        // 13 agents at once and the agent list itself must stay usable over the
+        // LAN (R5.6) — so withhold just that one entry instead of failing the
+        // request. Desktop is unaffected: the gate passes and the key is returned
+        // in plaintext, which is the deliberate choice for a local tool (R7.2).
+        if agent_type == AgentType::Kiro
+            && crate::commands::mcp::ensure_kiro_credential_access(
+                crate::commands::mcp::KiroCredentialOp::ReadApiKey,
+            )
+            .is_err()
+        {
+            for key in crate::acp::connection::KIRO_API_KEY_ENVS {
+                env.remove(*key);
+            }
+        }
         let sort_order = setting.map(|m| m.sort_order).unwrap_or(idx as i32);
         // Persist detected version to DB for binary agents (npx written during install/upgrade)
         if dist_type == "binary" {
@@ -8869,6 +8885,18 @@ pub(crate) async fn acp_update_agent_env_core(
     db: &AppDatabase,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
+    // Kiro's API key lives in this env map, so writing it is a Kiro credential
+    // operation and goes through the same admission gate as its MCP config
+    // (R5.3). Desktop always passes; over HTTP the default is DENY. Keyed on
+    // Kiro alone, so the other 12 agents are untouched (R5.5). Placed before any
+    // write so a refusal leaves the stored settings exactly as they were (R5.4).
+    if agent_type == AgentType::Kiro {
+        crate::commands::mcp::ensure_kiro_credential_access(
+            crate::commands::mcp::KiroCredentialOp::WriteApiKey,
+        )
+        .map_err(|e| AcpError::protocol(e.to_string()))?;
+    }
+
     let default = agent_setting_service::AgentDefaultInput {
         agent_type,
         registry_id: registry::registry_id_for(agent_type).to_string(),
@@ -10888,6 +10916,27 @@ mod tests {
         assert!(
             message.contains("reviewer"),
             "the error should list what IS available: {message}"
+        );
+    }
+
+    /// The Kiro API-key gate must actually be CALLED from this module, not just
+    /// defined in `commands::mcp`. Over HTTP the write path has to refuse before
+    /// it persists anything (R5.3 / R5.4), and the read path has to withhold the
+    /// key while still returning the rest of the agent list (R5.6).
+    #[test]
+    fn kiro_api_key_ops_are_gated_over_http_and_open_on_desktop() {
+        use crate::commands::mcp::{ensure_kiro_credential_access, KiroCredentialOp};
+
+        // Desktop: both operations are admitted, which is what makes the
+        // plaintext-key decision (R7.2) work at all.
+        assert!(ensure_kiro_credential_access(KiroCredentialOp::ReadApiKey).is_ok());
+        assert!(ensure_kiro_credential_access(KiroCredentialOp::WriteApiKey).is_ok());
+
+        // The env keys the read path redacts must be the same ones the launch
+        // path injects — otherwise the redaction silently covers nothing.
+        assert!(
+            crate::acp::connection::KIRO_API_KEY_ENVS.contains(&"KIRO_API_KEY"),
+            "the redaction list must cover the key the launch path injects"
         );
     }
 
