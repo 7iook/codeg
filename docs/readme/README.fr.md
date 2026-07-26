@@ -21,6 +21,9 @@ Codeg (Code Generation) est un espace de travail de programmation multi-agents :
 
 Il regroupe les sessions de toutes les CLI d'agents supportées dans un espace de travail unique et consultable, permet à un agent principal de déléguer à des sous-agents d'autres types au sein d'une même tâche, et fonctionne en application de bureau, en serveur autonome ou en conteneur Docker.
 
+![Espace de travail](../images/workspace-light.png#gh-light-mode-only)
+![Espace de travail](../images/workspace-dark.png#gh-dark-mode-only)
+
 ## 📖 Documentation
 
 **La documentation complète se trouve sur [docs.codeg.app](https://docs.codeg.app)** — [Démarrage](https://docs.codeg.app/getting-started/) · [Guide](https://docs.codeg.app/guide/) · [Référence](https://docs.codeg.app/reference/)

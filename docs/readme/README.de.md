@@ -21,6 +21,9 @@ Codeg (Code Generation) ist ein Multi-Agent-Coding-Workspace: Führe jeden KI-Co
 
 Codeg bündelt die Sitzungen aller unterstützten Agenten-CLIs in einem durchsuchbaren Workspace, lässt einen Haupt-Agenten innerhalb einer Aufgabe an Sub-Agenten anderer Typen delegieren und läuft als Desktop-App, eigenständiger Server oder Docker-Container.
 
+![Workspace](../images/workspace-light.png#gh-light-mode-only)
+![Workspace](../images/workspace-dark.png#gh-dark-mode-only)
+
 ## 📖 Dokumentation
 
 **Die vollständige Dokumentation liegt unter [docs.codeg.app](https://docs.codeg.app)** — [Erste Schritte](https://docs.codeg.app/getting-started/) · [Guide](https://docs.codeg.app/guide/) · [Referenz](https://docs.codeg.app/reference/)

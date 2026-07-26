@@ -21,6 +21,9 @@ Codeg（Code Generation）是一个多智能体编码工作台：把所有 AI �
 
 它将所有受支持智能体 CLI 的会话聚合进一个可搜索的工作区，让主智能体在同一个任务内委派给其它类型的子智能体，并可作为桌面应用、独立服务器或 Docker 容器运行。
 
+![工作区](../images/workspace-light.png#gh-light-mode-only)
+![工作区](../images/workspace-dark.png#gh-dark-mode-only)
+
 ## 📖 文档
 
 **完整文档见 [docs.codeg.app](https://docs.codeg.app)** — [快速开始](https://docs.codeg.app/zh/getting-started/) · [指南](https://docs.codeg.app/zh/guide/) · [参考](https://docs.codeg.app/zh/reference/)

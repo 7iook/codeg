@@ -21,6 +21,9 @@ Codeg (Code Generation) هو مساحة عمل برمجية متعددة الو�
 
 يجمع جلساتك من كل واجهات الوكلاء المدعومة في مساحة عمل واحدة قابلة للبحث، ويتيح للوكيل الرئيسي أن يفوّض إلى وكلاء فرعيين من أنواع أخرى داخل المهمة نفسها، ويعمل كتطبيق سطح مكتب أو خادم مستقل أو حاوية Docker.
 
+![مساحة العمل](../images/workspace-light.png#gh-light-mode-only)
+![مساحة العمل](../images/workspace-dark.png#gh-dark-mode-only)
+
 ## 📖 التوثيق
 
 **التوثيق الكامل على [docs.codeg.app](https://docs.codeg.app)** — [البداية](https://docs.codeg.app/getting-started/) · [الدليل](https://docs.codeg.app/guide/) · [المرجع](https://docs.codeg.app/reference/)

@@ -21,6 +21,9 @@ Codeg（Code Generation）はマルチエージェント・コーディングワ
 
 対応するすべてのエージェント CLI のセッションを検索可能なワークスペースへ集約し、ひとつのタスクの中でメインエージェントが別種類のサブエージェントへ委譲でき、デスクトップアプリ・スタンドアロンサーバー・Docker コンテナのいずれとしても動作します。
 
+![ワークスペース](../images/workspace-light.png#gh-light-mode-only)
+![ワークスペース](../images/workspace-dark.png#gh-dark-mode-only)
+
 ## 📖 ドキュメント
 
 **完全なドキュメントは [docs.codeg.app](https://docs.codeg.app)** — [はじめに](https://docs.codeg.app/getting-started/) · [ガイド](https://docs.codeg.app/guide/) · [リファレンス](https://docs.codeg.app/reference/)

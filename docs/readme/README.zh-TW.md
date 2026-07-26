@@ -21,6 +21,9 @@ Codeg（Code Generation）是一個多智慧體編碼工作台：把所有 AI �
 
 它將所有支援的智慧體 CLI 的工作階段聚合進一個可搜尋的工作區，讓主智慧體在同一個任務內委派給其它類型的子智慧體，並可作為桌面應用、獨立伺服器或 Docker 容器執行。
 
+![工作區](../images/workspace-light.png#gh-light-mode-only)
+![工作區](../images/workspace-dark.png#gh-dark-mode-only)
+
 ## 📖 文件
 
 **完整文件見 [docs.codeg.app](https://docs.codeg.app)** — [快速開始](https://docs.codeg.app/zh/getting-started/) · [指南](https://docs.codeg.app/zh/guide/) · [參考](https://docs.codeg.app/zh/reference/)

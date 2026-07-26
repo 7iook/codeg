@@ -21,6 +21,9 @@ Codeg(Code Generation)는 멀티 에이전트 코딩 워크스페이스입니다
 
 지원되는 모든 에이전트 CLI의 세션을 검색 가능한 하나의 워크스페이스로 모으고, 하나의 작업 안에서 메인 에이전트가 다른 종류의 서브 에이전트에게 위임할 수 있으며, 데스크톱 앱·독립 서버·Docker 컨테이너 어느 형태로든 실행됩니다.
 
+![워크스페이스](../images/workspace-light.png#gh-light-mode-only)
+![워크스페이스](../images/workspace-dark.png#gh-dark-mode-only)
+
 ## 📖 문서
 
 **전체 문서는 [docs.codeg.app](https://docs.codeg.app)** — [시작하기](https://docs.codeg.app/getting-started/) · [가이드](https://docs.codeg.app/guide/) · [레퍼런스](https://docs.codeg.app/reference/)
