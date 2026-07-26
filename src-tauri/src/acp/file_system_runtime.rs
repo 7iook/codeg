@@ -1420,6 +1420,78 @@ mod tests {
         );
     }
 
+    /// P-2c for Kiro's boundary, exercised through the REAL write gate on a real
+    /// directory tree rather than by comparing root lists.
+    ///
+    /// The root-set test above proves `settings/` is not a prefix match; this
+    /// proves a request cannot reach it by walking back out with `..`. The
+    /// existing symlink test is `#[cfg(unix)]` and therefore never runs on the
+    /// platform this is developed and used on, so the `..` half has to be
+    /// platform-independent to be worth anything here.
+    #[tokio::test(flavor = "current_thread")]
+    async fn kiro_write_gate_rejects_dotdot_escape_into_settings() {
+        let kiro_home = temp_workspace();
+        let sessions = kiro_home.join("sessions");
+        let settings = kiro_home.join("settings");
+        fs::create_dir_all(&sessions).expect("create sessions");
+        fs::create_dir_all(&settings).expect("create settings");
+
+        // The policy grants exactly what `agent_data_roots` grants Kiro.
+        let runtime = FileSystemRuntime::with_policy(reads_open_writes_confined_to(&sessions));
+
+        // `<KIRO_HOME>/sessions/../settings/mcp.json` normalizes to the MCP
+        // credential file — the single most sensitive target behind this gate.
+        let escape = sessions.join("..").join("settings").join("mcp.json");
+        let message = invalid_params(
+            runtime
+                .write_text_file(WriteTextFileRequest::new("sid", escape, "pwned"))
+                .await
+                .expect_err("`..` must not tunnel out of the sessions root"),
+        );
+        assert!(
+            message.contains("outside the allowed write roots"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !settings.join("mcp.json").exists(),
+            "the MCP credential file must not have been created"
+        );
+
+        // Same for the agent definitions, which carry prompts and tool allowlists.
+        let agents = kiro_home.join("agents");
+        fs::create_dir_all(&agents).expect("create agents");
+        let escape = sessions.join("..").join("agents").join("main.json");
+        invalid_params(
+            runtime
+                .write_text_file(WriteTextFileRequest::new("sid", escape, "pwned"))
+                .await
+                .expect_err("`..` must not reach agent definitions"),
+        );
+        assert!(!agents.join("main.json").exists());
+
+        // The positive control: without this, the test could pass simply because
+        // every write is rejected.
+        runtime
+            .write_text_file(WriteTextFileRequest::new(
+                "sid",
+                sessions.join("cli").join("ok.jsonl"),
+                "{}",
+            ))
+            .await
+            .expect_err("a missing parent directory is rejected for its own reason");
+        fs::create_dir_all(sessions.join("cli")).expect("create cli dir");
+        runtime
+            .write_text_file(WriteTextFileRequest::new(
+                "sid",
+                sessions.join("cli").join("ok.jsonl"),
+                "{}",
+            ))
+            .await
+            .expect("a write inside the sessions root must be allowed");
+
+        let _ = fs::remove_dir_all(&kiro_home);
+    }
+
     /// No relocation value may be tilde-expanded: the launched CLIs treat `~`
     /// literally, so expanding it here would hand out `$HOME` as a writable root
     /// the user never selected. Hermes' launch contract
