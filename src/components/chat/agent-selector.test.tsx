@@ -44,6 +44,7 @@ function agent(
     cursor_cli_config_json: null,
     cursor_settings: null,
     model_provider_id: null,
+    icon_url: null,
     ...overrides,
   }
 }

@@ -63,7 +63,7 @@ import type {
   ToolCallImageWire,
   UserMessageBlock,
 } from "@/lib/types"
-import { AGENT_LABELS } from "@/lib/types"
+import { getAgentLabel } from "@/lib/custom-agents"
 import {
   CONNECTION_IDLE_TIMEOUT_MS,
   CONNECTION_KEEPALIVE_INTERVAL_MS,
@@ -2567,7 +2567,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         return { kind: "missing_config", reason: t("blocked.missingConfig") }
       }
 
-      const agentLabel = AGENT_LABELS[agent.agent_type]
+      const agentLabel = getAgentLabel(agent.agent_type)
       if (!agent.enabled) {
         return {
           kind: "disabled",
@@ -3096,7 +3096,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           //    sendSystemNotification).
           if (e.settled && e.settled.length > 0) {
             const nc = storeRef.current.connections.get(contextKey)
-            const agentLabel = nc ? AGENT_LABELS[nc.agentType] : "Agent"
+            const agentLabel = nc ? getAgentLabel(nc.agentType) : "Agent"
             const fn = folderNameRef.current
             const title = fn ? `${fn} - Codeg` : "Codeg"
             for (const settled of e.settled) {
@@ -3156,7 +3156,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           {
             const nc = storeRef.current.connections.get(contextKey)
             if (nc) {
-              const agentLabel = AGENT_LABELS[nc.agentType]
+              const agentLabel = getAgentLabel(nc.agentType)
               const fn = folderNameRef.current
               const title = fn ? `${fn} - Codeg` : "Codeg"
               sendSystemNotification(
@@ -3349,7 +3349,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           {
             const nc = storeRef.current.connections.get(contextKey)
             if (nc) {
-              const agentLabel = AGENT_LABELS[nc.agentType]
+              const agentLabel = getAgentLabel(nc.agentType)
               const fn = folderNameRef.current
               const title = fn ? `${fn} - Codeg` : "Codeg"
               sendSystemNotification(
@@ -3364,7 +3364,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           flushStreamingQueue()
           const nc = storeRef.current.connections.get(contextKey)
           const agentLabel = nc
-            ? AGENT_LABELS[nc.agentType]
+            ? getAgentLabel(nc.agentType)
             : (e.agent_type as string)
 
           // Localize backend errors via their stable `code` identifier.
@@ -3444,7 +3444,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           // agent message so an unknown future code still surfaces something
           // intelligible rather than getting swallowed.
           const nc = storeRef.current.connections.get(contextKey)
-          const agentLabel = nc ? AGENT_LABELS[nc.agentType] : ""
+          const agentLabel = nc ? getAgentLabel(nc.agentType) : ""
           const localizedMessage = (() => {
             switch (e.code) {
               case "resource_not_found":
@@ -4017,7 +4017,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             message: normalizeErrorMessage(error),
           })
           const failedTitle = t("connectFailedTitle", {
-            agent: AGENT_LABELS[agentType],
+            agent: getAgentLabel(agentType),
           })
           pushAlertRef.current(
             "error",
@@ -4031,7 +4031,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         const blocked = resolveConnectBlockState(configuredAgent)
         if (blocked.kind !== "none") {
           const failedTitle = t("connectFailedTitle", {
-            agent: AGENT_LABELS[agentType],
+            agent: getAgentLabel(agentType),
           })
           const detail =
             blocked.kind === "sdk_missing"
@@ -4306,7 +4306,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           pendingRequest != null && !sameConnectRequest(pendingRequest, request)
         if (!superseded && !isAlertedError(err)) {
           const message = normalizeErrorMessage(err)
-          const agentLabel = AGENT_LABELS[agentType]
+          const agentLabel = getAgentLabel(agentType)
           // Backend safety net: if the agent turned out to be not
           // installed (e.g. the binary was removed between preflight
           // and spawn), surface the same install prompt with a direct

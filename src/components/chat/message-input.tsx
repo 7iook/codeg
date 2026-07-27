@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { getAgentLabel } from "@/lib/custom-agents"
 import { isDesktop } from "@/lib/platform"
 import Image from "next/image"
 import { useLocale, useTranslations } from "next-intl"
@@ -92,7 +93,6 @@ import { getActiveRemoteConnectionId } from "@/lib/transport"
 import { ServerFileBrowserDialog } from "@/components/shared/server-file-browser-dialog"
 import { toast } from "sonner"
 import { disposeTauriListener } from "@/lib/tauri-listener"
-import { AGENT_LABELS } from "@/lib/types"
 import type {
   AgentSkillItem,
   AgentType,
@@ -1925,7 +1925,7 @@ export function MessageInput({
 
   const notifySkillNotEnabled = useCallback(
     (skillLabel: string, section: SettingsSection) => {
-      const agentLabel = agentType ? AGENT_LABELS[agentType] : ""
+      const agentLabel = agentType ? getAgentLabel(agentType) : ""
       toast.warning(
         tQa("notEnabled.title", { skill: skillLabel, agent: agentLabel }),
         {

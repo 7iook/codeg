@@ -36,7 +36,9 @@ import {
 import { isDesktop, openUrl } from "@/lib/platform"
 import { getActiveRemoteConnectionId } from "@/lib/transport"
 import { toast } from "sonner"
+import { customAgentId, isCustomAgentType } from "@/lib/custom-agents"
 import { AgentIcon } from "@/components/agent-icon"
+import { AddCustomAgentDialog } from "@/components/settings/add-custom-agent-dialog"
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -86,6 +88,7 @@ import {
   acpPreflight,
   acpPrepareNpxAgent,
   acpReorderAgents,
+  acpDeleteCustomAgent,
   acpUninstallAgent,
   acpUpdateAgentConfig,
   acpUpdateAgentEnv,
@@ -4300,6 +4303,8 @@ export function AcpAgentSettings() {
   const searchParams = useSearchParams()
   const [agents, setAgents] = useState<AcpAgentInfo[]>([])
   const [loadingAgents, setLoadingAgents] = useState(true)
+  const [addCustomOpen, setAddCustomOpen] = useState(false)
+  const [removingCustomAgent, setRemovingCustomAgent] = useState(false)
   const [loadingError, setLoadingError] = useState<string | null>(null)
   const [checkState, setCheckState] = useState<
     Partial<Record<AgentType, AgentCheckState>>
@@ -5048,6 +5053,32 @@ export function AcpAgentSettings() {
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [runPreflight, t, installStream.start]
+  )
+
+  /**
+   * Remove a custom agent's definition. Recorded transcripts are kept — the
+   * conversations that reference this agent are still readable afterwards,
+   * they just cannot be resumed. Deleting them is a separate, explicit action.
+   */
+  const handleRemoveCustomAgent = useCallback(
+    async (agent: AcpAgentInfo) => {
+      const id = customAgentId(agent.agent_type)
+      if (!id) return
+      if (!window.confirm(t("customAgentRemoveConfirm", { name: agent.name })))
+        return
+      setRemovingCustomAgent(true)
+      try {
+        await acpDeleteCustomAgent(id, false)
+        toast.success(t("customAgentRemoved", { name: agent.name }))
+        setSelectedAgentType(null)
+        await refreshAgents()
+      } catch (err) {
+        toast.error(toErrorMessage(err))
+      } finally {
+        setRemovingCustomAgent(false)
+      }
+    },
+    [refreshAgents, t]
   )
 
   const runUninstallAction = useCallback(
@@ -7549,7 +7580,22 @@ export function AcpAgentSettings() {
             {t("description")}
           </p>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 text-xs shrink-0"
+          onClick={() => setAddCustomOpen(true)}
+        >
+          <Plus className="h-3.5 w-3.5 mr-1" />
+          {t("addCustomAgent")}
+        </Button>
       </div>
+
+      <AddCustomAgentDialog
+        open={addCustomOpen}
+        onOpenChange={setAddCustomOpen}
+        onAdded={() => void refreshAgents()}
+      />
 
       {loadingError && (
         <div className="mb-3 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-400">
@@ -7717,7 +7763,16 @@ export function AcpAgentSettings() {
                     <Badge variant="outline" className="shrink-0">
                       {selectedAgent.distribution_type}
                     </Badge>
+                    {isCustomAgentType(selectedAgent.agent_type) && (
+                      <Badge variant="secondary" className="shrink-0">
+                        {t("customAgentBadge")}
+                      </Badge>
+                    )}
                   </div>
+                  {/* Removing a custom agent lives in the danger row at the
+                      bottom of the panel, not here: this line already carries
+                      the name, the distribution badge, the Custom badge and
+                      the enable switch. */}
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       type="button"
@@ -10951,6 +11006,40 @@ supports_websockets = true`}
                         )}
                       </Button>
                     </div>
+                  </div>
+                ) : isCustomAgentType(selectedAgent.agent_type) ? (
+                  // A custom agent is driven purely by the ACP protocol: codeg
+                  // knows nothing about its config file layout or auth model,
+                  // so the generic "config management" editor below would be
+                  // offering to write a file that may not exist in a format it
+                  // cannot know. Environment variables (above) are the one
+                  // channel that works for every agent, so they are the whole
+                  // surface — plus removing the agent.
+                  <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                    <div>
+                      <label className="text-xs font-medium text-destructive">
+                        {t("customAgentRemove")}
+                      </label>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        {t("customAgentRemoveHint")}
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      disabled={removingCustomAgent}
+                      onClick={() =>
+                        void handleRemoveCustomAgent(selectedAgent)
+                      }
+                    >
+                      {removingCustomAgent ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5" />
+                      )}
+                      {t("customAgentRemove")}
+                    </Button>
                   </div>
                 ) : (
                   <div className="space-y-3 rounded-md border bg-muted/10 p-3">

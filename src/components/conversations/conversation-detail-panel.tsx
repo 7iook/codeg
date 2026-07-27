@@ -82,7 +82,6 @@ import {
   getPromptDraftDisplayText,
 } from "@/lib/prompt-draft"
 import {
-  AGENT_LABELS,
   type AgentType,
   type ContentBlock,
   type ConversationStatus,
@@ -93,6 +92,7 @@ import {
   type QuestionAnswer,
   type UserMessageBlock,
 } from "@/lib/types"
+import { getAgentLabel } from "@/lib/custom-agents"
 import {
   getSavedModeId,
   saveModePreference,
@@ -622,7 +622,7 @@ const ConversationTabView = memo(function ConversationTabView({
   // appears the moment a not-installed agent is selected, independent of whether
   // a (deduped/superseded) connect attempt ever reached the preflight.
   const composerBlockedMessage = selectedAgentNotInstalled
-    ? tWelcome("agentNotInstalled", { agent: AGENT_LABELS[selectedAgent] })
+    ? tWelcome("agentNotInstalled", { agent: getAgentLabel(selectedAgent) })
     : (autoConnectError ?? agentConnectError)
 
   useEffect(() => {
@@ -1555,7 +1555,7 @@ const ConversationTabView = memo(function ConversationTabView({
       status={connStatus}
       promptCapabilities={conn.promptCapabilities}
       defaultPath={workingDirForConnection}
-      agentName={AGENT_LABELS[selectedAgent]}
+      agentName={getAgentLabel(selectedAgent)}
       error={conn.error}
       claudeApiRetry={conn.claudeApiRetry}
       pendingPermission={conn.pendingPermission}
@@ -1664,7 +1664,7 @@ const ConversationTabView = memo(function ConversationTabView({
               status={composerConnStatus}
               promptCapabilities={conn.promptCapabilities}
               defaultPath={workingDirForConnection}
-              agentName={AGENT_LABELS[selectedAgent]}
+              agentName={getAgentLabel(selectedAgent)}
               onFocus={handleFocus}
               onSend={handleSend}
               onCancel={handleCancel}
@@ -1749,7 +1749,7 @@ const ConversationTabView = memo(function ConversationTabView({
         }}
         onSubmit={feedback.submit}
         submitting={feedback.submitting}
-        agentName={AGENT_LABELS[selectedAgent]}
+        agentName={getAgentLabel(selectedAgent)}
       />
       <AgentDiagnosticsDialog
         open={composerDiagnosticsOpen}

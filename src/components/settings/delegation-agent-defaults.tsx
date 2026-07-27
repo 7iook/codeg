@@ -31,12 +31,12 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
-  AGENT_LABELS,
   type AgentDelegationDefaults,
   type AgentOptionsSnapshot,
   type AgentType,
   type SessionConfigOptionInfo,
 } from "@/lib/types"
+import { getAgentLabel } from "@/lib/custom-agents"
 import { describeAgentOptions } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
 
@@ -217,7 +217,7 @@ export function DelegationAgentDefaultsPanel({
                 : "text-muted-foreground hover:text-foreground")
             }
           >
-            {AGENT_LABELS[agent]}
+            {getAgentLabel(agent)}
           </button>
         ))}
       </div>

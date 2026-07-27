@@ -6,7 +6,8 @@ import { useAcpActions } from "@/contexts/acp-connections-context"
 import { useTaskContext } from "@/contexts/task-context"
 import { useConnection, type UseConnectionReturn } from "@/hooks/use-connection"
 import { TurnBusyError } from "@/lib/turn-busy"
-import { AGENT_LABELS, type AgentType, type PromptDraft } from "@/lib/types"
+import { type AgentType, type PromptDraft } from "@/lib/types"
+import { getAgentLabel } from "@/lib/custom-agents"
 
 interface UseConnectionLifecycleOptions {
   contextKey: string
@@ -227,7 +228,7 @@ export function useConnectionLifecycle({
       if (!taskIdRef.current) {
         const id = `acp-connect-${Date.now()}`
         taskIdRef.current = id
-        const agent = AGENT_LABELS[agentType]
+        const agent = getAgentLabel(agentType)
         addTask(
           id,
           t("tasks.connectingTitle", { agent }),
@@ -278,7 +279,7 @@ export function useConnectionLifecycle({
     if (!selectorTaskIdRef.current) {
       const id = `acp-session-init-${Date.now()}`
       selectorTaskIdRef.current = id
-      const agent = AGENT_LABELS[agentType]
+      const agent = getAgentLabel(agentType)
       addTask(
         id,
         t("tasks.initSessionTitle", { agent }),

@@ -1,4 +1,5 @@
-export type AgentType =
+/** The twelve agents codeg ships hand-written support for. */
+export type BuiltinAgentType =
   | "claude_code"
   | "codex"
   | "open_code"
@@ -11,6 +12,34 @@ export type AgentType =
   | "pi"
   | "grok"
   | "cursor"
+
+/**
+ * Which agent backs a conversation.
+ *
+ * Open-ended on purpose: besides the built-ins, a user can register any ACP
+ * agent, which arrives as `custom:<registry-id>` (mirrors Rust's
+ * `AgentType::Custom`). The `(string & {})` arm keeps editor autocomplete for
+ * the built-ins while accepting those ids.
+ *
+ * Never index a `Record` with this directly — use `getAgentLabel` /
+ * `getAgentColor`, which fall back for custom agents.
+ */
+export type AgentType = BuiltinAgentType | (string & {})
+
+/** Wire prefix marking a custom (user-registered) ACP agent. */
+export const CUSTOM_AGENT_PREFIX = "custom:"
+
+/** True for a user-registered ACP agent. */
+export function isCustomAgentType(agentType: AgentType): boolean {
+  return agentType.startsWith(CUSTOM_AGENT_PREFIX)
+}
+
+/** The registry id behind `custom:<id>`, or `null` for a built-in. */
+export function customAgentId(agentType: AgentType): string | null {
+  return isCustomAgentType(agentType)
+    ? agentType.slice(CUSTOM_AGENT_PREFIX.length)
+    : null
+}
 
 export type AppErrorCode =
   | "invalid_input"
@@ -567,7 +596,7 @@ export const STATUS_COLORS: Record<ConversationStatus, string> = {
   cancelled: "bg-red-500",
 }
 
-export const AGENT_DISPLAY_ORDER: AgentType[] = [
+export const AGENT_DISPLAY_ORDER: BuiltinAgentType[] = [
   "codex",
   "claude_code",
   "open_code",
@@ -582,17 +611,23 @@ export const AGENT_DISPLAY_ORDER: AgentType[] = [
   "cursor",
 ]
 
-const AGENT_DISPLAY_ORDER_INDEX = new Map(
+const AGENT_DISPLAY_ORDER_INDEX = new Map<AgentType, number>(
   AGENT_DISPLAY_ORDER.map((agent, index) => [agent, index])
 )
 
+/**
+ * Sort built-ins into their curated order. Custom agents have no pinned
+ * position, so they fall to the end and tie-break alphabetically among
+ * themselves — a stable order that does not shuffle as agents are added.
+ */
 export function compareAgentType(a: AgentType, b: AgentType): number {
   const aIndex = AGENT_DISPLAY_ORDER_INDEX.get(a) ?? Number.MAX_SAFE_INTEGER
   const bIndex = AGENT_DISPLAY_ORDER_INDEX.get(b) ?? Number.MAX_SAFE_INTEGER
-  return aIndex - bIndex
+  if (aIndex !== bIndex) return aIndex - bIndex
+  return a.localeCompare(b)
 }
 
-export const ALL_AGENT_TYPES: AgentType[] = [
+export const ALL_AGENT_TYPES: BuiltinAgentType[] = [
   "claude_code",
   "codex",
   "open_code",
@@ -607,7 +642,7 @@ export const ALL_AGENT_TYPES: AgentType[] = [
   "cursor",
 ]
 
-export const MODEL_PROVIDER_AGENT_TYPES: AgentType[] = [
+export const MODEL_PROVIDER_AGENT_TYPES: BuiltinAgentType[] = [
   "claude_code",
   "codex",
   "gemini",
@@ -884,7 +919,7 @@ export interface HermesLocalConfig {
   modelCommand?: string
 }
 
-export const AGENT_LABELS: Record<AgentType, string> = {
+export const AGENT_LABELS: Record<BuiltinAgentType, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
   open_code: "OpenCode",
@@ -899,7 +934,7 @@ export const AGENT_LABELS: Record<AgentType, string> = {
   cursor: "Cursor",
 }
 
-export const AGENT_COLORS: Record<AgentType, string> = {
+export const AGENT_COLORS: Record<BuiltinAgentType, string> = {
   claude_code: "bg-[#D97757]",
   codex: "bg-[#7A9DFF]",
   open_code: "bg-black",
@@ -1772,6 +1807,10 @@ export interface AcpAgentInfo {
    * launch flag, not a config key). Cursor agent only. */
   cursor_settings: CursorSettings | null
   model_provider_id: number | null
+  /** Display icon for a custom ACP agent — normally an inlined
+   *  `data:image/…;base64,…` URL. Always null for built-ins, which ship
+   *  hand-drawn marks in `agent-icon.tsx`. */
+  icon_url: string | null
 }
 
 /** Parsed sandbox / approval keys from ~/.codex/config.toml. Serialized

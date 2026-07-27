@@ -698,6 +698,120 @@ export async function acpReorderAgents(agentTypes: AgentType[]): Promise<void> {
   return getTransport().call("acp_reorder_agents", { agentTypes })
 }
 
+// ---------------------------------------------------------------------------
+// Custom ACP agents — agents the user registers from ACP registry information
+// instead of ones codeg ships hand-written support for.
+// ---------------------------------------------------------------------------
+
+/** One platform's binary release inside a custom agent's distribution spec. */
+export interface CustomAgentBinarySpec {
+  archive: string
+  cmd?: string
+  args?: string[]
+  env?: Record<string, string>
+  sha256?: string
+}
+
+export interface CustomAgentPackageSpec {
+  package: string
+  args?: string[]
+  env?: Record<string, string>
+  /** Console-script name the package installs; derived when omitted. */
+  cmd?: string
+  nodeRequired?: string
+  uvRequired?: string
+  python?: string
+}
+
+/**
+ * A custom agent's launch spec — byte-for-byte the ACP registry's
+ * `distribution` object, so a registry entry can be pasted verbatim.
+ */
+export interface CustomAgentSpec {
+  npx?: CustomAgentPackageSpec
+  uvx?: CustomAgentPackageSpec
+  binary?: Record<string, CustomAgentBinarySpec>
+}
+
+export type CustomDistributionKind = "npx" | "uvx" | "binary"
+
+export interface CustomAgentInfo {
+  registryId: string
+  /** `custom:<registryId>` — pass this wherever an `AgentType` is expected. */
+  agentType: AgentType
+  name: string
+  description: string
+  version: string
+  distributionKind: string
+  spec: CustomAgentSpec
+  iconUrl: string | null
+  /** False when the definition cannot launch here (e.g. no build for this OS). */
+  launchable: boolean
+  problem: string | null
+}
+
+/** One entry of the public ACP registry, annotated for the picker. */
+export interface RegistryCatalogAgent {
+  registryId: string
+  name: string
+  description: string
+  version: string | null
+  iconUrl: string | null
+  website: string | null
+  repository: string | null
+  license: string | null
+  distributionKinds: string[]
+  /** codeg already ships hand-written support for this agent. */
+  builtin: boolean
+  /** Already registered as a custom agent. */
+  installed: boolean
+  supportedOnPlatform: boolean
+  spec: CustomAgentSpec
+}
+
+export async function acpListCustomAgents(): Promise<CustomAgentInfo[]> {
+  return getTransport().call("acp_list_custom_agents", {})
+}
+
+export async function acpSaveCustomAgent(params: {
+  registryId: string
+  name: string
+  description?: string
+  version?: string
+  distributionKind: CustomDistributionKind
+  spec: CustomAgentSpec
+  iconUrl?: string | null
+}): Promise<void> {
+  return getTransport().call("acp_save_custom_agent", { params })
+}
+
+export async function acpDeleteCustomAgent(
+  registryId: string,
+  deleteTranscripts: boolean
+): Promise<void> {
+  return getTransport().call("acp_delete_custom_agent", {
+    registryId,
+    deleteTranscripts,
+  })
+}
+
+/** Fetch the public ACP registry (network). */
+export async function acpFetchRegistryCatalog(): Promise<
+  RegistryCatalogAgent[]
+> {
+  return getTransport().call("acp_fetch_registry_catalog", {})
+}
+
+export async function acpAddRegistryAgent(
+  registryId: string,
+  distributionKind?: CustomDistributionKind
+): Promise<void> {
+  return getTransport().call("acp_add_registry_agent", {
+    registryId,
+    distributionKind,
+  })
+}
+
 export async function codexRequestDeviceCode(): Promise<{
   userCode: string
   verificationUrl: string
