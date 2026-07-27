@@ -386,11 +386,117 @@ fn pi_launch_preflight(runtime_env: &BTreeMap<String, String>) -> Option<String>
     })
 }
 
+/// Transcript directory for an agent that codeg must record itself, or `None`
+/// for agents with their own store parser.
+///
+/// Only custom ACP agents are recorded: every built-in has a dedicated parser
+/// reading the agent's native transcript, and recording those too would double
+/// the storage while risking two disagreeing histories.
+fn transcript_dir_for(agent_type: AgentType) -> Option<&'static str> {
+    agent_type
+        .custom_id()
+        .map(|_| registry::registry_id_for(agent_type))
+}
+
+/// Ensure a custom agent's transcript file exists with its header. No-op for
+/// built-ins, and idempotent per session (a reconnect keeps the original
+/// header, so the session's original cwd/start time survive).
+fn record_transcript_header(agent_type: AgentType, session_id: &str, cwd: &str) {
+    record_transcript_header_continuing(agent_type, session_id, cwd, None);
+}
+
+/// [`record_transcript_header`] for a session that carries an existing
+/// conversation forward.
+///
+/// `continues_from` is set when `session/load` failed and codeg opened a fresh
+/// agent session for the same conversation: the earlier turns stay where they
+/// are and this header links back to them, so the reader still sees one
+/// history. See [`crate::acp_transcript::TranscriptHeader::continues_from`].
+fn record_transcript_header_continuing(
+    agent_type: AgentType,
+    session_id: &str,
+    cwd: &str,
+    continues_from: Option<&str>,
+) {
+    let Some(dir) = transcript_dir_for(agent_type) else {
+        return;
+    };
+    let mut header = crate::acp_transcript::TranscriptHeader::new(
+        &agent_type.as_wire(),
+        session_id,
+        cwd,
+        crate::acp_transcript::now_epoch_ms(),
+    );
+    if let Some(previous) = continues_from.filter(|p| !p.is_empty() && *p != session_id) {
+        header = header.continuing(previous);
+    }
+    drop(crate::acp_transcript::record_header(dir, &header));
+}
+
+/// Record a turn's completion for a custom agent, and wait (briefly) for it to
+/// land. No-op for agents with their own store.
+///
+/// The bounded wait exists because the frontend refetches conversation detail
+/// right after `TurnComplete`; without it, a reopened conversation could be
+/// read before the final lines were flushed. The bound means a stalled writer
+/// delays nothing more than this.
+async fn record_turn_end(
+    agent_type: AgentType,
+    session_id: &str,
+    stop_reason: &str,
+    started_at_ms: u64,
+) {
+    let Some(dir) = transcript_dir_for(agent_type) else {
+        return;
+    };
+    let now = crate::acp_transcript::now_epoch_ms();
+    let ack = crate::acp_transcript::record_entry(
+        dir,
+        session_id,
+        crate::acp_transcript::EntryKind::TurnEnd,
+        serde_json::json!({
+            "stopReason": stop_reason,
+            "durationMs": now.saturating_sub(started_at_ms),
+        }),
+    );
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(2000), ack).await;
+}
+
+/// Record one raw `session/update` for a custom agent. No-op otherwise.
+fn record_transcript_update(agent_type: AgentType, session_id: &str, update: &SessionUpdate) {
+    let Some(dir) = transcript_dir_for(agent_type) else {
+        return;
+    };
+    let Ok(payload) = serde_json::to_value(update) else {
+        return;
+    };
+    // The ack receiver is dropped: streamed chunks must never make the read
+    // loop wait. Turn boundaries are the only place codeg bound-waits.
+    drop(crate::acp_transcript::record_entry(
+        dir,
+        session_id,
+        crate::acp_transcript::EntryKind::Update,
+        payload,
+    ));
+}
+
 async fn build_agent(
     agent_type: AgentType,
     runtime_env: &BTreeMap<String, String>,
     cwd: &Path,
 ) -> Result<AcpAgent, AcpError> {
+    // A conversation can outlive the custom-agent definition it was started
+    // with (the user deleted it in settings). `get_agent_meta` cannot report
+    // that — it is infallible — so it hands back a placeholder with an empty
+    // command. Catch it here, before we try to spawn nothing and surface an
+    // opaque ENOENT.
+    if let Some(id) = agent_type.custom_id() {
+        if !crate::acp::custom_registry::is_registered(id) {
+            return Err(AcpError::SdkNotInstalled(format!(
+                "The custom agent \"{id}\" is no longer registered. Re-add it in Settings → Agents to use this conversation."
+            )));
+        }
+    }
     let meta = registry::get_agent_meta(agent_type);
     debug_assert_eq!(meta.agent_type, agent_type);
 
@@ -2954,6 +3060,7 @@ async fn run_connection(
                             // notification (e.g. an early AvailableCommandsUpdate)
                             // is consumed and forwarded by run_conversation_loop.
 
+                            record_transcript_header(agent_type, &sid, &cwd.to_string_lossy());
                             emit_with_state(
                                 &state,
                                 &emitter_clone,
@@ -3061,7 +3168,27 @@ async fn run_connection(
                         let mut session = cx.attach_session(new_resp, Default::default())?;
 
                         // Drain historical replay notifications from session/load,
-                        // but forward AvailableCommandsUpdate to the frontend
+                        // but forward AvailableCommandsUpdate to the frontend.
+                        //
+                        // For a custom agent with no transcript yet — a session
+                        // created outside codeg, or one whose recording was
+                        // lost — this replay is the ONLY source of its history,
+                        // so capture it instead of discarding it. When codeg
+                        // already recorded the session live, the replay is a
+                        // duplicate and stays drained.
+                        let hydrate_from_replay = transcript_dir_for(agent_type)
+                            .is_some_and(|dir| !crate::acp_transcript::has_entries(dir, &sid));
+                        if hydrate_from_replay {
+                            tracing::info!(
+                                "[ACP] hydrating custom agent transcript for {sid} from session/load replay"
+                            );
+                        }
+                        // The header must land BEFORE any replayed entry:
+                        // `record_header` is a no-op once the file is non-empty,
+                        // so writing it after the drain would leave a hydrated
+                        // transcript permanently headerless (no cwd, no start
+                        // time, hence no folder in the conversation list).
+                        record_transcript_header(agent_type, &sid, &cwd.to_string_lossy());
                         let mut drained = 0u32;
                         while let Ok(Ok(msg)) = tokio::time::timeout(
                             std::time::Duration::from_millis(100),
@@ -3076,6 +3203,13 @@ async fn run_connection(
                                 let dispatch = fix_usage_update_nulls(dispatch);
                                 let _ = MatchDispatch::new(dispatch)
                                     .if_notification(async |notif: SessionNotification| {
+                                        if hydrate_from_replay {
+                                            record_transcript_update(
+                                                agent_type,
+                                                &sid,
+                                                &notif.update,
+                                            );
+                                        }
                                         if matches!(
                                             notif.update,
                                             SessionUpdate::AvailableCommandsUpdate(_)
@@ -3185,8 +3319,21 @@ async fn run_connection(
                         // historical context (and, on a dead process, fail anyway
                         // and leak a raw protocol error). Every other failure
                         // keeps the session/new fallback below.
+                        //
+                        // Custom agents are the exception: their history is
+                        // codeg's own transcript, not the agent's store, so
+                        // "the agent forgot this session" costs nothing the
+                        // user can see. Many custom agents keep sessions in
+                        // memory only, which would make the banner appear on
+                        // every restart of every conversation. They fall
+                        // through to session/new instead, and the new
+                        // transcript links back to the old one so the history
+                        // reads as one conversation.
                         let err_str = e.to_string();
-                        if let Some(code) = classify_session_load_failure(e.code, &err_str) {
+                        let forgotten_session = classify_session_load_failure(e.code, &err_str);
+                        let recovers_locally =
+                            recovers_load_failure_locally(agent_type, forgotten_session);
+                        if let Some(code) = forgotten_session.filter(|_| !recovers_locally) {
                             tracing::warn!(
                                 "[ACP] session/load failed ({err_str}); surfacing as session_load_failed={code}"
                             );
@@ -3222,7 +3369,11 @@ async fn run_connection(
                         if err_str.contains("Authentication required") {
                             return Ok(());
                         }
-                        if !err_str.contains("Method not found") {
+                        // An agent that simply forgot a session codeg recorded
+                        // itself is the expected steady state after a restart,
+                        // not an incident — an error toast on every reopen
+                        // would be pure noise.
+                        if !err_str.contains("Method not found") && !recovers_locally {
                             emit_with_state(
                                 &state,
                                 &emitter_clone,
@@ -3253,6 +3404,15 @@ async fn run_connection(
                         let grok_effort_specs = (agent_type == AgentType::Grok)
                             .then(|| parse_grok_effort_specs(grok_models_raw.as_ref()));
                         let mut session = cx.attach_session(new_resp, Default::default())?;
+                        // Same conversation, new agent session: link the fresh
+                        // transcript to the one the failed load was for, so the
+                        // turns codeg already recorded keep rendering.
+                        record_transcript_header_continuing(
+                            agent_type,
+                            &fallback_sid,
+                            &cwd.to_string_lossy(),
+                            Some(sid.as_str()),
+                        );
                         emit_with_state(
                             &state,
                             &emitter_clone,
@@ -3331,6 +3491,7 @@ async fn run_connection(
                 let grok_effort_specs = (agent_type == AgentType::Grok)
                     .then(|| parse_grok_effort_specs(grok_models_raw.as_ref()));
                 let mut session = cx.attach_session(new_resp, Default::default())?;
+                record_transcript_header(agent_type, &sid, &cwd.to_string_lossy());
                 emit_with_state(
                     &state,
                     &emitter_clone,
@@ -4795,6 +4956,10 @@ async fn handle_fork_or_exit(
         (agent_type == AgentType::Grok).then(|| parse_grok_effort_specs(fork_models_raw.as_ref()));
     let mut session = cx.attach_session(new_resp, Default::default())?;
 
+    // A fork is a new session id, hence a new transcript file. Its history
+    // starts empty and accumulates from the fork point — the pre-fork turns
+    // stay in the parent's transcript, which is what forking means.
+    record_transcript_header(agent_type, &new_sid, cwd_string);
     emit_with_state(
         state,
         emitter,
@@ -4906,6 +5071,24 @@ fn classify_session_load_failure(
         return Some("session_unavailable");
     }
     None
+}
+
+/// Whether codeg can absorb a "the agent forgot this session" load failure by
+/// itself, rather than stopping and asking the user to Reload or start over.
+///
+/// It can exactly when codeg — not the agent — owns the conversation's history:
+/// custom ACP agents, whose turns are recorded to
+/// [`crate::acp_transcript`]. There the failure costs nothing visible — the
+/// history still renders, and a fresh agent session (linked by
+/// `continues_from`) continues the same conversation. Agents whose history is
+/// read back out of their own store keep the banner: for them the session
+/// really is gone, and silently starting a new one would orphan it.
+///
+/// `classified` is [`classify_session_load_failure`]'s verdict; `None` (an
+/// unexpected failure) is never recovered here — it keeps the existing
+/// emit-then-fall-back-to-`session/new` behaviour.
+fn recovers_load_failure_locally(agent_type: AgentType, classified: Option<&'static str>) -> bool {
+    classified.is_some() && transcript_dir_for(agent_type).is_some()
 }
 
 /// True when a `SessionUpdate` represents actual agent-produced output for
@@ -5147,6 +5330,20 @@ async fn run_conversation_loop<'a>(
                 // conflicting with session.read_update()'s mutable borrow.
                 let cx = session.connection();
                 let sid = session.session_id().clone();
+                // Record the prompt BEFORE sending, so the transcript's line
+                // order matches the wire order even if the agent replies
+                // instantly.
+                if let Some(dir) = transcript_dir_for(agent_type) {
+                    if let Ok(payload) = serde_json::to_value(&prompt_blocks) {
+                        drop(crate::acp_transcript::record_entry(
+                            dir,
+                            &sid.0,
+                            crate::acp_transcript::EntryKind::Prompt,
+                            payload,
+                        ));
+                    }
+                }
+                let turn_started_at_ms = crate::acp_transcript::now_epoch_ms();
                 let prompt_request = PromptRequest::new(sid.clone(), prompt_blocks);
                 // Use Box::pin (heap) instead of tokio::pin! (stack) so the
                 // future can be moved into a background task on cancel.
@@ -5220,6 +5417,13 @@ async fn run_conversation_loop<'a>(
                                                 if is_agent_output_update(&notif.update) {
                                                     turn_had_agent_output = true;
                                                 }
+                                                // Custom agents have no store
+                                                // of their own to parse later.
+                                                record_transcript_update(
+                                                    agent_type,
+                                                    &session_id.0,
+                                                    &notif.update,
+                                                );
                                                 emit_conversation_update(&st, &h, agent_type, notif.update, cwd_opt, &mut raw_output_cache, &mut cb_state).await;
                                                 if should_poll_now {
                                                     poll_tracked_terminal_tool_calls(
@@ -5349,6 +5553,14 @@ async fn run_conversation_loop<'a>(
                             if reason_str == "end_turn" {
                                 journal_turn_span(&mut turn_timing_probe, conn_id, &sid.0).await;
                             }
+                            // ACP has no turn-end notification — the stop
+                            // reason arrives here, in the prompt RESPONSE — so
+                            // codeg records it for the history parser. Unlike
+                            // streamed chunks this one is bound-awaited: a
+                            // conversation reopened right after a turn must not
+                            // miss its tail.
+                            record_turn_end(agent_type, &sid.0, reason_str, turn_started_at_ms)
+                                .await;
                             emit_with_state(
                                 state,
                                 emitter,
@@ -5764,7 +5976,7 @@ async fn run_conversation_loop<'a>(
 /// (doubling the event) and the hunkless full-file `--- /+++` blob stays in the
 /// tool `output`, where `extractEditLineChangeStats` mis-counts it as full-file
 /// +/- totals in the card header even though the body shows the compact diff.
-fn serialize_tool_call_content(
+pub(crate) fn serialize_tool_call_content(
     content: &[ToolCallContent],
     include_diffs: bool,
 ) -> Option<String> {
@@ -5824,7 +6036,7 @@ fn serialize_tool_call_content(
 /// pipeline (a real hunk diff, minimal even for full-file old/new). Returns
 /// `None` when `content` carries no `Diff`, so callers only fall back to it when
 /// the agent supplied no `raw_input` of its own.
-fn synthesize_edit_input_from_diffs(content: &[ToolCallContent]) -> Option<String> {
+pub(crate) fn synthesize_edit_input_from_diffs(content: &[ToolCallContent]) -> Option<String> {
     // Keep `old_text` as `Option`: ACP reports `None` for a newly created file
     // (`Diff.old_text` semantics). That distinction is the whole point of this
     // function's fix — collapsing `None` to `""` and emitting an edit shape
@@ -5912,7 +6124,7 @@ fn build_new_file_diff(path: &str, new_text: &str) -> String {
 /// on `AcpEvent::ToolCall(Update)` stays absent for non-image tool calls
 /// (preserves replace-on-update semantics: an absent field means "keep
 /// prior", a `Some(vec)` replaces).
-fn extract_tool_call_images(content: &[ToolCallContent]) -> Option<Vec<ToolCallImageInfo>> {
+pub(crate) fn extract_tool_call_images(content: &[ToolCallContent]) -> Option<Vec<ToolCallImageInfo>> {
     let mut imgs: Vec<ToolCallImageInfo> = Vec::new();
     for item in content {
         if let ToolCallContent::Content(c) = item {
@@ -5997,7 +6209,7 @@ fn find_string_start_line(path: &str, needle: &str, cwd: Option<&str>) -> Option
     Some(file_content[..byte_offset].matches('\n').count() as u64 + 1)
 }
 
-fn json_value_to_text(val: &Option<serde_json::Value>) -> Option<String> {
+pub(crate) fn json_value_to_text(val: &Option<serde_json::Value>) -> Option<String> {
     match val {
         Some(serde_json::Value::String(text)) => Some(text.clone()),
         Some(v) if !v.is_null() => Some(v.to_string()),
@@ -7556,6 +7768,40 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn agents_codeg_records_itself_absorb_a_forgotten_session() {
+        // The reported case: a custom agent keeps sessions in memory, so every
+        // restart makes session/load fail with "Session not found". codeg has
+        // the turns in its own transcript, so it must recover silently instead
+        // of blanking the conversation behind a load-failed banner.
+        let custom = AgentType::custom("glm-acp-agent").expect("valid id");
+        assert!(recovers_load_failure_locally(
+            custom,
+            Some("session_unavailable")
+        ));
+        assert!(recovers_load_failure_locally(
+            custom,
+            Some("resource_not_found")
+        ));
+        // An unexpected failure is not a "forgotten session" — keep the
+        // existing emit-then-fall-back behaviour even for custom agents.
+        assert!(!recovers_load_failure_locally(custom, None));
+
+        // Built-ins read history back out of the agent's own store, so a
+        // forgotten session really is gone and must still stop with the banner.
+        for builtin in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::Gemini,
+            AgentType::Cursor,
+        ] {
+            assert!(
+                !recovers_load_failure_locally(builtin, Some("session_unavailable")),
+                "{builtin:?} has no codeg-side transcript to fall back on"
+            );
+        }
     }
 
     #[test]

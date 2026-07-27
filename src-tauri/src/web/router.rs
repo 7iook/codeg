@@ -733,6 +733,26 @@ pub fn build_router(
             post(handlers::acp::acp_reorder_agents),
         )
         .route(
+            "/acp_list_custom_agents",
+            post(handlers::acp::acp_list_custom_agents),
+        )
+        .route(
+            "/acp_save_custom_agent",
+            post(handlers::acp::acp_save_custom_agent),
+        )
+        .route(
+            "/acp_delete_custom_agent",
+            post(handlers::acp::acp_delete_custom_agent),
+        )
+        .route(
+            "/acp_fetch_registry_catalog",
+            post(handlers::acp::acp_fetch_registry_catalog),
+        )
+        .route(
+            "/acp_add_registry_agent",
+            post(handlers::acp::acp_add_registry_agent),
+        )
+        .route(
             "/acp_list_agent_skills",
             post(handlers::acp::acp_list_agent_skills),
         )

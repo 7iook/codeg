@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 use crate::acp::binary_cache;
+use crate::acp::custom_registry;
 use crate::acp::error::AcpError;
 use crate::acp::manager::ConnectionManager;
 use crate::acp::opencode_plugins::{self, PluginCheckSummary};
@@ -40,7 +41,7 @@ struct AcpAgentsUpdatedEventPayload {
     agent_type: Option<AgentType>,
 }
 
-fn emit_acp_agents_updated(
+pub(crate) fn emit_acp_agents_updated(
     emitter: &EventEmitter,
     reason: &'static str,
     agent_type: Option<AgentType>,
@@ -6325,6 +6326,12 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
             ],
             project_rel_dirs: vec![".cursor/skills", ".agents/skills"],
         }),
+        // Custom agents expose no codeg-known skill directory. Returning
+        // `None` is also the gate that keeps them out of the experts / office /
+        // science skill matrices (see `supported_agents` in
+        // `commands/experts.rs`), which is intended: a custom agent is
+        // configuration-free by design.
+        AgentType::Custom(_) => None,
     }
 }
 
@@ -7531,6 +7538,12 @@ fn cascade_update_agent_config(
             // (`acpUpdateAgentEnv`); it does not write provider creds into
             // ~/.grok/config.toml and does not participate in the cascade.
         }
+        AgentType::Custom(_) => {
+            // Custom agents are deliberately configuration-free: codeg writes
+            // no config file for them and they are excluded from the
+            // model-provider surface, so there is nothing to cascade. Whatever
+            // credentials they need go through the generic launch-env panel.
+        }
     }
     Ok(())
 }
@@ -8474,6 +8487,10 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
             cursor_cli_config_json,
             cursor_settings,
             model_provider_id: setting.and_then(|m| m.model_provider_id),
+            icon_url: agent_type
+                .custom_id()
+                .and_then(custom_registry::icon_for)
+                .map(ToString::to_string),
         });
     }
 
@@ -9461,6 +9478,10 @@ pub(crate) async fn acp_download_agent_binary_core(
                 effective_version,
                 &archive_url,
                 cmd,
+                // A custom version rewrites the URL, so the registry's digest
+                // no longer describes what we are about to fetch — only verify
+                // against the pinned release.
+                custom.is_none().then_some(fallback.sha256).flatten(),
                 move |msg| {
                     emit_agent_install_event(
                         &emitter_clone,
