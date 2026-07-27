@@ -21,6 +21,14 @@ interface UseConnectionLifecycleOptions {
    * (cross-client viewing) instead of always spawning a fresh agent.
    */
   conversationId?: number
+  /**
+   * Read at unmount-cleanup time: true when the component is unmounting
+   * because the view is being REPARENTED (its tab moved between split groups /
+   * an unsplit merged it), not closed. A transient unmount must not
+   * disconnect — the remounted instance re-attaches to the same live
+   * connection under the same contextKey.
+   */
+  isTransientUnmount?: () => boolean
 }
 
 export interface UseConnectionLifecycleReturn {
@@ -59,13 +67,18 @@ export interface UseConnectionLifecycleReturn {
  * backend max-age valve expires it). Viewers always tear down: their
  * disconnect only detaches (never kills the owner's agent), and the sweep
  * skips viewers so leaving one attached would leak its subscription.
+ * EXCEPT on a transient unmount (tab reparented across split groups, not
+ * closed): the remounted view re-attaches to the same connection, so neither
+ * owners nor viewers tear down.
  * Exported for tests.
  */
 export function shouldDisconnectOnUnmount(args: {
   status: string | null
   isViewer: boolean
   backgroundOutstanding: number
+  transientUnmount?: boolean
 }): boolean {
+  if (args.transientUnmount) return false
   if (args.isViewer) return true
   const ownerBusy =
     args.status === "prompting" || args.backgroundOutstanding > 0
@@ -89,6 +102,7 @@ export function useConnectionLifecycle({
   workingDir,
   sessionId,
   conversationId,
+  isTransientUnmount,
 }: UseConnectionLifecycleOptions): UseConnectionLifecycleReturn {
   const t = useTranslations("Folder.chat.connectionLifecycle")
   const { setActiveKey, touchActivity } = useAcpActions()
@@ -303,6 +317,10 @@ export function useConnectionLifecycle({
   useEffect(() => {
     connDisconnectRef.current = connDisconnect
   }, [connDisconnect])
+  const isTransientUnmountRef = useRef(isTransientUnmount)
+  useEffect(() => {
+    isTransientUnmountRef.current = isTransientUnmount
+  }, [isTransientUnmount])
 
   // Clean up on unmount (e.g. tab closed): disconnect the ACP connection
   // so it doesn't leak, and remove lingering tasks.
@@ -328,10 +346,13 @@ export function useConnectionLifecycle({
           status: statusRef.current,
           isViewer: isViewerRef.current,
           backgroundOutstanding: backgroundOutstandingRef.current,
+          transientUnmount: isTransientUnmountRef.current?.() === true,
         })
       ) {
         connDisconnectRef.current().catch(() => {})
       }
+      // Task cleanup stays unconditional even on transient unmounts — the
+      // remounted instance mints fresh task ids, so stale ones would orphan.
       if (taskIdRef.current) {
         removeTask(taskIdRef.current)
       }
