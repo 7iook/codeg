@@ -398,14 +398,14 @@ pub fn build_router(
         )
         .route(
             "/upload_attachment",
-            // The 2MiB `UPLOAD_MAX_BYTES` is the *file payload* limit; the
-            // raw multipart body also carries boundary markers, the
+            // `UPLOAD_MAX_BYTES` is the *file payload* limit; the raw
+            // multipart body also carries boundary markers, the
             // `Content-Disposition` headers, and the `session_id` field —
             // ~256-512 bytes of overhead. Without this layer, axum's default
-            // 2MiB `DefaultBodyLimit` rejects a perfectly-sized 2MiB file
-            // before our handler ever sees a chunk. Pad by 64KiB so the
-            // handler's own chunk-summing check (in `files.rs`) stays the
-            // authoritative size boundary.
+            // 2MiB `DefaultBodyLimit` would reject anything bigger before our
+            // handler ever sees a chunk. Pad by 64KiB so the handler's own
+            // chunk-summing check (in `files.rs`) stays the authoritative
+            // size boundary.
             post(handlers::files::upload_attachment)
                 .layer(DefaultBodyLimit::max(UPLOAD_MAX_BYTES as usize + 64 * 1024)),
         )

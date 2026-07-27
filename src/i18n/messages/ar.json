@@ -186,6 +186,14 @@
     "restartingIn": "إعادة التشغيل خلال {seconds} ثانية...",
     "waitingForServer": "في انتظار عودة الخادم...",
     "restartToUpdate": "أعد التشغيل للتحديث",
+    "newVersionBadge": "إصدار جديد v{version}",
+    "updateAvailableTitle": "يتوفر تحديث",
+    "releaseNotesTitle": "ما الجديد",
+    "remindLater": "لاحقًا",
+    "retry": "إعادة المحاولة",
+    "stepDownload": "التنزيل",
+    "stepInstall": "التثبيت",
+    "stepRestart": "إعادة التشغيل",
     "updateReadyHint": "تم تنزيل التحديث — أعد التشغيل لتطبيقه.",
     "restarting": "جارٍ إعادة التشغيل...",
     "dockerUpgradeHint": "يؤدي هذا إلى ترقية الحاوية قيد التشغيل الآن. وتُفقد عند إعادة إنشاء الحاوية — وللاحتفاظ بها، اسحب أو ابنِ صورة بالإصدار الجديد ثم أعد إنشاء الحاوية.",
@@ -2310,7 +2318,8 @@
           "initSessionDescription": "جارٍ إنشاء الجلسة وتحميل الإعدادات"
         },
         "errors": {
-          "connectionFailed": "فشل الاتصال"
+          "connectionFailed": "فشل الاتصال",
+          "sendPromptFailed": "فشل إرسال الرسالة: {error}"
         }
       },
       "shared": {
@@ -2367,6 +2376,7 @@
         "attachUploadFailed": "فشل تحميل {names}.",
         "attachUploadNotAFile": "{names} ليس ملفاً عادياً (مجلد أو ملف خاص) وتم تخطيه.",
         "attachUploadQuotaExceeded": "نفدت مساحة التحميل على الخادم، تعذر رفع {names}.",
+        "attachUploadInProgress": "لا تزال الصور قيد الرفع — حاول مرة أخرى بعد قليل.",
         "mentionEmpty": "لا توجد نتائج مطابقة",
         "mentionLoading": "جارٍ البحث…",
         "mentionListLabel": "الإشارات",

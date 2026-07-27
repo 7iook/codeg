@@ -186,6 +186,14 @@
     "restartingIn": "Neustart in {seconds} s...",
     "waitingForServer": "Warten, bis der Server zurückkehrt...",
     "restartToUpdate": "Zum Aktualisieren neu starten",
+    "newVersionBadge": "Neu v{version}",
+    "updateAvailableTitle": "Update verfügbar",
+    "releaseNotesTitle": "Neuerungen",
+    "remindLater": "Später",
+    "retry": "Erneut versuchen",
+    "stepDownload": "Download",
+    "stepInstall": "Installation",
+    "stepRestart": "Neustart",
     "updateReadyHint": "Update heruntergeladen – zum Anwenden neu starten.",
     "restarting": "Neustart...",
     "dockerUpgradeHint": "Dies aktualisiert jetzt den laufenden Container. Beim Neuerstellen des Containers geht es verloren – zum Beibehalten ein Image mit der neuen Version ziehen oder bauen und den Container neu erstellen.",
@@ -2310,7 +2318,8 @@
           "initSessionDescription": "Creating session and loading configuration"
         },
         "errors": {
-          "connectionFailed": "Verbindung fehlgeschlagen"
+          "connectionFailed": "Verbindung fehlgeschlagen",
+          "sendPromptFailed": "Nachricht konnte nicht gesendet werden: {error}"
         }
       },
       "shared": {
@@ -2367,6 +2376,7 @@
         "attachUploadFailed": "Upload fehlgeschlagen: {names}.",
         "attachUploadNotAFile": "{names} ist keine reguläre Datei (Verzeichnis oder Spezialdatei) und wurde übersprungen.",
         "attachUploadQuotaExceeded": "Auf dem Server ist kein Upload-Speicher mehr verfügbar; {names} konnte nicht hochgeladen werden.",
+        "attachUploadInProgress": "Bilder werden noch hochgeladen – versuche es gleich noch einmal.",
         "mentionEmpty": "Keine Treffer",
         "mentionLoading": "Suche läuft…",
         "mentionListLabel": "Erwähnungen",

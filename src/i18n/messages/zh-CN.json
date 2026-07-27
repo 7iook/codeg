@@ -186,6 +186,14 @@
     "restartingIn": "将在 {seconds} 秒后重启...",
     "waitingForServer": "正在等待服务恢复...",
     "restartToUpdate": "重启以更新",
+    "newVersionBadge": "新版本 v{version}",
+    "updateAvailableTitle": "发现新版本",
+    "releaseNotesTitle": "更新内容",
+    "remindLater": "稍后",
+    "retry": "重试",
+    "stepDownload": "下载",
+    "stepInstall": "安装",
+    "stepRestart": "重启",
     "updateReadyHint": "新版本已下载，重启以完成更新。",
     "restarting": "正在重启…",
     "dockerUpgradeHint": "现在升级的是正在运行的容器。容器一旦被重建即丢失——如需保留，请拉取或构建新版本镜像后重建容器。",
@@ -2310,7 +2318,8 @@
           "initSessionDescription": "正在创建会话并加载配置"
         },
         "errors": {
-          "connectionFailed": "连接失败"
+          "connectionFailed": "连接失败",
+          "sendPromptFailed": "消息发送失败：{error}"
         }
       },
       "shared": {
@@ -2367,6 +2376,7 @@
         "attachUploadFailed": "上传失败：{names}。",
         "attachUploadNotAFile": "{names} 不是常规文件（目录或特殊文件），已跳过。",
         "attachUploadQuotaExceeded": "服务器上传空间已用尽，{names} 未能上传。",
+        "attachUploadInProgress": "图片仍在上传中，请稍候再发送。",
         "mentionEmpty": "无匹配项",
         "mentionLoading": "搜索中…",
         "mentionListLabel": "提及",

@@ -970,6 +970,17 @@ const ConversationTabView = memo(function ConversationTabView({
         }
       }
 
+      // Any OTHER send failure (413, image-hydration failure, network drop):
+      // the lifecycle hook already toasts the error; here we roll back the
+      // optimistic user turn so the failed prompt isn't displayed as though
+      // it were sent — and, via REMOVE_OPTIMISTIC_TURN's settle-to-idle, the
+      // conversation drops out of `awaiting_persist` so queue auto-flush
+      // isn't blocked forever. The draft is NOT re-queued (unlike the busy
+      // bounce): a deterministic failure would retry — and toast — forever.
+      const onSendFailed = () => {
+        removeOptimisticTurn(effectiveConversationId, optimisticTurn.id)
+      }
+
       // Pin the tab if it was a temporary preview (single-click opened)
       if (ownTab && !ownTab.isPinned) {
         pinTab(tabId)
@@ -988,6 +999,7 @@ const ConversationTabView = memo(function ConversationTabView({
           // turn by exact id (and never suppresses a different sender's prompt).
           clientMessageId: optimisticTurn.id,
           onTurnInProgress,
+          onSendFailed,
         })
         return
       }
@@ -1091,6 +1103,7 @@ const ConversationTabView = memo(function ConversationTabView({
             conversationId: newConversationId,
             clientMessageId: optimisticTurn.id,
             onTurnInProgress,
+            onSendFailed,
           })
         } catch (e) {
           console.error("[ConversationTabView] create conversation:", e)
@@ -1344,6 +1357,11 @@ const ConversationTabView = memo(function ConversationTabView({
           // re-queues at the front.)
           mqEnqueue(draft, null)
         },
+        // Any other failure: settle the optimistic state (the lifecycle hook
+        // already toasted). No re-queue — deterministic failures would loop.
+        onSendFailed: () => {
+          removeOptimisticTurn(effectiveConversationId, optimisticTurn.id)
+        },
       })
     },
     [
@@ -1412,6 +1430,11 @@ const ConversationTabView = memo(function ConversationTabView({
             lastFlushBounceAtRef.current = Date.now()
             removeOptimisticTurn(effectiveConversationId, optimisticTurn.id)
             mqEnqueue(draft, null)
+          },
+          // Any other failure: settle the optimistic state (the lifecycle
+          // hook already toasted). No re-queue — deterministic failures loop.
+          onSendFailed: () => {
+            removeOptimisticTurn(effectiveConversationId, optimisticTurn.id)
           },
         })
       }

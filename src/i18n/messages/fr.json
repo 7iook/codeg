@@ -186,6 +186,14 @@
     "restartingIn": "Redémarrage dans {seconds} s...",
     "waitingForServer": "En attente du retour du serveur...",
     "restartToUpdate": "Redémarrer pour mettre à jour",
+    "newVersionBadge": "Nouveau v{version}",
+    "updateAvailableTitle": "Mise à jour disponible",
+    "releaseNotesTitle": "Nouveautés",
+    "remindLater": "Plus tard",
+    "retry": "Réessayer",
+    "stepDownload": "Téléchargement",
+    "stepInstall": "Installation",
+    "stepRestart": "Redémarrage",
     "updateReadyHint": "Mise à jour téléchargée — redémarrez pour l'appliquer.",
     "restarting": "Redémarrage...",
     "dockerUpgradeHint": "Cela met à jour le conteneur en cours d'exécution. La mise à jour est perdue si le conteneur est recréé — pour la conserver, récupérez ou créez une image à la nouvelle version puis recréez le conteneur.",
@@ -2310,7 +2318,8 @@
           "initSessionDescription": "Creating session and loading configuration"
         },
         "errors": {
-          "connectionFailed": "Échec de la connexion"
+          "connectionFailed": "Échec de la connexion",
+          "sendPromptFailed": "Échec de l'envoi du message : {error}"
         }
       },
       "shared": {
@@ -2367,6 +2376,7 @@
         "attachUploadFailed": "Échec du téléversement de {names}.",
         "attachUploadNotAFile": "{names} n'est pas un fichier régulier (répertoire ou fichier spécial) et a été ignoré.",
         "attachUploadQuotaExceeded": "Le serveur n'a plus d'espace pour les téléversements ; {names} n'a pas pu être envoyé.",
+        "attachUploadInProgress": "Les images sont encore en cours d'envoi — réessayez dans un instant.",
         "mentionEmpty": "Aucune correspondance",
         "mentionLoading": "Recherche…",
         "mentionListLabel": "Mentions",

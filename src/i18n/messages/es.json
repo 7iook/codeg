@@ -186,6 +186,14 @@
     "restartingIn": "Reiniciando en {seconds} s...",
     "waitingForServer": "Esperando a que el servidor vuelva...",
     "restartToUpdate": "Reiniciar para actualizar",
+    "newVersionBadge": "Nueva v{version}",
+    "updateAvailableTitle": "Actualización disponible",
+    "releaseNotesTitle": "Novedades",
+    "remindLater": "Más tarde",
+    "retry": "Reintentar",
+    "stepDownload": "Descarga",
+    "stepInstall": "Instalación",
+    "stepRestart": "Reinicio",
     "updateReadyHint": "Actualización descargada: reinicia para aplicarla.",
     "restarting": "Reiniciando...",
     "dockerUpgradeHint": "Esto actualiza el contenedor en ejecución ahora. Se pierde si se recrea el contenedor: para conservarlo, descarga o crea una imagen con la nueva versión y recrea el contenedor.",
@@ -2310,7 +2318,8 @@
           "initSessionDescription": "Creating session and loading configuration"
         },
         "errors": {
-          "connectionFailed": "Conexión fallida"
+          "connectionFailed": "Conexión fallida",
+          "sendPromptFailed": "No se pudo enviar el mensaje: {error}"
         }
       },
       "shared": {
@@ -2367,6 +2376,7 @@
         "attachUploadFailed": "Error al subir {names}.",
         "attachUploadNotAFile": "{names} no es un archivo regular (directorio o archivo especial) y se omitió.",
         "attachUploadQuotaExceeded": "El servidor se quedó sin espacio para subidas; no se pudo cargar {names}.",
+        "attachUploadInProgress": "Las imágenes aún se están subiendo; inténtalo de nuevo en un momento.",
         "mentionEmpty": "Sin coincidencias",
         "mentionLoading": "Buscando…",
         "mentionListLabel": "Menciones",

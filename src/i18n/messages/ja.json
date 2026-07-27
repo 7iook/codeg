@@ -186,6 +186,14 @@
     "restartingIn": "{seconds} 秒後に再起動します...",
     "waitingForServer": "サーバーの復帰を待っています...",
     "restartToUpdate": "再起動して更新",
+    "newVersionBadge": "新バージョン v{version}",
+    "updateAvailableTitle": "アップデートがあります",
+    "releaseNotesTitle": "更新内容",
+    "remindLater": "後で",
+    "retry": "再試行",
+    "stepDownload": "ダウンロード",
+    "stepInstall": "インストール",
+    "stepRestart": "再起動",
     "updateReadyHint": "アップデートをダウンロードしました。再起動して適用してください。",
     "restarting": "再起動しています…",
     "dockerUpgradeHint": "いま実行中のコンテナを更新します。コンテナを再作成すると失われます。維持するには、新しいバージョンのイメージを取得またはビルドしてコンテナを再作成してください。",
@@ -2310,7 +2318,8 @@
           "initSessionDescription": "セッションを作成し設定を読み込んでいます"
         },
         "errors": {
-          "connectionFailed": "接続に失敗しました"
+          "connectionFailed": "接続に失敗しました",
+          "sendPromptFailed": "メッセージの送信に失敗しました: {error}"
         }
       },
       "shared": {
@@ -2367,6 +2376,7 @@
         "attachUploadFailed": "{names} のアップロードに失敗しました。",
         "attachUploadNotAFile": "{names} は通常ファイルではなく（ディレクトリまたは特殊ファイル）、スキップされました。",
         "attachUploadQuotaExceeded": "サーバーのアップロード容量が不足しているため、{names} をアップロードできませんでした。",
+        "attachUploadInProgress": "画像はまだアップロード中です。しばらくしてからもう一度お試しください。",
         "mentionEmpty": "一致する項目がありません",
         "mentionLoading": "検索中…",
         "mentionListLabel": "メンション",
