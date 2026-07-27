@@ -465,21 +465,7 @@ pub async fn mcp_upsert_local_server(
             "none of the selected agents can host this MCP server's transport (e.g. Codex does not support SSE)",
         ));
     }
-    let all_apps = [
-        McpAppType::ClaudeCode,
-        McpAppType::Codex,
-        McpAppType::Gemini,
-        McpAppType::OpenClaw,
-        McpAppType::OpenCode,
-        McpAppType::Cline,
-        McpAppType::Hermes,
-        McpAppType::CodeBuddy,
-        McpAppType::KimiCode,
-        McpAppType::Grok,
-        McpAppType::Cursor,
-    ];
-
-    for app in all_apps {
+    for app in all_mcp_app_types() {
         if target_set.contains(&app) {
             upsert_server_for_app(app, &server_id, &canonical_spec)?;
         } else {
@@ -540,25 +526,9 @@ pub async fn mcp_remove_server(
 ) -> Result<bool, AppCommandError> {
     let target_apps = match apps {
         Some(selected) => normalize_apps(selected),
-        None => {
-            let mut all = vec![
-                McpAppType::ClaudeCode,
-                McpAppType::Codex,
-                McpAppType::Gemini,
-                McpAppType::OpenClaw,
-                McpAppType::OpenCode,
-                McpAppType::Cline,
-                McpAppType::Hermes,
-                McpAppType::CodeBuddy,
-                McpAppType::KimiCode,
-                McpAppType::Grok,
-                McpAppType::Cursor,
-            ];
-            // "Remove everywhere" includes every registered custom agent's
-            // store, or a deleted server would linger in their sessions.
-            all.extend(custom_mcp_app_types());
-            all
-        }
+        // "Remove everywhere" includes every registered custom agent's
+        // store, or a deleted server would linger in their sessions.
+        None => all_mcp_app_types(),
     };
 
     if target_apps.is_empty() {
@@ -581,6 +551,29 @@ fn custom_mcp_app_types() -> Vec<McpAppType> {
             _ => None,
         })
         .collect()
+}
+
+/// The full universe an assignment can range over: the eleven built-in apps
+/// followed by every registered custom agent. This is the single source for
+/// "reconcile against everything" call sites — the upsert loop and
+/// remove-everywhere — so a custom agent can never be visible to one write
+/// path and invisible to the other.
+fn all_mcp_app_types() -> Vec<McpAppType> {
+    let mut all = vec![
+        McpAppType::ClaudeCode,
+        McpAppType::Codex,
+        McpAppType::Gemini,
+        McpAppType::OpenClaw,
+        McpAppType::OpenCode,
+        McpAppType::Cline,
+        McpAppType::Hermes,
+        McpAppType::CodeBuddy,
+        McpAppType::KimiCode,
+        McpAppType::Grok,
+        McpAppType::Cursor,
+    ];
+    all.extend(custom_mcp_app_types());
+    all
 }
 
 fn normalize_apps(apps: Vec<McpAppType>) -> Vec<McpAppType> {
@@ -5377,6 +5370,53 @@ mod tests {
         assert!(serde_json::from_value::<McpAppType>(serde_json::json!("pi")).is_err());
         assert!(serde_json::from_value::<McpAppType>(serde_json::json!("custom:../x")).is_err());
         assert!(serde_json::from_value::<McpAppType>(serde_json::json!("carrier-pigeon")).is_err());
+    }
+
+    #[test]
+    fn the_assignment_universe_reaches_registered_custom_agents() {
+        use crate::acp::custom_registry::{
+            hydrate, hydrate_test_guard, CustomAgentDef, CustomAgentSpec, CustomDistributionKind,
+            NpxSpec,
+        };
+        let _guard = hydrate_test_guard();
+        assert!(hydrate(&[]).is_empty());
+        assert_eq!(
+            all_mcp_app_types().len(),
+            11,
+            "no customs → the eleven built-in apps"
+        );
+
+        let def = CustomAgentDef {
+            registry_id: "mcp-universe-agent".into(),
+            name: "Universe Agent".into(),
+            description: String::new(),
+            version: "1.0.0".into(),
+            distribution_kind: CustomDistributionKind::Npx,
+            spec: CustomAgentSpec {
+                npx: Some(NpxSpec {
+                    package: "universe-agent@1.0.0".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            icon_url: None,
+            skills_shared_store: false,
+        };
+        assert!(hydrate(std::slice::from_ref(&def)).is_empty());
+        let all = all_mcp_app_types();
+        // The upsert reconcile loop and remove-everywhere both range over this
+        // list; a custom agent missing here silently drops its assignment.
+        assert_eq!(
+            all.last().copied(),
+            Some(McpAppType::Custom(crate::intern::intern(
+                "mcp-universe-agent"
+            ))),
+            "registered customs append after the built-ins"
+        );
+        assert_eq!(all.len(), 12);
+
+        assert!(hydrate(&[]).is_empty());
+        assert_eq!(all_mcp_app_types().len(), 11);
     }
 
     #[test]

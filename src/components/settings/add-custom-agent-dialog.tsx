@@ -185,6 +185,7 @@ export function AddCustomAgentDialog({
     setManualJson("")
     setManualKind(null)
     setManualIcon(null)
+    setManualSkills(false)
   }, [open])
 
   const handlePickIcon = useCallback(
