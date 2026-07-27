@@ -881,6 +881,69 @@ mod tests {
         }
     }
 
+    /// A `delegate_to_agent` call from the codeg-mcp companion must replay
+    /// under its wire name. The frontend's tool-kind classifier
+    /// (`isAgentLikeToolName`) recognizes `delegate_to_agent` across host
+    /// naming conventions and renders the delegation card from it — the same
+    /// path the live session takes — so the projection must pass the reported
+    /// title through verbatim rather than genericizing or rewriting it.
+    #[test]
+    fn a_delegation_call_replays_under_its_wire_name() {
+        let entries = vec![
+            prompt(1, "fan out"),
+            update(
+                2,
+                serde_json::json!({
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call-9",
+                    "title": "mcp__codeg-mcp__delegate_to_agent",
+                    "kind": "other",
+                    "status": "pending",
+                    "rawInput": { "agent_type": "custom:goose", "task": "review the diff" }
+                }),
+            ),
+            update(
+                3,
+                serde_json::json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-9",
+                    "status": "completed",
+                    "content": [
+                        { "type": "content", "content": { "type": "text", "text": "Task started: task-1" } }
+                    ]
+                }),
+            ),
+        ];
+        let turns = project_turns(&entries);
+        let blocks = &turns[1].blocks;
+        match &blocks[0] {
+            ContentBlock::ToolUse {
+                tool_name,
+                input_preview,
+                ..
+            } => {
+                assert_eq!(tool_name, "mcp__codeg-mcp__delegate_to_agent");
+                let input = input_preview.as_deref().unwrap();
+                assert!(input.contains("custom:goose"));
+                assert!(input.contains("review the diff"));
+            }
+            other => panic!("expected tool use, got {other:?}"),
+        }
+        match &blocks[1] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                output_preview,
+                is_error,
+                ..
+            } => {
+                assert_eq!(tool_use_id.as_deref(), Some("call-9"));
+                assert_eq!(output_preview.as_deref(), Some("Task started: task-1"));
+                assert!(!is_error);
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
     #[test]
     fn failed_tool_call_marks_the_result_as_an_error() {
         let entries = vec![

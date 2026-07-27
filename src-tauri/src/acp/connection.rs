@@ -2435,7 +2435,7 @@ async fn inject_codeg_mcp(
         )
         .await;
     let mut server = McpServerStdio::new("codeg-mcp", binary_path);
-    server = server.args(vec![
+    let mut args = vec![
         "--parent-connection-id".to_string(),
         parent_connection_id.to_string(),
         "--socket-path".to_string(),
@@ -2451,7 +2451,21 @@ async fn inject_codeg_mcp(
         // Tool groups to expose this launch (delegation / feedback / ask / sessions).
         "--features".to_string(),
         features_arg,
-    ]);
+    ];
+    // Registered custom agents become extra `delegate_to_agent` targets. The
+    // flag is omitted when there are none: the companion then serves its
+    // embedded builtin-only schema unchanged, and an older codeg-mcp binary
+    // (which rejects unknown flags at startup) keeps working for every
+    // installation that has no custom agents.
+    let custom_slugs: Vec<String> = crate::acp::custom_registry::all()
+        .iter()
+        .map(|a| a.as_wire().into_owned())
+        .collect();
+    if !custom_slugs.is_empty() {
+        args.push("--custom-agents".to_string());
+        args.push(custom_slugs.join(","));
+    }
+    server = server.args(args);
     servers.push(McpServer::Stdio(server));
     Some(CompanionInjection {
         token,
