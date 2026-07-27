@@ -94,7 +94,7 @@ impl AgentParser for AcpNativeParser {
             }
             out.push(self.summarize(&session_id, &transcript));
         }
-        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        out.sort_by_key(|c| std::cmp::Reverse(c.started_at));
         Ok(out)
     }
 
