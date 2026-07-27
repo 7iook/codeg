@@ -118,6 +118,10 @@ pub async fn acp_delete_custom_agent_core(
         .await
         .map_err(|e| AcpError::protocol(e.to_string()))?;
 
+    // MCP assignments are configuration that belongs to the agent — always
+    // dropped with it, unlike the transcripts below (history, opt-in).
+    crate::commands::mcp::remove_custom_agent_mcp_store(&registry_id);
+
     // Conversations keep their `custom:<id>` rows either way; dropping the
     // transcripts is what actually loses history, so it is opt-in.
     if delete_transcripts {
