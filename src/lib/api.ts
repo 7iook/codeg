@@ -179,6 +179,52 @@ export async function acpConnect(
   })
 }
 
+/**
+ * Drop inline image bytes from blocks whose bytes already live server-side.
+ *
+ * Web / remote-workspace mode uploads each composed image through
+ * `/upload_attachment` and keeps the base64 ONLY for the local thumbnail /
+ * optimistic bubble / queue-edit restore; the sent block carries an empty
+ * payload plus the uploaded file's `file://` uri, and the backend re-inlines
+ * the bytes right before dispatch (`acp::prompt_hydration`). Without this
+ * strip, a couple of screenshots of base64 in the `/acp_prompt` JSON body
+ * would blow axum's 2 MiB `DefaultBodyLimit` and 413 the send.
+ *
+ * `shouldStrip` is false on a local desktop workspace (Tauri IPC has no body
+ * limit and there is no uploads dir to hydrate from), so those blocks pass
+ * through byte-identical. Under `shouldStrip`, a `file://` uri on an image
+ * block can only have come from an upload — every web/remote attach path
+ * routes through `/upload_attachment` first — so uri presence is the marker.
+ * Pure; exported for tests.
+ */
+export function stripUploadedImagePayloads(
+  blocks: PromptInputBlock[],
+  shouldStrip: boolean
+): PromptInputBlock[] {
+  if (!shouldStrip) return blocks
+  return blocks.map((block) => {
+    if (
+      block.type === "image" &&
+      block.data.length > 0 &&
+      block.uri?.startsWith("file://")
+    ) {
+      return { ...block, data: "" }
+    }
+    if (
+      block.type === "resource" &&
+      typeof block.blob === "string" &&
+      block.blob.length > 0 &&
+      (block.mime_type?.startsWith("image/") ?? false) &&
+      block.uri.startsWith("file://")
+    ) {
+      // The embedded-blob shape used for agents that reject native image
+      // blocks (e.g. Grok). Same marker contract: empty blob + uploads uri.
+      return { ...block, blob: "" }
+    }
+    return block
+  })
+}
+
 export async function acpPrompt(
   connectionId: string,
   blocks: PromptInputBlock[],
@@ -189,7 +235,12 @@ export async function acpPrompt(
   try {
     await getTransport().call("acp_prompt", {
       connectionId,
-      blocks,
+      // Strip in every mode where the prompt leaves through an HTTP body:
+      // pure web (`!isDesktop`) and desktop-attached-to-remote-workspace.
+      blocks: stripUploadedImagePayloads(
+        blocks,
+        !isDesktop() || getActiveRemoteConnectionId() !== null
+      ),
       folderId,
       conversationId,
       clientMessageId,
@@ -2399,9 +2450,11 @@ export async function listDirectoryWithFiles(
 }
 
 // Hard ceiling for a single attachment, kept in lockstep with the server's
-// `UPLOAD_MAX_BYTES`. Aligned with axum's default multipart body limit (and
-// with the fact that anything larger won't fit a model context anyway).
-export const UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+// `UPLOAD_MAX_BYTES` (`web/handlers/files.rs`, mirrored in
+// `commands/remote_proxy.rs`). Sized to match the desktop drag-drop image
+// limit (`DRAG_DROP_IMAGE_MAX_BYTES`) so the same screenshot attaches in
+// every mode; oversize is rejected up front with a visible toast.
+export const UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 
 // `btoa` only accepts a binary string, and `String.fromCharCode(...bytes)`
 // hits the call-stack limit somewhere around a few hundred KB. Chunk the

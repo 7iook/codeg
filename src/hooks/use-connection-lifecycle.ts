@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
+import { toast } from "sonner"
 import { useAcpActions } from "@/contexts/acp-connections-context"
 import { useTaskContext } from "@/contexts/task-context"
 import { useConnection, type UseConnectionReturn } from "@/hooks/use-connection"
+import { extractAppCommandError } from "@/lib/app-error"
 import { TurnBusyError } from "@/lib/turn-busy"
 import { AGENT_LABELS, type AgentType, type PromptDraft } from "@/lib/types"
 
@@ -42,6 +44,16 @@ export interface UseConnectionLifecycleReturn {
        * draft instead of treating it as an error.
        */
       onTurnInProgress?: () => void
+      /**
+       * Called for every OTHER send failure (413, hydration failure, network
+       * drop) after the error toast is shown. The caller must settle any
+       * optimistic state it created for this send — roll back the optimistic
+       * user turn so the conversation doesn't stay `awaiting_persist` (which
+       * would block queue auto-flush) and doesn't display the failed prompt
+       * as though it were sent. The draft is deliberately NOT re-queued: a
+       * deterministic failure would otherwise retry forever.
+       */
+      onSendFailed?: (error: unknown) => void
     }
   ) => void
   handleSetConfigOption: (configId: string, valueId: string) => void
@@ -385,10 +397,12 @@ export function useConnectionLifecycle({
         conversationId?: number | null
         clientMessageId?: string | null
         onTurnInProgress?: () => void
+        onSendFailed?: (error: unknown) => void
       }
     ) => {
       touchActivity(contextKey)
       const onTurnInProgress = opts?.onTurnInProgress
+      const onSendFailed = opts?.onSendFailed
       void (async () => {
         const currentModeId = modeIdRef.current
         if (modeId && modeId !== currentModeId) {
@@ -408,9 +422,24 @@ export function useConnectionLifecycle({
           return
         }
         console.error("[ConnLifecycle] sendPrompt:", e)
+        // The composer already cleared itself (sends are fire-and-forget), so
+        // without a toast a failed send — an oversized body 413'd by the
+        // server, a hydration failure, a network drop — looks like the message
+        // simply vanished. Surface the failure; prefer the structured backend
+        // message over a bare stringification.
+        const appError = extractAppCommandError(e)
+        const message =
+          appError?.message ??
+          (e instanceof Error ? e.message : String(e ?? "unknown error"))
+        toast.error(t("errors.sendPromptFailed", { error: message }))
+        // Let the caller settle its optimistic state (roll back the phantom
+        // user turn, drop out of awaiting_persist so the queue keeps
+        // flushing). Runs after the toast so the state rollback can't hide
+        // the failure.
+        onSendFailed?.(e)
       })
     },
-    [connSetMode, sendPrompt, contextKey, touchActivity]
+    [connSetMode, sendPrompt, contextKey, touchActivity, t]
   )
 
   const handleCancel = useCallback(() => {

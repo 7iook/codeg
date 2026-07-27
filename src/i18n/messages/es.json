@@ -2269,7 +2269,8 @@
           "initSessionDescription": "Creating session and loading configuration"
         },
         "errors": {
-          "connectionFailed": "Conexión fallida"
+          "connectionFailed": "Conexión fallida",
+          "sendPromptFailed": "No se pudo enviar el mensaje: {error}"
         }
       },
       "shared": {
@@ -2326,6 +2327,7 @@
         "attachUploadFailed": "Error al subir {names}.",
         "attachUploadNotAFile": "{names} no es un archivo regular (directorio o archivo especial) y se omitió.",
         "attachUploadQuotaExceeded": "El servidor se quedó sin espacio para subidas; no se pudo cargar {names}.",
+        "attachUploadInProgress": "Las imágenes aún se están subiendo; inténtalo de nuevo en un momento.",
         "mentionEmpty": "Sin coincidencias",
         "mentionLoading": "Buscando…",
         "mentionListLabel": "Menciones",

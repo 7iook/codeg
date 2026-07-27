@@ -2269,7 +2269,8 @@
           "initSessionDescription": "세션 생성 및 설정 불러오는 중"
         },
         "errors": {
-          "connectionFailed": "연결 실패"
+          "connectionFailed": "연결 실패",
+          "sendPromptFailed": "메시지 전송에 실패했습니다: {error}"
         }
       },
       "shared": {
@@ -2326,6 +2327,7 @@
         "attachUploadFailed": "{names} 업로드 실패.",
         "attachUploadNotAFile": "{names} 은(는) 일반 파일이 아니므로(디렉터리 또는 특수 파일) 건너뛰었습니다.",
         "attachUploadQuotaExceeded": "서버 업로드 저장 공간이 부족하여 {names} 을(를) 업로드하지 못했습니다.",
+        "attachUploadInProgress": "이미지가 아직 업로드 중입니다. 잠시 후 다시 시도하세요.",
         "mentionEmpty": "일치하는 항목 없음",
         "mentionLoading": "검색 중…",
         "mentionListLabel": "멘션",

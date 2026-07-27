@@ -2269,7 +2269,8 @@
           "initSessionDescription": "セッションを作成し設定を読み込んでいます"
         },
         "errors": {
-          "connectionFailed": "接続に失敗しました"
+          "connectionFailed": "接続に失敗しました",
+          "sendPromptFailed": "メッセージの送信に失敗しました: {error}"
         }
       },
       "shared": {
@@ -2326,6 +2327,7 @@
         "attachUploadFailed": "{names} のアップロードに失敗しました。",
         "attachUploadNotAFile": "{names} は通常ファイルではなく（ディレクトリまたは特殊ファイル）、スキップされました。",
         "attachUploadQuotaExceeded": "サーバーのアップロード容量が不足しているため、{names} をアップロードできませんでした。",
+        "attachUploadInProgress": "画像はまだアップロード中です。しばらくしてからもう一度お試しください。",
         "mentionEmpty": "一致する項目がありません",
         "mentionLoading": "検索中…",
         "mentionListLabel": "メンション",

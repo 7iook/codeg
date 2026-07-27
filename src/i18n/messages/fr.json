@@ -2269,7 +2269,8 @@
           "initSessionDescription": "Creating session and loading configuration"
         },
         "errors": {
-          "connectionFailed": "Échec de la connexion"
+          "connectionFailed": "Échec de la connexion",
+          "sendPromptFailed": "Échec de l'envoi du message : {error}"
         }
       },
       "shared": {
@@ -2326,6 +2327,7 @@
         "attachUploadFailed": "Échec du téléversement de {names}.",
         "attachUploadNotAFile": "{names} n'est pas un fichier régulier (répertoire ou fichier spécial) et a été ignoré.",
         "attachUploadQuotaExceeded": "Le serveur n'a plus d'espace pour les téléversements ; {names} n'a pas pu être envoyé.",
+        "attachUploadInProgress": "Les images sont encore en cours d'envoi — réessayez dans un instant.",
         "mentionEmpty": "Aucune correspondance",
         "mentionLoading": "Recherche…",
         "mentionListLabel": "Mentions",

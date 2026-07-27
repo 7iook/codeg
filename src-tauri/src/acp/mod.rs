@@ -18,6 +18,7 @@ pub mod opencode_catalog;
 pub mod opencode_plugins;
 pub mod plan_approval;
 pub mod preflight;
+pub mod prompt_hydration;
 pub mod question;
 pub mod registry;
 pub mod session_info;

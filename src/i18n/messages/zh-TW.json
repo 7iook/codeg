@@ -2269,7 +2269,8 @@
           "initSessionDescription": "正在建立會話並載入設定"
         },
         "errors": {
-          "connectionFailed": "連線失敗"
+          "connectionFailed": "連線失敗",
+          "sendPromptFailed": "訊息傳送失敗：{error}"
         }
       },
       "shared": {
@@ -2326,6 +2327,7 @@
         "attachUploadFailed": "上傳失敗：{names}。",
         "attachUploadNotAFile": "{names} 不是常規檔案（目錄或特殊檔案），已略過。",
         "attachUploadQuotaExceeded": "伺服器上傳空間已用盡，{names} 未能上傳。",
+        "attachUploadInProgress": "圖片仍在上傳中，請稍候再傳送。",
         "mentionEmpty": "無相符項目",
         "mentionLoading": "搜尋中…",
         "mentionListLabel": "提及",

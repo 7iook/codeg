@@ -2269,7 +2269,8 @@
           "initSessionDescription": "Creating session and loading configuration"
         },
         "errors": {
-          "connectionFailed": "Verbindung fehlgeschlagen"
+          "connectionFailed": "Verbindung fehlgeschlagen",
+          "sendPromptFailed": "Nachricht konnte nicht gesendet werden: {error}"
         }
       },
       "shared": {
@@ -2326,6 +2327,7 @@
         "attachUploadFailed": "Upload fehlgeschlagen: {names}.",
         "attachUploadNotAFile": "{names} ist keine reguläre Datei (Verzeichnis oder Spezialdatei) und wurde übersprungen.",
         "attachUploadQuotaExceeded": "Auf dem Server ist kein Upload-Speicher mehr verfügbar; {names} konnte nicht hochgeladen werden.",
+        "attachUploadInProgress": "Bilder werden noch hochgeladen – versuche es gleich noch einmal.",
         "mentionEmpty": "Keine Treffer",
         "mentionLoading": "Suche läuft…",
         "mentionListLabel": "Erwähnungen",
