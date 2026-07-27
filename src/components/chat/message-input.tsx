@@ -170,6 +170,7 @@ import {
   restoreBlocksIntoEditor,
 } from "@/components/chat/composer/composer-commands"
 import {
+  commandInvocationToken,
   commandToReference,
   skillToReference,
 } from "@/components/chat/composer/invocation-reference"
@@ -2946,7 +2947,7 @@ export function MessageInput({
                 }}
               >
                 <span className="shrink-0 font-mono text-primary">
-                  /{cmd.name}
+                  {commandInvocationToken(cmd.name)}
                 </span>
                 <span className="truncate text-xs text-muted-foreground">
                   {cmd.description}
@@ -3302,7 +3303,7 @@ export function MessageInput({
                                   className="hover:bg-accent hover:text-accent-foreground"
                                 >
                                   <DropdownRadioItemContent
-                                    label={`/${cmd.name}`}
+                                    label={commandInvocationToken(cmd.name)}
                                     description={cmd.description}
                                   />
                                 </DropdownMenuItem>
