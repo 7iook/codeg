@@ -6326,12 +6326,23 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
             ],
             project_rel_dirs: vec![".cursor/skills", ".agents/skills"],
         }),
-        // Custom agents expose no codeg-known skill directory. Returning
-        // `None` is also the gate that keeps them out of the experts / office /
-        // science skill matrices (see `supported_agents` in
-        // `commands/experts.rs`), which is intended: a custom agent is
-        // configuration-free by design.
-        AgentType::Custom(_) => None,
+        // codeg cannot detect where an arbitrary ACP agent loads skills from,
+        // so custom agents are gated on the user's own declaration that the
+        // agent reads the shared `.agents/skills` store — the cross-agent
+        // convention OpenCode, Gemini, Cline, Codex, pi, and Cursor already
+        // follow. Undeclared (or deleted) agents return `None`, which is also
+        // the gate that keeps them out of the experts / office / science
+        // matrices (`supported_agents` derives from this function). Unlike the
+        // built-ins there is no agent-own directory to list first, so links
+        // land in the shared store itself and are visible to every agent that
+        // reads it — the add-dialog copy says so.
+        AgentType::Custom(id) => crate::acp::custom_registry::skills_shared_store(id).then(|| {
+            SkillStorageSpec {
+                kind: SkillStorageKind::SkillDirectoryOnly,
+                global_dirs: vec![home_dir_or_default().join(".agents").join("skills")],
+                project_rel_dirs: vec![".agents/skills"],
+            }
+        }),
     }
 }
 
@@ -8491,6 +8502,11 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
                 .custom_id()
                 .and_then(custom_registry::icon_for)
                 .map(ToString::to_string),
+            // Derived server-side so the skills surfaces need no frontend
+            // knowledge of which agents keep a skill store: all builtins do
+            // today, customs only when the user declared the shared
+            // `.agents/skills` store.
+            skills_capable: skill_storage_spec(agent_type).is_some(),
         });
     }
 

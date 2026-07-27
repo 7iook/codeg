@@ -1187,6 +1187,8 @@
     "customAgentIconReplace": "Ersetzen",
     "customAgentIconClear": "Symbol entfernen",
     "customAgentIconHint": "Wird beim Agenten gespeichert und funktioniert daher offline. Ohne Symbol wird ein farbiger Anfangsbuchstabe verwendet.",
+    "customAgentSkillsLabel": "Skills (gemeinsames .agents/skills)",
+    "customAgentSkillsHint": "Erklärt, dass dieser Agent den gemeinsamen .agents/skills-Speicher liest (globale und Projekt-Verzeichnisse), und nimmt ihn in alle Skill-Matrizen auf. Dort verknüpfte Skills sind für alle Agenten sichtbar, die diesen Speicher lesen.",
     "customAgentIconNotAnImage": "Bitte eine Bilddatei auswählen.",
     "customAgentIconTooLarge": "Das Symbol muss kleiner als {limit} KB sein.",
     "customAgentIconReadFailed": "Dieses Bild konnte nicht gelesen werden.",

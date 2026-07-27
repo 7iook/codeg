@@ -2172,6 +2172,7 @@ mod tests {
                 ..Default::default()
             },
             icon_url: None,
+            skills_shared_store: false,
         };
         crate::acp::custom_registry::hydrate(std::slice::from_ref(&def));
 

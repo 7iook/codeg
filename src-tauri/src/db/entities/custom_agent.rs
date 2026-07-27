@@ -19,6 +19,10 @@ pub struct Model {
     /// The ACP registry `distribution` object, verbatim.
     pub spec_json: String,
     pub icon_url: Option<String>,
+    /// User declaration that the agent reads the shared `.agents/skills`
+    /// store — the gate for every skills surface. See
+    /// `CustomAgentDef::skills_shared_store`.
+    pub skills_shared_store: bool,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

@@ -1187,6 +1187,8 @@
     "customAgentIconReplace": "Replace",
     "customAgentIconClear": "Remove icon",
     "customAgentIconHint": "Stored with the agent, so it works offline. Without one, a colored initial is used.",
+    "customAgentSkillsLabel": "Skills (shared .agents/skills)",
+    "customAgentSkillsHint": "Declares that this agent reads the shared .agents/skills store — its global and project directories — and adds it to every skills matrix. Skills linked there are visible to every agent that reads the shared store.",
     "customAgentIconNotAnImage": "Pick an image file.",
     "customAgentIconTooLarge": "The icon must be smaller than {limit} KB.",
     "customAgentIconReadFailed": "Could not read that image.",

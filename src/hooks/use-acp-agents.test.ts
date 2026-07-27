@@ -37,6 +37,7 @@ import { resetAcpAgentsStore, useAcpAgents } from "./use-acp-agents"
 function makeAgent(agentType: AgentType, sortOrder: number): AcpAgentInfo {
   return {
     agent_type: agentType,
+    skills_capable: true,
     registry_id: agentType,
     registry_version: null,
     name: agentType,

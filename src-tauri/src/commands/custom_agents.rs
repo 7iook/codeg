@@ -38,6 +38,9 @@ pub struct CustomAgentInfo {
     pub distribution_kind: String,
     pub spec: CustomAgentSpec,
     pub icon_url: Option<String>,
+    /// Mirrors [`CustomAgentDef::skills_shared_store`] so the edit form can
+    /// prefill the declaration.
+    pub skills_shared_store: bool,
     /// False when the stored definition cannot produce launch metadata (e.g.
     /// a binary-only agent with no release for this platform). The row still
     /// lists, with the reason, instead of vanishing.
@@ -62,6 +65,7 @@ fn info_from_def(def: &CustomAgentDef) -> CustomAgentInfo {
         distribution_kind: def.distribution_kind.as_str().to_string(),
         spec: def.spec.clone(),
         icon_url: def.icon_url.clone(),
+        skills_shared_store: def.skills_shared_store,
         launchable: problem.is_none(),
         problem,
     }
@@ -398,6 +402,10 @@ pub struct SaveCustomAgentParams {
     pub spec: CustomAgentSpec,
     #[serde(default)]
     pub icon_url: Option<String>,
+    /// See [`CustomAgentDef::skills_shared_store`]. Defaults off so saves from
+    /// older frontends keep the agent out of the skills surfaces.
+    #[serde(default)]
+    pub skills_shared_store: bool,
 }
 
 impl SaveCustomAgentParams {
@@ -417,6 +425,7 @@ impl SaveCustomAgentParams {
             distribution_kind,
             spec: self.spec,
             icon_url: self.icon_url,
+            skills_shared_store: self.skills_shared_store,
         })
     }
 }
@@ -499,6 +508,7 @@ mod tests {
             distribution_kind: "carrier-pigeon".into(),
             spec: CustomAgentSpec::default(),
             icon_url: None,
+            skills_shared_store: false,
         };
         assert!(params.into_def().is_err());
     }
@@ -513,6 +523,7 @@ mod tests {
             distribution_kind: "npx".into(),
             spec: CustomAgentSpec::default(),
             icon_url: None,
+            skills_shared_store: false,
         };
         assert_eq!(params.into_def().unwrap().registry_id, "goose");
     }
@@ -541,6 +552,7 @@ mod tests {
                 ..Default::default()
             },
             icon_url: None,
+            skills_shared_store: false,
         };
         let info = info_from_def(&def);
         assert!(!info.launchable);
@@ -653,6 +665,7 @@ mod tests {
                 ..Default::default()
             },
             icon_url: None,
+            skills_shared_store: false,
         };
         let info = info_from_def(&def);
         assert!(info.launchable);

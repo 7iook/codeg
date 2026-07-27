@@ -31,6 +31,7 @@ pub fn def_from_model(model: &custom_agent::Model) -> Option<CustomAgentDef> {
         distribution_kind,
         spec,
         icon_url: model.icon_url.clone(),
+        skills_shared_store: model.skills_shared_store,
     })
 }
 
@@ -103,6 +104,7 @@ pub async fn upsert(conn: &DatabaseConnection, def: &CustomAgentDef) -> Result<(
             active.distribution_kind = Set(def.distribution_kind.as_str().to_string());
             active.spec_json = Set(spec_json);
             active.icon_url = Set(def.icon_url.clone());
+            active.skills_shared_store = Set(def.skills_shared_store);
             active.updated_at = Set(now);
             active.update(conn).await?;
         }
@@ -116,6 +118,7 @@ pub async fn upsert(conn: &DatabaseConnection, def: &CustomAgentDef) -> Result<(
                 distribution_kind: Set(def.distribution_kind.as_str().to_string()),
                 spec_json: Set(spec_json),
                 icon_url: Set(def.icon_url.clone()),
+                skills_shared_store: Set(def.skills_shared_store),
                 created_at: Set(now),
                 updated_at: Set(now),
             }
@@ -172,6 +175,7 @@ mod tests {
                 ..Default::default()
             },
             icon_url: Some("https://example.com/i.svg".into()),
+            skills_shared_store: false,
         }
     }
 
@@ -249,6 +253,7 @@ mod tests {
             distribution_kind: Set("carrier-pigeon".into()),
             spec_json: Set("{not json".into()),
             icon_url: Set(None),
+            skills_shared_store: Set(false),
             created_at: Set(Utc::now()),
             updated_at: Set(Utc::now()),
         };

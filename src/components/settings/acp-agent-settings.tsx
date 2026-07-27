@@ -39,6 +39,7 @@ import { toast } from "sonner"
 import { customAgentId, isCustomAgentType } from "@/lib/custom-agents"
 import { AgentIcon } from "@/components/agent-icon"
 import { AddCustomAgentDialog } from "@/components/settings/add-custom-agent-dialog"
+import { CustomAgentSkillsToggle } from "@/components/settings/custom-agent-skills-toggle"
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -11014,33 +11015,39 @@ supports_websockets = true`}
                   // offering to write a file that may not exist in a format it
                   // cannot know. Environment variables (above) are the one
                   // channel that works for every agent, so they are the whole
-                  // surface — plus removing the agent.
-                  <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                    <div>
-                      <label className="text-xs font-medium text-destructive">
+                  // surface — plus the skills declaration and removing the
+                  // agent.
+                  <>
+                    <CustomAgentSkillsToggle
+                      registryId={customAgentId(selectedAgent.agent_type) ?? ""}
+                    />
+                    <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                      <div>
+                        <label className="text-xs font-medium text-destructive">
+                          {t("customAgentRemove")}
+                        </label>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {t("customAgentRemoveHint")}
+                        </p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        disabled={removingCustomAgent}
+                        onClick={() =>
+                          void handleRemoveCustomAgent(selectedAgent)
+                        }
+                      >
+                        {removingCustomAgent ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
                         {t("customAgentRemove")}
-                      </label>
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        {t("customAgentRemoveHint")}
-                      </p>
+                      </Button>
                     </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      disabled={removingCustomAgent}
-                      onClick={() =>
-                        void handleRemoveCustomAgent(selectedAgent)
-                      }
-                    >
-                      {removingCustomAgent ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-3.5 w-3.5" />
-                      )}
-                      {t("customAgentRemove")}
-                    </Button>
-                  </div>
+                  </>
                 ) : (
                   <div className="space-y-3 rounded-md border bg-muted/10 p-3">
                     <div>

@@ -321,6 +321,9 @@ pub fn catalog_entry_to_def(
         distribution_kind: kind,
         spec,
         icon_url: entry.icon_url.clone(),
+        // The ACP registry catalog does not describe skill directories; the
+        // user opts in from the edit form after adding.
+        skills_shared_store: false,
     })
 }
 

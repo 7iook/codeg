@@ -1187,6 +1187,8 @@
     "customAgentIconReplace": "変更",
     "customAgentIconClear": "アイコンを削除",
     "customAgentIconHint": "エージェントと共に保存されるためオフラインでも表示できます。指定しない場合は色付きの頭文字を使います。",
+    "customAgentSkillsLabel": "Skills（共有 .agents/skills）",
+    "customAgentSkillsHint": "このエージェントが共有の .agents/skills ディレクトリ（グローバルおよびプロジェクト）を読み取ることを宣言し、すべてのスキルマトリクスに追加します。共有ディレクトリにリンクしたスキルは、同じディレクトリを読むほかのエージェントからも見えます。",
     "customAgentIconNotAnImage": "画像ファイルを選んでください。",
     "customAgentIconTooLarge": "アイコンは {limit} KB 未満にしてください。",
     "customAgentIconReadFailed": "その画像を読み込めませんでした。",

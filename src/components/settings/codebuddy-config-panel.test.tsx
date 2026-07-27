@@ -14,6 +14,7 @@ import type { AcpAgentInfo } from "@/lib/types"
 function makeAgent(env: Record<string, string>): AcpAgentInfo {
   return {
     agent_type: "code_buddy",
+    skills_capable: true,
     registry_id: "codebuddy-code",
     registry_version: "2.109.3",
     name: "CodeBuddy",

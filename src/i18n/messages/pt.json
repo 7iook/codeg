@@ -1187,6 +1187,8 @@
     "customAgentIconReplace": "Substituir",
     "customAgentIconClear": "Remover ícone",
     "customAgentIconHint": "Salvo junto com o agente, portanto funciona offline. Sem um ícone, usa-se uma inicial colorida.",
+    "customAgentSkillsLabel": "Skills (.agents/skills compartilhado)",
+    "customAgentSkillsHint": "Declara que este agente lê o repositório compartilhado .agents/skills (diretórios global e de projeto) e o adiciona a todas as matrizes de habilidades. Habilidades vinculadas lá ficam visíveis para todos os agentes que leem esse repositório compartilhado.",
     "customAgentIconNotAnImage": "Selecione um arquivo de imagem.",
     "customAgentIconTooLarge": "O ícone deve ter menos de {limit} KB.",
     "customAgentIconReadFailed": "Não foi possível ler essa imagem.",

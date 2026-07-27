@@ -1187,6 +1187,8 @@
     "customAgentIconReplace": "Remplacer",
     "customAgentIconClear": "Retirer l'icône",
     "customAgentIconHint": "Enregistrée avec l'agent, elle fonctionne donc hors ligne. Sans icône, une initiale colorée est utilisée.",
+    "customAgentSkillsLabel": "Skills (.agents/skills partagé)",
+    "customAgentSkillsHint": "Déclare que cet agent lit le magasin partagé .agents/skills (répertoires global et projet) et l'ajoute à toutes les matrices de compétences. Les compétences qui y sont liées sont visibles par tous les agents qui lisent ce magasin partagé.",
     "customAgentIconNotAnImage": "Choisissez un fichier image.",
     "customAgentIconTooLarge": "L'icône doit faire moins de {limit} Ko.",
     "customAgentIconReadFailed": "Impossible de lire cette image.",

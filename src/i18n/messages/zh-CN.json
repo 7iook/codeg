@@ -1187,6 +1187,8 @@
     "customAgentIconReplace": "更换",
     "customAgentIconClear": "移除图标",
     "customAgentIconHint": "随智能体一起保存，离线也能显示。不上传则使用彩色首字母。",
+    "customAgentSkillsLabel": "Skills（共享 .agents/skills）",
+    "customAgentSkillsHint": "声明该智能体会读取共享的 .agents/skills 目录（全局与项目级），并将其加入所有技能矩阵。链接到共享目录的技能对读取该目录的其他智能体同样可见。",
     "customAgentIconNotAnImage": "请选择图片文件。",
     "customAgentIconTooLarge": "图标需小于 {limit} KB。",
     "customAgentIconReadFailed": "无法读取该图片。",

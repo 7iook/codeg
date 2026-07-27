@@ -165,6 +165,15 @@ pub struct CustomAgentDef {
     /// hand-written one) and is passed through to the webview as-is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_url: Option<String>,
+    /// User declaration that this agent reads the shared `.agents/skills`
+    /// store (`~/.agents/skills` plus project-local `.agents/skills`) — the
+    /// cross-agent convention OpenCode, Gemini, Cline, Codex, pi, and Cursor
+    /// already follow. codeg cannot detect where an arbitrary ACP agent loads
+    /// skills from, so this stays off until the user turns it on; it is the
+    /// single gate that puts the agent into every skills matrix (see
+    /// `skill_storage_spec`).
+    #[serde(default)]
+    pub skills_shared_store: bool,
 }
 
 /// Version stamped on a definition that carries none. Used as a cache key and
@@ -574,6 +583,10 @@ struct Entry {
     /// [`AcpAgentMeta`]: it is presentation, not launch data, and every one of
     /// the twelve built-in metas would otherwise need a field it never uses.
     icon: Option<&'static str>,
+    /// Whether the user declared the agent reads the shared `.agents/skills`
+    /// store. Beside the meta for the same reason as `icon`: it drives the
+    /// skills surfaces, not the launch.
+    skills_shared_store: bool,
 }
 
 fn registry() -> &'static RwLock<HashMap<&'static str, Entry>> {
@@ -607,6 +620,7 @@ pub fn hydrate(defs: &[CustomAgentDef]) -> Vec<(String, CustomAgentError)> {
                     fingerprint: fp,
                     meta: prev.meta,
                     icon: prev.icon,
+                    skills_shared_store: prev.skills_shared_store,
                 },
             );
             continue;
@@ -624,6 +638,7 @@ pub fn hydrate(defs: &[CustomAgentDef]) -> Vec<(String, CustomAgentError)> {
                             .map(str::trim)
                             .filter(|s| !s.is_empty())
                             .map(intern),
+                        skills_shared_store: def.skills_shared_store,
                     },
                 );
             }
@@ -656,6 +671,17 @@ pub fn get(registry_id: &str) -> Option<&'static AcpAgentMeta> {
 /// Display name for a registered custom agent.
 pub fn display_name(registry_id: &str) -> Option<&'static str> {
     get(registry_id).map(|m| m.name)
+}
+
+/// Whether a registered custom agent declared it reads the shared
+/// `.agents/skills` store. `false` for unregistered ids — a deleted agent
+/// must drop out of the skills surfaces rather than keep a phantom column.
+pub fn skills_shared_store(registry_id: &str) -> bool {
+    registry()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(registry_id)
+        .is_some_and(|e| e.skills_shared_store)
 }
 
 /// Display icon for a registered custom agent — a `data:` URL in the normal
@@ -751,6 +777,7 @@ mod tests {
                 ..Default::default()
             },
             icon_url: None,
+            skills_shared_store: false,
         }
     }
 
@@ -854,6 +881,7 @@ mod tests {
                 ..Default::default()
             },
             icon_url: None,
+            skills_shared_store: false,
         }
     }
 
@@ -1086,6 +1114,28 @@ mod tests {
         assert!(hydrate(&[]).is_empty());
         assert!(get("hydrate-test-agent").is_none());
         assert!(!is_registered("hydrate-test-agent"));
+    }
+
+    #[test]
+    fn the_skills_declaration_survives_hydrate_and_gates_by_registration() {
+        let _guard = hydrate_guard();
+        let mut def = npx_def("skills-flag-agent");
+        assert!(hydrate(std::slice::from_ref(&def)).is_empty());
+        assert!(
+            !skills_shared_store("skills-flag-agent"),
+            "undeclared agents stay out of the skills surfaces"
+        );
+
+        // Flipping the declaration changes the fingerprint, so the same
+        // hydrate path republishes and the accessor flips with it.
+        def.skills_shared_store = true;
+        assert!(hydrate(std::slice::from_ref(&def)).is_empty());
+        assert!(skills_shared_store("skills-flag-agent"));
+
+        // An unregistered (deleted) id reads as false — a phantom column must
+        // not survive its agent.
+        assert!(hydrate(&[]).is_empty());
+        assert!(!skills_shared_store("skills-flag-agent"));
     }
 
     #[test]

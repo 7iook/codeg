@@ -23,6 +23,7 @@ import {
 } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -152,6 +153,7 @@ export function AddCustomAgentDialog({
     null
   )
   const [manualIcon, setManualIcon] = useState<string | null>(null)
+  const [manualSkills, setManualSkills] = useState(false)
   const [savingManual, setSavingManual] = useState(false)
   const iconInputRef = useRef<HTMLInputElement>(null)
 
@@ -272,6 +274,7 @@ export function AddCustomAgentDialog({
         spec: manualParsed.spec,
         // An upload wins over an `icon` URL carried by a pasted registry entry.
         iconUrl: manualIcon ?? manualParsed.iconUrl ?? null,
+        skillsSharedStore: manualSkills,
       })
       toast.success(
         t("customAgentAdded", { name: effectiveName || effectiveId })
@@ -290,6 +293,7 @@ export function AddCustomAgentDialog({
     effectiveName,
     manualVersion,
     manualIcon,
+    manualSkills,
     onAdded,
     onOpenChange,
     t,
@@ -549,6 +553,23 @@ export function AddCustomAgentDialog({
                 </div>
               </div>
             )}
+
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id="custom-agent-skills"
+                checked={manualSkills}
+                onCheckedChange={(v) => setManualSkills(v === true)}
+                className="mt-0.5"
+              />
+              <div className="space-y-0.5">
+                <Label htmlFor="custom-agent-skills" className="text-xs">
+                  {t("customAgentSkillsLabel")}
+                </Label>
+                <p className="text-[11px] text-muted-foreground">
+                  {t("customAgentSkillsHint")}
+                </p>
+              </div>
+            </div>
           </TabsContent>
         </Tabs>
 

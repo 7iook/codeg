@@ -1187,6 +1187,8 @@
     "customAgentIconReplace": "استبدال",
     "customAgentIconClear": "إزالة الأيقونة",
     "customAgentIconHint": "يُحفظ مع الوكيل، لذا يعمل دون اتصال. وبدونه يُستخدم حرف أول ملوّن.",
+    "customAgentSkillsLabel": "Skills (‎.agents/skills المشترك)",
+    "customAgentSkillsHint": "يُعلن أن هذا الوكيل يقرأ مخزن .agents/skills المشترك (المجلدين العام والخاص بالمشروع) ويضيفه إلى جميع مصفوفات المهارات. المهارات المرتبطة هناك تكون مرئية لكل وكيل يقرأ هذا المخزن المشترك.",
     "customAgentIconNotAnImage": "اختر ملف صورة.",
     "customAgentIconTooLarge": "يجب أن يكون حجم الأيقونة أقل من {limit} كيلوبايت.",
     "customAgentIconReadFailed": "تعذّرت قراءة تلك الصورة.",

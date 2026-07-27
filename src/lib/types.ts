@@ -1771,6 +1771,12 @@ export interface ConversationConnectionInfo {
 // ACP agent info returned by acp_list_agents
 export interface AcpAgentInfo {
   agent_type: AgentType
+  /**
+   * Whether this agent has a codeg-known skill store — every built-in, and
+   * custom agents that declared the shared `.agents/skills` store. Gates the
+   * skills matrices.
+   */
+  skills_capable: boolean
   registry_id: string
   registry_version: string | null
   name: string

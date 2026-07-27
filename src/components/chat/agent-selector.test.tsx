@@ -20,6 +20,7 @@ function agent(
 ): AcpAgentInfo {
   return {
     agent_type: agentType,
+    skills_capable: true,
     registry_id: `${agentType}-registry`,
     registry_version: null,
     name: agentType,

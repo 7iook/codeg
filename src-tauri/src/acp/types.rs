@@ -646,6 +646,10 @@ pub struct ConversationConnectionInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpAgentInfo {
     pub agent_type: crate::models::agent::AgentType,
+    /// Whether this agent has a codeg-known skill store — every built-in, and
+    /// custom agents that declared the shared `.agents/skills` store. Gates
+    /// the skills matrices frontend-side.
+    pub skills_capable: bool,
     pub registry_id: String,
     pub registry_version: Option<String>,
     pub name: String,
