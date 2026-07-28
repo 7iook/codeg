@@ -819,7 +819,7 @@ export function AddCustomAgentDialog({
                 id="custom-agent-version-probe"
                 value={manualVersionProbe}
                 onChange={(e) => setManualVersionProbe(e.target.value)}
-                placeholder="qwen --version"
+                placeholder="agent-cli --version"
                 className="h-8 text-xs font-mono"
               />
               <p className="text-[11px] text-muted-foreground">
