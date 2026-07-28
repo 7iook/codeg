@@ -86,6 +86,7 @@ pub struct AcpAgent {
     server: sacp::schema::McpServer,
     debug_callback: Option<Arc<dyn Fn(&str, LineDirection) + Send + Sync + 'static>>,
     current_dir: Option<PathBuf>,
+    spawn_callback: Option<Arc<dyn Fn(u32) + Send + Sync + 'static>>,
 }
 
 impl std::fmt::Debug for AcpAgent {
@@ -97,6 +98,10 @@ impl std::fmt::Debug for AcpAgent {
                 &self.debug_callback.as_ref().map(|_| "..."),
             )
             .field("current_dir", &self.current_dir)
+            .field(
+                "spawn_callback",
+                &self.spawn_callback.as_ref().map(|_| "..."),
+            )
             .finish()
     }
 }
@@ -108,6 +113,7 @@ impl AcpAgent {
             server,
             debug_callback: None,
             current_dir: None,
+            spawn_callback: None,
         }
     }
 
@@ -173,6 +179,36 @@ impl AcpAgent {
     /// right place.
     pub fn with_current_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.current_dir = Some(dir.into());
+        self
+    }
+
+    /// Register a callback invoked once with the OS process id (pid) of the
+    /// spawned agent process, right after it launches.
+    ///
+    /// The child is otherwise owned entirely by [`connect_to`]'s internal
+    /// `ChildGuard`, which kills the whole process tree on drop. But that drop
+    /// only runs when the driving future completes — during a host-process
+    /// shutdown the driver may be torn down before it can, leaking the agent
+    /// (and its own child processes) as orphans. Exposing the pid lets the host
+    /// record it and force a synchronous `kill_tree` on exit as a backstop.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use sacp_tokio::AcpAgent;
+    /// # use std::str::FromStr;
+    /// # use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+    /// let pid_cell = Arc::new(AtomicU32::new(0));
+    /// let cell = pid_cell.clone();
+    /// let agent = AcpAgent::from_str("python my_agent.py")
+    ///     .unwrap()
+    ///     .on_spawn(move |pid| cell.store(pid, Ordering::SeqCst));
+    /// ```
+    pub fn on_spawn<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(u32) + Send + Sync + 'static,
+    {
+        self.spawn_callback = Some(Arc::new(callback));
         self
     }
 
@@ -333,6 +369,16 @@ impl<Counterpart: AcpAgentCounterpartRole> sacp::ConnectTo<Counterpart> for AcpA
         use futures::io::BufReader;
 
         let (child_stdin, child_stdout, child_stderr, child) = self.spawn_process()?;
+
+        // Publish the OS pid to the spawn callback so the host can kill the
+        // process tree deterministically at shutdown rather than relying solely
+        // on `ChildGuard::drop` (which never runs if the driving thread is torn
+        // down by process exit before the connect future unwinds).
+        if let Some(callback) = self.spawn_callback.as_ref() {
+            if let Some(pid) = child.id() {
+                callback(pid);
+            }
+        }
 
         // Create a channel to collect stderr for error reporting
         let (stderr_tx, stderr_rx) = tokio::sync::oneshot::channel::<String>();
@@ -496,6 +542,7 @@ impl AcpAgent {
             ),
             debug_callback: None,
             current_dir: None,
+            spawn_callback: None,
         })
     }
 }
@@ -540,6 +587,7 @@ impl FromStr for AcpAgent {
                 server,
                 debug_callback: None,
                 current_dir: None,
+                spawn_callback: None,
             });
         }
 

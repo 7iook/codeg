@@ -326,6 +326,15 @@ pub struct AgentConnection {
     /// no-op save (identical values) stays silent. Starts equal to
     /// `config_fingerprint`.
     pub last_observed_fingerprint: String,
+    /// OS process id of the spawned agent subprocess, published by the
+    /// vendored `sacp-tokio` `on_spawn` callback. `0` until the process has
+    /// launched (or if the pid was never observed). Used only as a shutdown
+    /// backstop: `disconnect_all` kills this pid's whole process tree
+    /// synchronously after the graceful-disconnect grace window, so agents
+    /// (and their own child processes, e.g. MCP servers) never leak as orphans
+    /// when the host process exits before `ChildGuard::drop` can run on the
+    /// connection driver thread.
+    pub child_pid: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl AgentConnection {
@@ -956,7 +965,18 @@ pub async fn spawn_agent_connection(
     // agree. Computed here because `working_dir` is moved into run_connection
     // below.
     let launch_cwd = resolve_working_dir(working_dir.as_deref());
-    let agent = build_agent(agent_type, &runtime_env, &launch_cwd).await?;
+    // Shared cell that receives the agent process's OS pid the instant it
+    // spawns (via `on_spawn` below). Stored on the `AgentConnection` so the
+    // shutdown path can `kill_tree` the process tree synchronously as a
+    // backstop when the connection driver thread is torn down by process exit
+    // before `ChildGuard::drop` can run. 0 = not spawned yet / unknown.
+    let child_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let agent = build_agent(agent_type, &runtime_env, &launch_cwd)
+        .await?
+        .on_spawn({
+            let child_pid = Arc::clone(&child_pid);
+            move |pid| child_pid.store(pid, std::sync::atomic::Ordering::SeqCst)
+        });
 
     // Path policy for the ACP `fs/*` channel. Built HERE rather than inside
     // `run_connection` because it needs the full `runtime_env` (only the git
@@ -1012,6 +1032,7 @@ pub async fn spawn_agent_connection(
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             last_observed_fingerprint: config_fingerprint.clone(),
             config_fingerprint,
+            child_pid,
         },
     );
 

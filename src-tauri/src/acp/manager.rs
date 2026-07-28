@@ -42,6 +42,12 @@ use crate::web::event_bridge::{emit_with_state, emit_with_state_gated, EventEmit
 /// IM message, or the webhook body.
 const USER_PROMPT_PREVIEW_MAX_CHARS: usize = 500;
 
+/// Grace window `disconnect_all` waits after firing every `Disconnect` before
+/// hard-killing surviving agent process trees. Long enough for the graceful
+/// `ChildGuard::drop` → `kill_tree` path to win on connections that close
+/// cleanly, short enough not to stall a quit noticeably.
+const DISCONNECT_ALL_GRACE: Duration = Duration::from_millis(500);
+
 /// True for ids in the parsers' turn-id namespace (`turn-<digits>`), which every
 /// parser assigns via `format!("turn-{}", n)`. A broadcast `message_id` must
 /// never land here: it would collide with a persisted transcript turn id and let
@@ -339,6 +345,7 @@ impl ConnectionManager {
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         let mut map = self.connections.lock().await;
         map.insert(id.to_string(), conn);
@@ -381,6 +388,7 @@ impl ConnectionManager {
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         self.connections.lock().await.insert(id.to_string(), conn);
         rx
@@ -1845,16 +1853,81 @@ impl ConnectionManager {
         disconnected
     }
 
+    /// Disconnect every connection, then hard-kill any surviving agent process
+    /// trees as a shutdown backstop.
+    ///
+    /// The graceful path (send `Disconnect` → the connection driver thread
+    /// breaks its command loop → `run_connection` unwinds → the vendored
+    /// `sacp-tokio` `ChildGuard::drop` runs `kill_tree`) is enough on its own
+    /// *when it gets to run*. It doesn't at process exit: `run_connection` is
+    /// driven on a dedicated `std::thread` (see `spawn_agent`), and when Tauri's
+    /// `ExitRequested` handler returns the process terminates those threads
+    /// mid-flight — often before the driver reaches `ChildGuard::drop` — so the
+    /// agent CLI (and its own children, e.g. MCP servers / a forked `node`) is
+    /// reparented and lingers until it independently notices its stdin EOF
+    /// (~30s for Claude Code / node).
+    ///
+    /// So: fire every `Disconnect`, give the graceful drops a short grace window
+    /// to win the race on their own, then synchronously `kill_tree` every pid we
+    /// recorded at spawn. `kill_tree` on an already-dead pid is a best-effort
+    /// no-op, so a connection that shut down cleanly within the window costs
+    /// nothing here. Only pids this manager spawned (and their descendants) are
+    /// touched — `child_pid == 0` (never spawned, or a viewer/child that owns no
+    /// process) is skipped.
     pub async fn disconnect_all(&self) -> usize {
-        let cmd_txs: Vec<_> = {
+        let handles: Vec<(
+            tokio::sync::mpsc::Sender<ConnectionCommand>,
+            Arc<std::sync::atomic::AtomicU32>,
+        )> = {
             let mut connections = self.connections.lock().await;
-            connections.drain().map(|(_, conn)| conn.cmd_tx).collect()
+            connections
+                .drain()
+                .map(|(_, conn)| (conn.cmd_tx, conn.child_pid))
+                .collect()
         };
-        let disconnected = cmd_txs.len();
-        for cmd_tx in cmd_txs {
+        let disconnected = handles.len();
+        // Snapshot the pids before consuming the senders so the backstop can
+        // still reach them after the graceful path has had its window.
+        let pids: Vec<u32> = handles
+            .iter()
+            .map(|(_, pid)| pid.load(std::sync::atomic::Ordering::SeqCst))
+            .collect();
+        for (cmd_tx, _) in &handles {
             let _ = cmd_tx.send(ConnectionCommand::Disconnect).await;
         }
         tracing::info!("[ACP] disconnect_all count={}", disconnected);
+
+        if disconnected == 0 {
+            return 0;
+        }
+
+        // Grace window: let the graceful `ChildGuard::drop` kill_tree win on its
+        // own where it can (clean stdio close, no orphaned descendants). Short
+        // enough not to stall a quit noticeably.
+        tokio::time::sleep(DISCONNECT_ALL_GRACE).await;
+
+        // Backstop: hard-kill any pid still alive. Runs on a blocking thread so
+        // the synchronous `kill_tree` doesn't stall the async runtime while a
+        // `block_on(disconnect_all())` shutdown caller waits on it.
+        let _ = tokio::task::spawn_blocking(move || {
+            for pid in pids {
+                if pid == 0 {
+                    continue;
+                }
+                match kill_tree::blocking::kill_tree(pid) {
+                    Ok(_) => {
+                        tracing::info!("[ACP] disconnect_all backstop killed process tree pid={pid}");
+                    }
+                    Err(e) => {
+                        // Already-dead pid is the common, expected case (the
+                        // graceful path won the race) — log at debug, not error.
+                        tracing::debug!("[ACP] disconnect_all backstop kill_tree pid={pid}: {e}");
+                    }
+                }
+            }
+        })
+        .await;
+
         disconnected
     }
 
@@ -2831,6 +2904,7 @@ mod tests {
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -3003,6 +3077,7 @@ mod tests {
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         mgr.connections
             .lock()
@@ -3336,6 +3411,7 @@ mod tests {
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         let mgr = ConnectionManager::new();
         mgr.connections
@@ -4908,6 +4984,7 @@ mod tests {
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         let mgr = Arc::new(ConnectionManager::new());
         {
@@ -5281,6 +5358,7 @@ mod tests {
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         let mgr = ConnectionManager::new();
         {
