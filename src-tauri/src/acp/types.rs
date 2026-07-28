@@ -70,6 +70,28 @@ pub enum AcpEvent {
         session_id: String,
         message: serde_json::Value,
     },
+    /// One conversation message produced by a Claude BUILT-IN subagent (the
+    /// Agent/Task tool), forwarded live off the raw `_claude/sdkMessage`
+    /// channel.
+    ///
+    /// Separate from [`AcpEvent::ClaudeSdkMessage`] on purpose: these must NOT
+    /// join the parent's main message stream (a long subagent run would bury the
+    /// parent conversation in noise), so attribution is a REQUIRED field rather
+    /// than an optional hint. `parent_tool_use_id` is the SDK's own subagent
+    /// attribution key (`SDKAssistantMessage.parent_tool_use_id`) and equals the
+    /// parent turn's Agent/Task `tool_use` id, which is what the frontend groups
+    /// under. The adapter forwards raw messages with only `sessionId` +
+    /// `message` (no `agentId`), so this is the only attribution key available
+    /// on the live path.
+    ///
+    /// `message` is the verbatim third-party SDK frame; shape normalization is
+    /// deliberately left to the single mapper in `connection.rs` (SSOT) and the
+    /// frontend renderer.
+    ClaudeSubagentMessage {
+        session_id: String,
+        parent_tool_use_id: String,
+        message: serde_json::Value,
+    },
     /// Agent initiated a tool call
     ToolCall {
         tool_call_id: String,

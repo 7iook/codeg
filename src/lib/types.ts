@@ -1248,6 +1248,21 @@ export type AcpEvent =
       session_id: string
       message: unknown
     }
+  /**
+   * One conversation message from a Claude BUILT-IN subagent (Agent/Task tool),
+   * forwarded live off the raw `_claude/sdkMessage` channel.
+   *
+   * Kept separate from `claude_sdk_message` so these never join the parent's
+   * main message stream. `parent_tool_use_id` is required attribution: it equals
+   * the parent turn's Agent/Task `tool_use` id, which is the key to group under.
+   * Read-only — codeg cannot send to a built-in subagent (no ACP addressing).
+   */
+  | {
+      type: "claude_subagent_message"
+      session_id: string
+      parent_tool_use_id: string
+      message: unknown
+    }
   | {
       type: "tool_call"
       tool_call_id: string

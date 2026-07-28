@@ -997,6 +997,7 @@ impl SessionState {
                 self.background_activity_at = Some(Utc::now());
             }
             AcpEvent::ClaudeSdkMessage { .. }
+            | AcpEvent::ClaudeSubagentMessage { .. }
             | AcpEvent::SessionLoadFailed { .. }
             | AcpEvent::TurnRetrying { .. }
             | AcpEvent::UserPromptSent { .. }

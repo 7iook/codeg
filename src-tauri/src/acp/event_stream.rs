@@ -361,6 +361,19 @@ fn estimate_envelope_size(envelope: &EventEnvelope) -> usize {
             session_id,
             message,
         } => json_str_len(session_id) + json_value_size(message),
+        // Carries a verbatim SDK frame (a subagent's assistant/user message,
+        // including full tool_result text), so it is sized structurally for the
+        // same reason as `ClaudeSdkMessage`: letting it hit the serialize
+        // fallback would re-introduce serialization under the write lock.
+        AcpEvent::ClaudeSubagentMessage {
+            session_id,
+            parent_tool_use_id,
+            message,
+        } => {
+            json_str_len(session_id)
+                + json_str_len(parent_tool_use_id)
+                + json_value_size(message)
+        }
         AcpEvent::ToolCall {
             tool_call_id,
             title,
@@ -852,6 +865,25 @@ mod tests {
                         "d": null,
                         "e": 1.5,
                         "f": {"g": -7},
+                    }),
+                },
+            }),
+            // Same firehose payload shape, but on the subagent variant: it also
+            // carries an arbitrary third-party JSON tree, so the structural
+            // estimate must dominate the serialized length here too.
+            Arc::new(EventEnvelope {
+                seq: 4,
+                connection_id: "c".into(),
+                payload: AcpEvent::ClaudeSubagentMessage {
+                    session_id: "s".into(),
+                    parent_tool_use_id: "toolu_\"esc".into(),
+                    message: serde_json::json!({
+                        "type": "assistant",
+                        "parent_tool_use_id": "toolu_1",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "a\"b\nc"}],
+                        },
                     }),
                 },
             }),

@@ -2146,6 +2146,32 @@ fn claude_raw_sdk_session_meta(
         serde_json::Value::Bool(true),
     );
 
+    // `emitRawSDKMessages` only decides whether the ADAPTER forwards SDK frames
+    // to codeg; it cannot forward frames the CLI never produced. Per the SDK
+    // (`Options.forwardSubagentText`): "By default, only tool_use/tool_result
+    // blocks from subagents are emitted (enough for a heartbeat counter). When
+    // true, the full subagent conversation is forwarded so consumers can render a
+    // nested transcript." So a built-in subagent's prose/thinking simply does not
+    // exist upstream unless this is on — widening the mapper alone would yield a
+    // transcript of tool calls with nothing said.
+    //
+    // Delivered via `_meta.claudeCode.options`, which the adapter forwards as
+    // `userProvidedOptions`. Safe to set: `forwardSubagentText` is not among the
+    // options the adapter overrides for ACP's own use (cwd,
+    // includePartialMessages, permissionMode, canUseTool, …).
+    //
+    // Scope is deliberately ONE key. Do NOT add `tools` (a whole-preset override
+    // — it would downgrade the agent's tool set), `allowedTools` (means
+    // "pre-approved", not "restricted"), or `mcpServers` (cannot constrain
+    // already-configured servers). Pinned by
+    // `claude_session_meta_enables_subagent_text_forwarding`.
+    let mut options = serde_json::Map::new();
+    options.insert(
+        "forwardSubagentText".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    claude_code.insert("options".to_string(), serde_json::Value::Object(options));
+
     let mut meta = serde_json::Map::new();
     meta.insert(
         "claudeCode".to_string(),
@@ -6842,17 +6868,73 @@ fn is_claude_api_retry_message(message: &serde_json::Value) -> bool {
     matches!(message_type, Some("system")) && matches!(message_subtype, Some("api_retry"))
 }
 
+/// `message.type`s admitted from a subagent onto the live event stream.
+///
+/// Deliberately an explicit allowlist, NOT a catch-all. `emitRawSDKMessages:
+/// true` (set in [`claude_raw_sdk_session_meta`]) makes `_claude/sdkMessage` a
+/// FULL firehose: the adapter's `shouldEmitRawMessage(true, _)` returns `true`
+/// unconditionally, so every SDK frame arrives here, including per-token
+/// `stream_event` partials and high-frequency bookkeeping (`tool_progress`,
+/// `command_lifecycle`, `tool_use_summary`, `control_response`, `result`). A
+/// fall-through `Some(..)` would push all of that onto the per-connection event
+/// stream and its ring buffer, evicting real events.
+///
+/// Why exactly these two:
+/// - `assistant` — the subagent's prose and thinking. This is the ONLY live
+///   source for it: the adapter strips `text`/`thinking` from subagent messages
+///   on the TYPED `session/update` path (`acp-agent.js`, the
+///   `parent_tool_use_id !== null` branch), so without this the user can never
+///   see what the subagent said.
+/// - `user` — the subagent's tool_results plus the prompt it was launched with;
+///   needed for the transcript to read as a conversation rather than a
+///   monologue of half-exchanges.
+///
+/// Everything else is either already covered by another lane (partial deltas
+/// duplicate `assistant`; `tool_progress` already drives the parent card) or has
+/// nothing renderable. Widening this list is a volume decision — measure first.
+const SUBAGENT_LIVE_MESSAGE_TYPES: [&str; 2] = ["assistant", "user"];
+
+/// The subagent attribution key on a raw SDK frame, when present and non-null.
+///
+/// `parent_tool_use_id` is the SDK's own subagent marker
+/// (`SDKAssistantMessage.parent_tool_use_id: string | null`): non-null means the
+/// frame came from a built-in subagent, and the value is the parent turn's
+/// Agent/Task `tool_use` id. It is the ONLY key available on this path — the
+/// adapter forwards raw frames as `{ sessionId, message }` with no `agentId`.
+/// `None` (null or absent) means the main loop, which already flows through the
+/// typed pipeline and must not be re-emitted here.
+fn claude_subagent_parent_tool_use_id(message: &serde_json::Value) -> Option<&str> {
+    message
+        .get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+}
+
 fn map_claude_sdk_ext_notification(notification: &UntypedMessage) -> Option<AcpEvent> {
     if notification.method() != "_claude/sdkMessage" {
         return None;
     }
 
     let (session_id, message) = parse_claude_sdk_message_params(notification.params())?;
-    if !is_claude_api_retry_message(&message) {
+
+    // Checked BEFORE the subagent branch so the retry banner keeps its own
+    // event type even when a subagent's request is the one retrying — it is a
+    // session-scoped transient hint, not transcript content.
+    if is_claude_api_retry_message(&message) {
+        return Some(AcpEvent::ClaudeSdkMessage {
+            session_id,
+            message,
+        });
+    }
+
+    let message_type = message.get("type").and_then(|v| v.as_str())?;
+    if !SUBAGENT_LIVE_MESSAGE_TYPES.contains(&message_type) {
         return None;
     }
-    Some(AcpEvent::ClaudeSdkMessage {
+    let parent_tool_use_id = claude_subagent_parent_tool_use_id(&message)?.to_string();
+    Some(AcpEvent::ClaudeSubagentMessage {
         session_id,
+        parent_tool_use_id,
         message,
     })
 }
@@ -8248,6 +8330,67 @@ mod tests {
         assert!(claude_raw_sdk_session_meta(AgentType::Codex).is_none());
     }
 
+    /// `emitRawSDKMessages` opens the ACP-side firehose, but it can only forward
+    /// frames the CLI actually produced. Per the SDK
+    /// (`sdk.d.ts` `Options.forwardSubagentText`): "By default, only
+    /// tool_use/tool_result blocks from subagents are emitted (enough for a
+    /// heartbeat counter)." So without this option a subagent's prose/thinking is
+    /// never generated upstream and no amount of downstream widening can recover
+    /// it — the "see the full process" goal would fail on an empty transcript.
+    ///
+    /// Rides on `_meta.claudeCode.options`, which the adapter passes through as
+    /// `userProvidedOptions` (`acp-agent.js`); `forwardSubagentText` is NOT in the
+    /// adapter's ACP-controlled override list (`acp-agent.d.ts`), so it survives.
+    ///
+    /// Deliberately the ONLY key in `options`: `tools` is a whole-preset override
+    /// (setting it would DOWNGRADE the agent's tool set), `allowedTools` means
+    /// "skip confirmation" rather than "restrict", and `mcpServers` cannot
+    /// constrain already-configured servers. This test pins that narrowness.
+    #[test]
+    fn claude_session_meta_enables_subagent_text_forwarding() {
+        let meta = claude_raw_sdk_session_meta(AgentType::ClaudeCode)
+            .expect("Claude must have raw SDK meta");
+        let claude_code = meta
+            .get("claudeCode")
+            .expect("meta must carry the claudeCode block");
+
+        assert_eq!(
+            claude_code
+                .get("options")
+                .and_then(|o| o.get("forwardSubagentText"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "subagent text/thinking must be forwarded, else the transcript is empty"
+        );
+
+        // Narrowness guard: no capability-affecting keys may ride along.
+        let options = claude_code
+            .get("options")
+            .and_then(|o| o.as_object())
+            .expect("options must be an object");
+        for forbidden in ["tools", "allowedTools", "mcpServers"] {
+            assert!(
+                !options.contains_key(forbidden),
+                "`{forbidden}` must not be set here — it would change agent capability, \
+                 not observability"
+            );
+        }
+
+        // Invariant 1 (read-only, Claude-scoped): no other agent gets ANY `_meta`,
+        // so this cannot alter a non-Claude session's behavior.
+        for other in [
+            AgentType::Codex,
+            AgentType::OpenClaw,
+            AgentType::Gemini,
+            AgentType::OpenCode,
+        ] {
+            assert!(
+                claude_raw_sdk_session_meta(other).is_none(),
+                "{other:?} must carry no _meta at all"
+            );
+        }
+    }
+
     #[test]
     fn map_claude_sdk_ext_notification_maps_valid_payload() {
         let raw = UntypedMessage::new(
@@ -8304,6 +8447,163 @@ mod tests {
         let missing_fields =
             UntypedMessage::new("_claude/sdkMessage", serde_json::json!({"sessionId": 1})).unwrap();
         assert!(map_claude_sdk_ext_notification(&missing_fields).is_none());
+    }
+
+    /// Helper: a `_claude/sdkMessage` notification carrying an arbitrary raw
+    /// SDK message body.
+    fn claude_sdk_notification(message: serde_json::Value) -> UntypedMessage {
+        UntypedMessage::new(
+            "_claude/sdkMessage",
+            serde_json::json!({"sessionId": "session-123", "message": message}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn subagent_sdk_message_is_mapped_with_parent_tool_use_id() {
+        // A subagent assistant message: the SDK stamps `parent_tool_use_id` with
+        // the parent Agent/Task tool_use id (`sdk.d.ts` SDKAssistantMessage).
+        // The adapter forwards it raw (it strips text/thinking only from the
+        // TYPED pipeline), so this is codeg's only live source of subagent prose.
+        let raw = claude_sdk_notification(serde_json::json!({
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_parent_1",
+            "uuid": "11111111-1111-1111-1111-111111111111",
+            "session_id": "session-123",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "sub thinking out loud"}]
+            }
+        }));
+
+        let event = map_claude_sdk_ext_notification(&raw)
+            .expect("a subagent assistant message must map to an event");
+
+        match event {
+            AcpEvent::ClaudeSubagentMessage {
+                session_id,
+                parent_tool_use_id,
+                message,
+            } => {
+                assert_eq!(session_id, "session-123");
+                // Attribution must be explicit on the event — the frontend groups
+                // under the parent tool_use card by exactly this key.
+                assert_eq!(parent_tool_use_id, "toolu_parent_1");
+                assert_eq!(
+                    message.get("type").and_then(|v| v.as_str()),
+                    Some("assistant")
+                );
+            }
+            other => panic!("expected ClaudeSubagentMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn main_thread_sdk_message_is_not_treated_as_subagent() {
+        // `parent_tool_use_id: null` = main loop. It already flows through the
+        // typed `session/update` pipeline, so re-emitting it here would duplicate
+        // the whole main transcript.
+        let null_parent = claude_sdk_notification(serde_json::json!({
+            "type": "assistant",
+            "parent_tool_use_id": null,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
+        }));
+        assert!(
+            map_claude_sdk_ext_notification(&null_parent).is_none(),
+            "a main-thread message must not enter the subagent path"
+        );
+
+        // Field absent entirely (older CLI / non-conversation frames): same.
+        let absent_parent = claude_sdk_notification(serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": []}
+        }));
+        assert!(
+            map_claude_sdk_ext_notification(&absent_parent).is_none(),
+            "an absent parent_tool_use_id must not enter the subagent path"
+        );
+    }
+
+    #[test]
+    fn api_retry_mapping_unchanged() {
+        // Regression: the pre-existing `system/api_retry` passthrough (retry
+        // banner) must keep mapping to `ClaudeSdkMessage`, unchanged, and must
+        // NOT be reclassified as a subagent message even though api_retry frames
+        // carry no `parent_tool_use_id`.
+        let retry = claude_sdk_notification(serde_json::json!({
+            "type": "system",
+            "subtype": "api_retry",
+            "attempt": 3,
+            "max_retries": 10
+        }));
+
+        match map_claude_sdk_ext_notification(&retry).expect("api_retry must still map") {
+            AcpEvent::ClaudeSdkMessage {
+                session_id,
+                message,
+            } => {
+                assert_eq!(session_id, "session-123");
+                assert_eq!(message.get("subtype").and_then(|v| v.as_str()), Some("api_retry"));
+            }
+            other => panic!("api_retry must still map to ClaudeSdkMessage, got {other:?}"),
+        }
+
+        // A subagent-attributed api_retry stays on the retry path too (the
+        // banner is session-scoped; it must not be swallowed into a subagent
+        // transcript).
+        let subagent_retry = claude_sdk_notification(serde_json::json!({
+            "type": "system",
+            "subtype": "api_retry",
+            "parent_tool_use_id": "toolu_parent_1",
+            "attempt": 1,
+            "max_retries": 10
+        }));
+        assert!(
+            matches!(
+                map_claude_sdk_ext_notification(&subagent_retry),
+                Some(AcpEvent::ClaudeSdkMessage { .. })
+            ),
+            "api_retry keeps its own event type regardless of attribution"
+        );
+    }
+
+    #[test]
+    fn raw_channel_does_not_leak_unwhitelisted_types() {
+        // `emitRawSDKMessages: true` is a FULL-firehose channel: every SDK frame
+        // arrives here, including per-token `stream_event`s and high-frequency
+        // bookkeeping. The mapper must whitelist by `message.type`, never fall
+        // through to a catch-all `Some(..)` — a catch-all would flood the event
+        // stream (and the per-connection ring buffer) with frames nothing renders.
+        for message_type in [
+            // per-token partial deltas — would multiply event volume by ~100x
+            "stream_event",
+            // heartbeat/bookkeeping frames with no renderable content
+            "tool_progress",
+            "command_lifecycle",
+            "tool_use_summary",
+            // terminal result / non-api_retry system frames
+            "result",
+            "control_response",
+        ] {
+            let raw = claude_sdk_notification(serde_json::json!({
+                "type": message_type,
+                "parent_tool_use_id": "toolu_parent_1",
+            }));
+            assert!(
+                map_claude_sdk_ext_notification(&raw).is_none(),
+                "non-whitelisted message.type `{message_type}` must be dropped even \
+                 when subagent-attributed"
+            );
+        }
+
+        // Sanity: a non-api_retry `system` frame stays dropped (pre-existing
+        // behavior), so the whitelist widening didn't open the system lane.
+        let system_status = claude_sdk_notification(serde_json::json!({
+            "type": "system",
+            "subtype": "status",
+            "parent_tool_use_id": "toolu_parent_1",
+        }));
+        assert!(map_claude_sdk_ext_notification(&system_status).is_none());
     }
 
     /// The exact `_x.ai/session_notification` envelope captured from grok 0.2.111
