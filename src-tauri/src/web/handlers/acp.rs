@@ -1221,3 +1221,7 @@ pub async fn acp_add_registry_agent(
     .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
     Ok(Json(()))
 }
+
+pub async fn acp_current_platform() -> Json<String> {
+    Json(custom_agent_commands::acp_current_platform_core())
+}

@@ -15,6 +15,7 @@ import { toast } from "sonner"
 
 import {
   acpAddRegistryAgent,
+  acpCurrentPlatform,
   acpFetchRegistryCatalog,
   acpSaveCustomAgent,
   type CustomAgentSpec,
@@ -78,8 +79,14 @@ export function parseManualSpec(raw: string): {
   const obj = parsed as Record<string, unknown>
   // A whole registry entry: unwrap it and keep the metadata it carries.
   if (obj.distribution && typeof obj.distribution === "object") {
+    const spec = obj.distribution as CustomAgentSpec
+    // An entry whose distribution publishes no channel must say so — without
+    // this it parses "successfully" and the form just sits unready.
+    if (specKinds(spec).length === 0) {
+      return { error: "noDistribution" }
+    }
     return {
-      spec: obj.distribution as CustomAgentSpec,
+      spec,
       registryId: typeof obj.id === "string" ? obj.id : undefined,
       name: typeof obj.name === "string" ? obj.name : undefined,
       description:
@@ -88,10 +95,11 @@ export function parseManualSpec(raw: string): {
       iconUrl: typeof obj.icon === "string" ? obj.icon : undefined,
     }
   }
-  if (!obj.npx && !obj.uvx && !obj.binary) {
+  const spec = obj as CustomAgentSpec
+  if (specKinds(spec).length === 0) {
     return { error: "noDistribution" }
   }
-  return { spec: obj as CustomAgentSpec }
+  return { spec }
 }
 
 /**
@@ -108,6 +116,68 @@ export function specKinds(spec: CustomAgentSpec): CustomDistributionKind[] {
   if (spec.npx) kinds.push("npx")
   if (spec.uvx) kinds.push("uvx")
   return kinds
+}
+
+/**
+ * Platform key used when the backend has not answered (or could not be
+ * reached) by the time a binary template is requested. The lookup is a local
+ * constant, so in practice only a dropped server connection ever gets here.
+ */
+export const FALLBACK_PLATFORM = "linux-x86_64"
+
+/**
+ * Starter JSON for the manual form's distribution field, one per channel.
+ *
+ * The templates double as the field's documentation: each carries every field
+ * a typical entry of its channel needs — including `cmd`, which prose hints
+ * kept failing to teach — with values shaped like real registry entries, so
+ * filling one in is a matter of replacing values rather than recalling keys.
+ * `platform` keys the binary example so the entry it produces is one this
+ * machine can actually install.
+ */
+export function buildSpecTemplate(
+  kind: CustomDistributionKind,
+  platform: string
+): string {
+  if (kind === "npx") {
+    return JSON.stringify(
+      {
+        npx: {
+          package: "@scope/agent-cli@1.0.0",
+          args: ["--acp"],
+          cmd: "agent-cli",
+        },
+      },
+      null,
+      2
+    )
+  }
+  if (kind === "uvx") {
+    return JSON.stringify(
+      {
+        uvx: {
+          package: "agent-cli==1.0.0",
+          args: ["--acp"],
+          cmd: "agent-cli",
+        },
+      },
+      null,
+      2
+    )
+  }
+  return JSON.stringify(
+    {
+      binary: {
+        [platform]: {
+          archive: `https://example.com/agent-${platform}.tar.gz`,
+          cmd: "./agent",
+          args: ["acp"],
+        },
+      },
+    },
+    null,
+    2
+  )
 }
 
 /**
@@ -164,6 +234,10 @@ export function AddCustomAgentDialog({
   const [manualSkills, setManualSkills] = useState(false)
   const [manualSkillsDir, setManualSkillsDir] = useState("")
   const [savingManual, setSavingManual] = useState(false)
+  // This machine's binary-platform key (`darwin-aarch64`, …), for the binary
+  // template and the hint. A constant on the backend, so one fetch per mount
+  // is enough and it survives the per-open form reset.
+  const [platform, setPlatform] = useState<string | null>(null)
   const iconInputRef = useRef<HTMLInputElement>(null)
 
   const loadCatalog = useCallback(async () => {
@@ -182,6 +256,14 @@ export function AddCustomAgentDialog({
     if (!open) return
     void loadCatalog()
   }, [open, loadCatalog])
+
+  useEffect(() => {
+    if (!open || platform !== null) return
+    acpCurrentPlatform()
+      .then(setPlatform)
+      // Leave the fallback in place; nothing here is worth an error surface.
+      .catch(() => {})
+  }, [open, platform])
 
   // Reset the form each time the dialog opens so a previous attempt never
   // leaks into the next one.
@@ -264,7 +346,13 @@ export function AddCustomAgentDialog({
     [manualJson]
   )
   const manualKinds = manualParsed?.spec ? specKinds(manualParsed.spec) : []
-  const effectiveKind = manualKind ?? manualKinds[0] ?? null
+  // A chosen kind can go stale when the JSON is edited out from under it
+  // (pick "binary", then paste an npx-only spec) — honouring it would save a
+  // definition whose kind names a channel the spec does not carry.
+  const effectiveKind =
+    manualKind && manualKinds.includes(manualKind)
+      ? manualKind
+      : (manualKinds[0] ?? null)
   const effectiveId = manualId.trim() || manualParsed?.registryId?.trim() || ""
   const effectiveName = manualName.trim() || manualParsed?.name?.trim() || ""
   const manualReady =
@@ -532,7 +620,33 @@ export function AddCustomAgentDialog({
             </div>
 
             <div className="space-y-1">
-              <Label className="text-xs">{t("customAgentSpecLabel")}</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-xs">{t("customAgentSpecLabel")}</Label>
+                <div className="flex items-center gap-1">
+                  <span className="text-[11px] text-muted-foreground">
+                    {t("customAgentTemplateLabel")}
+                  </span>
+                  {(["npx", "uvx", "binary"] as const).map((kind) => (
+                    <Button
+                      key={kind}
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-[11px] font-mono"
+                      onClick={() => {
+                        setManualJson(
+                          buildSpecTemplate(kind, platform ?? FALLBACK_PLATFORM)
+                        )
+                        // A kind chosen for the previous content has no claim
+                        // on the template's single channel.
+                        setManualKind(null)
+                      }}
+                    >
+                      {kind}
+                    </Button>
+                  ))}
+                </div>
+              </div>
               <Textarea
                 value={manualJson}
                 onChange={(e) => setManualJson(e.target.value)}
@@ -544,7 +658,9 @@ export function AddCustomAgentDialog({
                 className="text-xs font-mono"
               />
               <p className="text-[11px] text-muted-foreground">
-                {t("customAgentSpecHint")}
+                {t("customAgentSpecHint", {
+                  platform: platform ?? FALLBACK_PLATFORM,
+                })}
               </p>
             </div>
 

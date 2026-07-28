@@ -156,6 +156,14 @@ pub async fn acp_fetch_registry_catalog_core(
         .map_err(|e| AcpError::protocol(e.to_string()))
 }
 
+/// The platform key (`darwin-aarch64`, …) binary distributions are keyed by on
+/// this machine. The manual add form asks for it to prefill a binary template
+/// that actually applies — and in server mode "this machine" is the server,
+/// where installs run, so the answer has to come from the backend.
+pub fn acp_current_platform_core() -> String {
+    registry::current_platform().to_string()
+}
+
 /// Add an agent straight from the ACP registry by id.
 ///
 /// For npx/uvx entries the console-script name is resolved from npm metadata
@@ -516,6 +524,12 @@ pub async fn acp_fetch_registry_catalog(
     db: State<'_, AppDatabase>,
 ) -> Result<Vec<RegistryCatalogAgent>, AcpError> {
     acp_fetch_registry_catalog_core(&db).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
+pub fn acp_current_platform() -> String {
+    acp_current_platform_core()
 }
 
 #[cfg(feature = "tauri-runtime")]

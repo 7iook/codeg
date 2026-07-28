@@ -872,6 +872,15 @@ export async function acpAddRegistryAgent(
   })
 }
 
+/**
+ * The platform key (`darwin-aarch64`, …) binary distributions are keyed by on
+ * the machine that runs installs — the server in server mode, hence a backend
+ * question rather than a userAgent sniff.
+ */
+export async function acpCurrentPlatform(): Promise<string> {
+  return getTransport().call("acp_current_platform", {})
+}
+
 export async function codexRequestDeviceCode(): Promise<{
   userCode: string
   verificationUrl: string
