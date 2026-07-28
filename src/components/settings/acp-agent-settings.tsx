@@ -298,6 +298,25 @@ interface UiCheckItem {
   fixes: UiFixAction[]
 }
 
+/**
+ * Fix kinds that run a package operation. Only one of these may run at a time
+ * across ALL agents, so while any of them is busy anywhere, every button whose
+ * kind is listed here is disabled — and dimmed, so the lockout is visible on
+ * agents other than the busy one.
+ */
+const PACKAGE_ACTION_FIX_KINDS: ReadonlyArray<UiFixAction["kind"]> = [
+  "download_binary",
+  "upgrade_binary",
+  "install_npx",
+  "upgrade_npx",
+  "uninstall_binary",
+  "uninstall_npx",
+  "redownload_binary",
+  "install_opencode_plugins",
+  "custom_install",
+  "install_uv",
+]
+
 type AcpTranslator = (
   key: string,
   values?: Record<string, string | number>
@@ -5370,55 +5389,60 @@ export function AcpAgentSettings() {
             </div>
             {check.fixes.length > 0 && (
               <div className="flex flex-wrap gap-1.5 justify-end max-w-[220px] shrink-0">
-                {check.fixes.map((fix, index) => (
-                  <Button
-                    key={`${fix.label}-${index}`}
-                    size="xs"
-                    variant="outline"
-                    className="h-6 bg-muted/30 hover:bg-muted/50 disabled:bg-muted/30 disabled:opacity-100"
-                    disabled={
-                      ("disabled" in fix && fix.disabled === true) ||
-                      (anyBinaryActionBusy &&
-                        [
-                          "download_binary",
-                          "upgrade_binary",
-                          "install_npx",
-                          "upgrade_npx",
-                          "uninstall_binary",
-                          "uninstall_npx",
-                          "redownload_binary",
-                          "install_opencode_plugins",
-                          "custom_install",
-                          "install_uv",
-                        ].includes(fix.kind))
-                    }
-                    onClick={() => {
-                      handleFixAction(agent, fix).catch((err) => {
-                        console.error("[Settings] fix action failed:", err)
-                      })
-                    }}
-                  >
-                    {runningActionKind[agent.agent_type] === fix.kind ? (
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    ) : fix.kind === "download_binary" ||
-                      fix.kind === "install_npx" ||
-                      fix.kind === "install_uv" ? (
-                      <Download className="h-3 w-3" />
-                    ) : fix.kind === "upgrade_binary" ||
-                      fix.kind === "upgrade_npx" ||
-                      fix.kind === "redownload_binary" ? (
-                      <Wrench className="h-3 w-3" />
-                    ) : fix.kind === "uninstall_binary" ||
-                      fix.kind === "uninstall_npx" ? (
-                      <Trash2 className="h-3 w-3" />
-                    ) : fix.kind === "install_opencode_plugins" ? (
-                      <Download className="h-3 w-3" />
-                    ) : fix.kind === "custom_install" ? (
-                      <PackagePlus className="h-3 w-3" />
-                    ) : null}
-                    {fix.label}
-                  </Button>
-                ))}
+                {check.fixes.map((fix, index) => {
+                  const busyGated =
+                    anyBinaryActionBusy &&
+                    PACKAGE_ACTION_FIX_KINDS.includes(fix.kind)
+                  const running =
+                    runningActionKind[agent.agent_type] === fix.kind
+                  return (
+                    <Button
+                      key={`${fix.label}-${index}`}
+                      size="xs"
+                      variant="outline"
+                      className={cn(
+                        "h-6 bg-muted/30 hover:bg-muted/50",
+                        // Two disabled looks: a backend-declared inapplicable fix
+                        // (and the button showing the spinner) keeps the full-
+                        // opacity chip look; one parked only by the global
+                        // one-package-op-at-a-time gate dims, so the lockout
+                        // shows on agents other than the busy one.
+                        busyGated && !running
+                          ? "disabled:opacity-50"
+                          : "disabled:bg-muted/30 disabled:opacity-100"
+                      )}
+                      disabled={
+                        ("disabled" in fix && fix.disabled === true) ||
+                        busyGated
+                      }
+                      onClick={() => {
+                        handleFixAction(agent, fix).catch((err) => {
+                          console.error("[Settings] fix action failed:", err)
+                        })
+                      }}
+                    >
+                      {runningActionKind[agent.agent_type] === fix.kind ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : fix.kind === "download_binary" ||
+                        fix.kind === "install_npx" ||
+                        fix.kind === "install_uv" ? (
+                        <Download className="h-3 w-3" />
+                      ) : fix.kind === "upgrade_binary" ||
+                        fix.kind === "upgrade_npx" ||
+                        fix.kind === "redownload_binary" ? (
+                        <Wrench className="h-3 w-3" />
+                      ) : fix.kind === "uninstall_binary" ||
+                        fix.kind === "uninstall_npx" ? (
+                        <Trash2 className="h-3 w-3" />
+                      ) : fix.kind === "install_opencode_plugins" ? (
+                        <Download className="h-3 w-3" />
+                      ) : fix.kind === "custom_install" ? (
+                        <PackagePlus className="h-3 w-3" />
+                      ) : null}
+                      {fix.label}
+                    </Button>
+                  )
+                })}
               </div>
             )}
           </div>
