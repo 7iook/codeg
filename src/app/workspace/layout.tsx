@@ -23,7 +23,7 @@ import {
   AcpConnectionsProvider,
   useAcpActions,
 } from "@/contexts/acp-connections-context"
-import { DelegationProvider } from "@/contexts/delegation-context"
+import { LiveObservabilityProviders } from "@/contexts/live-observability-providers"
 import { ConversationRuntimeProvider } from "@/contexts/conversation-runtime-context"
 import { TabProvider, useTabStore, useTabActions } from "@/contexts/tab-context"
 import { SidebarProvider, useSidebarContext } from "@/contexts/sidebar-context"
@@ -1146,7 +1146,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
         <GitCredentialProvider>
           <TaskProvider>
             <AcpConnectionsProvider>
-              <DelegationProvider>
+              <LiveObservabilityProviders>
                 <ConversationStatusEventBridge />
                 <ConversationRuntimeProvider>
                   <WorkspaceProvider>
@@ -1182,7 +1182,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
                     </TabProvider>
                   </WorkspaceProvider>
                 </ConversationRuntimeProvider>
-              </DelegationProvider>
+              </LiveObservabilityProviders>
             </AcpConnectionsProvider>
           </TaskProvider>
         </GitCredentialProvider>

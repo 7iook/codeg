@@ -61,6 +61,15 @@ export function AgentCapsule({
   const hasBody = Children.toArray(children).length > 0
 
   const [bodyOpen, setBodyOpen] = useState(defaultOpen ?? isError)
+  // Whether the USER opened this body themselves (trigger click), as opposed to
+  // it being open because the caller seeded `defaultOpen` / an error auto-opened
+  // it. Gates the running→completed auto-collapse below.
+  const [userToggled, setUserToggled] = useState(false)
+
+  const handleOpenChange = (next: boolean) => {
+    setUserToggled(true)
+    setBodyOpen(next)
+  }
 
   // Respond to prop transitions with the canonical React tracked-previous-state
   // pattern (render-phase setState) — see
@@ -70,8 +79,12 @@ export function AgentCapsule({
   //   - non-error → error: auto-OPEN so a failure that arrives mid-stream is
   //     visible without a click (the initial `isError` seed only covers calls
   //     that mount already-failed).
-  //   - running → completed (non-error): auto-COLLAPSE once (only matters if the
-  //     user manually expanded during streaming).
+  //   - running → completed (non-error): auto-COLLAPSE, but ONLY when the user
+  //     never opened it themselves. Tidying away a body nobody asked for is
+  //     right (the old tool-list capsules would otherwise pile up); closing one
+  //     the user deliberately expanded is not — for a live sub-agent transcript
+  //     that instant is exactly when the conclusion lands, so the UI would shut
+  //     the door on the most interesting moment.
   const [prevIsRunning, setPrevIsRunning] = useState(isRunning)
   const [prevIsError, setPrevIsError] = useState(isError)
   if (prevIsRunning !== isRunning || prevIsError !== isError) {
@@ -79,7 +92,7 @@ export function AgentCapsule({
     setPrevIsError(isError)
     if (!prevIsError && isError) {
       setBodyOpen(true)
-    } else if (prevIsRunning && !isRunning && !isError) {
+    } else if (prevIsRunning && !isRunning && !isError && !userToggled) {
       setBodyOpen(false)
     }
   }
@@ -134,7 +147,11 @@ export function AgentCapsule({
   }
 
   return (
-    <Collapsible open={bodyOpen} onOpenChange={setBodyOpen} className="w-full">
+    <Collapsible
+      open={bodyOpen}
+      onOpenChange={handleOpenChange}
+      className="w-full"
+    >
       {/* Pill trigger — matches ToolGroupPart structure with themed emphasis. */}
       <CollapsibleTrigger className={pillClass} aria-label={statusLabel}>
         {pillInner}

@@ -14,6 +14,9 @@ import { cn } from "@/lib/utils"
 import { ChevronRightIcon, Clock3, Loader2 } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { AgentCapsule } from "./agent-capsule"
+import { SubagentTranscript } from "./subagent-transcript"
+import { useSubagentFrames } from "@/contexts/subagent-transcript-context"
+import { buildSubagentTranscriptView } from "@/lib/subagent-transcript"
 import {
   isAsyncLaunchAckText,
   parseBackgroundTaskMarker,
@@ -257,6 +260,30 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
     [agentStats?.tool_calls, part.toolCallId]
   )
 
+  // Live transcript of a Claude BUILT-IN sub-agent, keyed by this very tool
+  // call: `parent_tool_use_id` on the wire IS this Agent/Task `tool_use` id, so
+  // rendering it inside this capsule satisfies the "don't pollute the parent
+  // conversation" invariant structurally — no attribution logic needed.
+  //
+  // `undefined` for every historical turn (the upstream `forwardSubagentText`
+  // switch only applies to sessions started after it was enabled) and for
+  // non-Claude agents. That is the COMMON case, and the correct rendering for
+  // it is today's behavior: no transcript section, so `hasBody` degrades the
+  // capsule to a bare pill or its tool list. No "no data yet" placeholder card.
+  const subagentFrames = useSubagentFrames(part.toolCallId)
+  const hasSubagentTranscript = (subagentFrames?.length ?? 0) > 0
+  const subagentCounts = useMemo(() => {
+    if (!subagentFrames || subagentFrames.length === 0) return null
+    const view = buildSubagentTranscriptView(subagentFrames)
+    return {
+      badge: t("subagentCounts", {
+        messages: view.messageCount,
+        tools: view.toolCount,
+      }),
+      tail: view.tailText,
+    }
+  }, [subagentFrames, t])
+
   const durationSuffix = useMemo(() => {
     if (agentStats?.total_duration_ms) {
       return formatDuration(agentStats.total_duration_ms)
@@ -268,125 +295,161 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
   }, [agentStats, taskOutcome])
 
   return (
-    <AgentCapsule
-      title={title}
-      isRunning={isRunning || isLiveBackgroundLaunch || outcomeBackground}
-      isError={isError || backgroundFailed || outcomeError != null}
-      rightSuffix={durationSuffix}
-      idBadge={agentId ? shortAgentId(agentId) : null}
-      statusLabel={statusLabel}
-    >
-      {/* Model summary */}
-      {model && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span>
-            {t("agentModelLabel")}: <span className="font-mono">{model}</span>
-          </span>
-        </div>
-      )}
-
-      {/* Collapsible prompt */}
-      {prompt && (
-        <Collapsible open={promptOpen} onOpenChange={setPromptOpen}>
-          <CollapsibleTrigger className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">
-            <ChevronRightIcon
-              aria-hidden="true"
-              className={cn(
-                "size-3.5 transition-transform",
-                promptOpen && "rotate-90"
-              )}
-            />
-            {t("agentPromptLabel")}
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            <div className="mt-2 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside">
-              <MessageResponse>{prompt}</MessageResponse>
-            </div>
-          </CollapsibleContent>
-        </Collapsible>
-      )}
-
-      {/* Subagent tool calls — rendered with the same ToolCallPart
-      as the outer conversation for consistent appearance */}
-      {adaptedToolCalls.length > 0 && (
-        <div className="space-y-2">
-          {adaptedToolCalls.map((tc, i) =>
-            renderToolCall(
-              tc as Extract<AdaptedContentPart, { type: "tool-call" }>,
-              `subagent-tc-${i}`
-            )
-          )}
-        </div>
-      )}
-
-      {/* Running indicator (in-turn streaming, a live background launch whose
-          ack just replaced the stream, or a cursor background-task envelope) */}
-      {((isRunning && !part.output) ||
-        isLiveBackgroundLaunch ||
-        outcomeBackground) && (
-        <div className="flex items-center gap-2">
-          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-          <Shimmer className="text-sm" duration={1} shineColor="var(--primary)">
-            {isLiveBackgroundLaunch || outcomeBackground
-              ? tBg("cardRunning")
-              : t("agentRunning")}
-          </Shimmer>
-        </div>
-      )}
-
-      {/* Error output */}
-      {isError && part.errorText && (
-        <div className="rounded-md bg-destructive/10 p-3">
-          <pre className="whitespace-pre-wrap break-words text-xs text-destructive">
-            {part.errorText}
-          </pre>
-        </div>
-      )}
-
-      {/* Cursor task failure envelope ({error}) — the wire marks the call
-          "completed", so this renders where the error styling belongs. */}
-      {outcomeError && !isError && (
-        <div className="rounded-md bg-destructive/10 p-3">
-          <pre className="whitespace-pre-wrap break-words text-xs text-destructive">
-            {outcomeError}
-          </pre>
-        </div>
-      )}
-
-      {/* Background lifecycle: settled summary + folded result markdown, or a
-          neutral "result pending" line for an unsettled launch. Never dumps
-          the marker/ack text. */}
-      {backgroundLifecycle && !isError && (
-        <div className="space-y-2">
-          {backgroundLifecycle.summary && (
-            <div className="text-xs text-muted-foreground">
-              {backgroundLifecycle.summary}
-            </div>
-          )}
-          {backgroundLifecycle.result ? (
-            <div className="text-sm prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside">
-              <MessageResponse>{backgroundLifecycle.result}</MessageResponse>
-            </div>
-          ) : !backgroundSettled ? (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Clock3 className="size-3.5 shrink-0" />
-              {tBg("cardResultPending")}
-            </div>
-          ) : null}
-        </div>
-      )}
-
-      {/* Final output. A folded task-outcome envelope renders via the
-          capsule chrome above (duration suffix / error box), never as body. */}
-      {part.output &&
-        !isError &&
-        !taskOutcome &&
-        !backgroundLifecycle &&
-        !isLiveBackgroundLaunch && (
-          <div className="text-sm prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside">
-            <MessageResponse>{part.output}</MessageResponse>
+    <>
+      <AgentCapsule
+        title={title}
+        isRunning={isRunning || isLiveBackgroundLaunch || outcomeBackground}
+        isError={isError || backgroundFailed || outcomeError != null}
+        rightSuffix={durationSuffix}
+        // The live process-size badge takes precedence over the codex agent id:
+        // it is what tells the user there is something inside worth opening.
+        idBadge={
+          subagentCounts?.badge ?? (agentId ? shortAgentId(agentId) : null)
+        }
+        statusLabel={statusLabel}
+      >
+        {/* Model summary */}
+        {model && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span>
+              {t("agentModelLabel")}: <span className="font-mono">{model}</span>
+            </span>
           </div>
         )}
-    </AgentCapsule>
+
+        {/* Collapsible prompt */}
+        {prompt && (
+          <Collapsible open={promptOpen} onOpenChange={setPromptOpen}>
+            <CollapsibleTrigger className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">
+              <ChevronRightIcon
+                aria-hidden="true"
+                className={cn(
+                  "size-3.5 transition-transform",
+                  promptOpen && "rotate-90"
+                )}
+              />
+              {t("agentPromptLabel")}
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <div className="mt-2 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside">
+                <MessageResponse>{prompt}</MessageResponse>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        )}
+
+        {/* Live built-in sub-agent transcript. Mounted only when frames exist,
+            and (via CollapsibleContent's unmount-when-closed contract) only
+            while the capsule is expanded — so N collapsed sub-agents cost N
+            pill rows, not N transcripts. */}
+        {hasSubagentTranscript && subagentFrames && (
+          <SubagentTranscript
+            frames={subagentFrames}
+            renderToolCall={renderToolCall}
+            parentToolUseId={part.toolCallId}
+          />
+        )}
+
+        {/* Subagent tool calls — rendered with the same ToolCallPart
+      as the outer conversation for consistent appearance */}
+        {adaptedToolCalls.length > 0 && (
+          <div className="space-y-2">
+            {adaptedToolCalls.map((tc, i) =>
+              renderToolCall(
+                tc as Extract<AdaptedContentPart, { type: "tool-call" }>,
+                `subagent-tc-${i}`
+              )
+            )}
+          </div>
+        )}
+
+        {/* Running indicator (in-turn streaming, a live background launch whose
+          ack just replaced the stream, or a cursor background-task envelope) */}
+        {((isRunning && !part.output) ||
+          isLiveBackgroundLaunch ||
+          outcomeBackground) && (
+          <div className="flex items-center gap-2">
+            <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+            <Shimmer
+              className="text-sm"
+              duration={1}
+              shineColor="var(--primary)"
+            >
+              {isLiveBackgroundLaunch || outcomeBackground
+                ? tBg("cardRunning")
+                : t("agentRunning")}
+            </Shimmer>
+          </div>
+        )}
+
+        {/* Error output */}
+        {isError && part.errorText && (
+          <div className="rounded-md bg-destructive/10 p-3">
+            <pre className="whitespace-pre-wrap break-words text-xs text-destructive">
+              {part.errorText}
+            </pre>
+          </div>
+        )}
+
+        {/* Cursor task failure envelope ({error}) — the wire marks the call
+          "completed", so this renders where the error styling belongs. */}
+        {outcomeError && !isError && (
+          <div className="rounded-md bg-destructive/10 p-3">
+            <pre className="whitespace-pre-wrap break-words text-xs text-destructive">
+              {outcomeError}
+            </pre>
+          </div>
+        )}
+
+        {/* Background lifecycle: settled summary + folded result markdown, or a
+          neutral "result pending" line for an unsettled launch. Never dumps
+          the marker/ack text. */}
+        {backgroundLifecycle && !isError && (
+          <div className="space-y-2">
+            {backgroundLifecycle.summary && (
+              <div className="text-xs text-muted-foreground">
+                {backgroundLifecycle.summary}
+              </div>
+            )}
+            {backgroundLifecycle.result ? (
+              <div className="text-sm prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside">
+                <MessageResponse>{backgroundLifecycle.result}</MessageResponse>
+              </div>
+            ) : !backgroundSettled ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Clock3 className="size-3.5 shrink-0" />
+                {tBg("cardResultPending")}
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {/* Final output. A folded task-outcome envelope renders via the
+          capsule chrome above (duration suffix / error box), never as body. */}
+        {part.output &&
+          !isError &&
+          !taskOutcome &&
+          !backgroundLifecycle &&
+          !isLiveBackgroundLaunch && (
+            <div className="text-sm prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside">
+              <MessageResponse>{part.output}</MessageResponse>
+            </div>
+          )}
+      </AgentCapsule>
+
+      {/* Activity tail: ONE truncated line of the sub-agent's latest output,
+          shown while it runs. This is the whole of the "is it stuck?" need —
+          most of the time the user never has to expand. Exactly one line, not a
+          scrolling tail: with five sub-agents in flight that is the difference
+          between five changing lines and five live scroll regions. */}
+      {isRunning && subagentCounts?.tail && (
+        <div
+          className="mt-1 truncate pl-3.5 text-[11px] text-muted-foreground/80"
+          data-testid="subagent-activity-tail"
+        >
+          {subagentCounts.tail}
+        </div>
+      )}
+    </>
   )
 })

@@ -89,21 +89,45 @@ describe("AgentCapsule", () => {
   })
 
   it("auto-collapses once when running transitions to completed", () => {
+    // Open WITHOUT a user toggle (caller-seeded, e.g. the old tool-list body):
+    // completion is still free to tidy it away.
+    const { rerender } = render(
+      <AgentCapsule title="Working" isRunning isError={false} defaultOpen>
+        <div>LIVE BODY</div>
+      </AgentCapsule>
+    )
+    expect(screen.getByText("LIVE BODY")).toBeInTheDocument()
+
+    rerender(
+      <AgentCapsule
+        title="Working"
+        isRunning={false}
+        isError={false}
+        defaultOpen
+      >
+        <div>LIVE BODY</div>
+      </AgentCapsule>
+    )
+    expect(screen.queryByText("LIVE BODY")).not.toBeInTheDocument()
+  })
+
+  it("capsule_stays_open_after_manual_expand_when_run_completes", () => {
     const { rerender } = render(
       <AgentCapsule title="Working" isRunning isError={false}>
         <div>LIVE BODY</div>
       </AgentCapsule>
     )
-    // User expands during streaming.
+    // User explicitly expands mid-stream to read the live transcript.
     fireEvent.click(screen.getByRole("button"))
     expect(screen.getByText("LIVE BODY")).toBeInTheDocument()
 
-    // Completion (running → not running, non-error) collapses it once.
+    // Completion arrives — the moment the conclusion appears. Closing the body
+    // in the user's face here is the bug; a manually-opened capsule stays open.
     rerender(
       <AgentCapsule title="Working" isRunning={false} isError={false}>
         <div>LIVE BODY</div>
       </AgentCapsule>
     )
-    expect(screen.queryByText("LIVE BODY")).not.toBeInTheDocument()
+    expect(screen.getByText("LIVE BODY")).toBeInTheDocument()
   })
 })

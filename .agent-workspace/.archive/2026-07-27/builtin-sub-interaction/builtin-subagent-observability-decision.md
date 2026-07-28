@@ -282,3 +282,81 @@ CHANGELOG + ARCHITECTURE。
 
   **本阶段明确未做**：§3.2 历史路径（`subagents/*.jsonl` 解析 + tailer）、
   前端渲染、i18n ×10 —— 按派单留给第二阶段。
+
+- 2026-07-27 **第四包（前端渲染）已实现 · executor** — 未 commit，交主 AI 统一提交。
+
+  **交付契约核验（§0.16）**：派单**未带** `[交付契约]` 块，我未代填。按 §0.16 逐跳核验既有链路：
+  raw 通道（`acp-agent.js:1479`）→ mapper（`connection.rs:6890`）→ 事件桥双模式
+  → **前端消费者（本包补上）** → 归组存储 → 胶囊内渲染 → 用户可见。链表已闭合，
+  唯一未验节点是"真实会话端到端跑一次"（见下方未取得证据）。
+
+  **改动清单**
+  - `src/lib/subagent-transcript.ts`（新）— 去重键 + verbatim SDK 帧 → 项目 `ContentBlock` 归一化 +
+    视图构建（计数 / 活动尾 / 任务 prompt 抽离）。纯函数，第二阶段 jsonl 路径可直接复用同一套键。
+  - `src/contexts/subagent-transcript-context.tsx`（新）— 按 `parent_tool_use_id` 索引的 live 存储；
+    `useAcpEvent` 消费 `claude_subagent_message`；rAF 批处理；ref+listener 而非 React state。
+  - `src/components/message/subagent-transcript.tsx`（新）— 只读 transcript 区块（只读徽标+tooltip /
+    任务 prompt / thinking 默认折叠 / prose / 内联工具走父注入口 / E-5 分页锚 / E-6 截断行）。
+  - `src/contexts/live-observability-providers.tsx`（新）— DelegationProvider + SubagentTranscriptProvider
+    组合；layout 只换一个标签名，避免整块 JSX 重缩进（见下方 prettier 说明）。
+  - `src/components/message/agent-tool-call.tsx:17,273,345,428` — 订阅 frames、pill 计数徽标、
+    body 内挂 transcript、running 时单行活动尾。
+  - `src/components/message/agent-capsule.tsx:62` — `userToggled` 标记；running→completed 自动折叠
+    仅在 `!userToggled` 时生效（**未删除**自动折叠）。
+  - `src/app/workspace/layout.tsx:26,1149,1185` — 挂载 `LiveObservabilityProviders`。
+  - `src/i18n/messages/*.json` ×10 — 设计卡 13 个 key，`Folder.chat.contentParts` 命名空间。
+
+  **去重键最终方案（坑 1 · 决策卡 K3）**：优先 `uuid`（落盘行有、live 事件没有，留给第二阶段），
+  否则 `(parent_tool_use_id, message.id, 内容指纹)`。指纹 = 各 content block 的 `type` + 长度 +
+  djb2(文本/thinking/tool id/tool input) 聚合。**理由与实测**：同一 `msg_…` 跨多帧出现（各行 uuid 不同），
+  单用 `message.id` 会把同一消息的后续内容当重复吞掉（与 upstream #33651 静默丢消息同类）；
+  加内容指纹后，同 id 不同内容 = 不同帧，真正的重复投递指纹一致而折叠。
+  逻辑在 `src/lib/subagent-transcript.ts` 的纯函数里（不埋在组件），注释写明了"为什么不能只用 message.id"。
+
+  **自动折叠那处怎么改的**：`agent-capsule.tsx` 新增 `userToggled` state，只有 `CollapsibleTrigger`
+  的 `onOpenChange` 会置 true；`prevIsRunning && !isRunning && !isError && !userToggled` 才自动折叠。
+  即 caller 用 `defaultOpen` 播种的 / 错误自动展开的仍会被跑完收起（旧纯工具胶囊行为不回归），
+  用户亲手点开的不会被当面关掉。既有测试 `auto-collapses once when running transitions to completed`
+  相应改为用 `defaultOpen` 播种（语义变了：它守的是"非用户开的仍会收起"），并新增
+  `capsule_stays_open_after_manual_expand_when_run_completes` 守新行为。
+
+  **并发抗崩四道闸落实位置**：① 默认全折叠（沿用 `AgentCapsule`，未改初始态）；
+  ② running 时每个 SUB 仅 1 行 `truncate` 活动尾（`agent-tool-call.tsx:428`，非滚动区）；
+  ③ transcript 只在展开时挂载（`CollapsibleContent` 的 unmount-when-closed 契约已由
+  `instant-collapsible.tsx:135` 的 `present` 状态保证，已读源码确认，不需额外 `open &&` 条件）；
+  ④ 事件走 rAF 批处理（对齐既有 `scheduleToolCallUpdateFlush`），**非** per-event dispatch；
+  另加 `MAX_SUBAGENT_FRAMES=400` / `MAX_TRACKED_SUBAGENTS=64` 两个上界。
+  保留胶囊既有 `max-h-72`，未放大（virtua 测量抖动）。
+
+  **不做清单遵守**：无输入框 / 无回复·继续·取消·停止键（连 disabled 都没有）/ 不在标签页打开 /
+  不上侧边栏 / 不用 Dialog·Sheet·抽屉 / body 内不套第二层 Card（只用 `border-border/60` 分隔）/
+  不显示 `agentId`（pill 上的 `idBadge` 换成 `N msg · M tools` 计数，codex 的 agent_id 作为 fallback 保留）/
+  引流用只读徽标 + tooltip，非常显横幅。由 `agent-tool-call-subagent.test.tsx` 的
+  `queryByRole("textbox")` + 五个按钮名的否定断言钉住。
+
+  **测试（红 → 绿，真跑）**
+  - RED（`.agent-workspace/red1.log`）：`2 failed | 4 failed / 7 passed (11)`，四条均为**断言失败**非编译错误：
+    `subagent_message_is_grouped_under_parent_tool_call` → `AssertionError: expected '' to be 'A is working'`；
+    `subagent_messages_do_not_enter_parent_message_stream` → `expected '' to be 'secret work'`；
+    `dedupe_key_distinguishes_frames_sharing_message_id` → `expected null to be truthy`；
+    `capsule_stays_open_after_manual_expand_when_run_completes` → `Unable to find an element with the text: LIVE BODY`。
+  - GREEN：上述 4 条全绿；另加 2 条接入测试（`agent-tool-call-subagent.test.tsx`：胶囊内真渲染出
+    transcript + 计数徽标 + 活动尾 + 只读徽标 + 无输入框；无 frames 时退化成裸 pill 不出空白盒）。
+  - `pnpm test` → **227 文件 / 2844 测试全通过**（`.agent-workspace/full-final.log`），含 i18n 十语 key parity。
+  - `npx tsc --noEmit` → **exit 0**。
+  - `npx eslint <6 个新文件>` → **exit 0**（零报错）。
+
+  **⚠️ 诚实标注**
+  - **E1 未闭环到"实测可见"**：代码链路已闭合且有接入测试覆盖（合成 envelope → 真实 provider →
+    真实胶囊 → 断言 DOM），但我**没有**起一个真实 Claude 会话派内置 SUB 跑端到端。
+    E1/E2/E5 仍属未实测。E5（并发 5 个不卡）只有结构性论证 + 上界，无实测数字。
+  - `pnpm eslint .` 全仓仍报约 3000 条 `Delete ␍`：**既存**，受控验证——未碰过的
+    `src/lib/api.ts` 单文件即报 3985 条；`core.autocrlf=true`（索引 LF / 工作区 CRLF）。
+    按派单未跑 `--fix`。我改动的既有文件（`agent-tool-call.tsx` / `agent-capsule.tsx` /
+    `layout.tsx`）除行尾外无新增真问题（逐文件过滤确认）。
+  - **一处方案偏离已自行纠正**：最初直接在 `layout.tsx` 的 provider 栈里插一层
+    `SubagentTranscriptProvider`，导致 prettier 要求重缩进内层 35 行 JSX（远超本包范围）。
+    改为抽 `LiveObservabilityProviders` 组合组件，layout 只换标签名 —— 顺带把"两个同源
+    observability provider"收在一处。
+  - **本阶段未做**：§3.2 历史路径（`subagents/*.jsonl` 解析 + tailer）、E-7 嵌套 SUB 的
+    "含嵌套"提示（`subagentNestedNotice` key 已加但暂无产出方，K4 未验，形状未知）。
