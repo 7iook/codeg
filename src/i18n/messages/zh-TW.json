@@ -1197,6 +1197,8 @@
     "customAgentIconHint": "隨智慧體一併儲存，離線也能顯示。未上傳則使用彩色首字母。",
     "customAgentSkillsLabel": "Skills（共享 .agents/skills）",
     "customAgentSkillsHint": "聲明該智能體會讀取共享的 .agents/skills 目錄（全域與專案級），並將其加入所有技能矩陣。連結到共享目錄的技能對讀取該目錄的其他智能體同樣可見。",
+    "customAgentSkillsDirLabel": "專屬技能目錄",
+    "customAgentSkillsDirHint": "該智慧體自身載入技能的目錄絕對路徑 —— 可與共享目錄並存，也可單獨使用。~ 會展開為主目錄；連結技能時優先放入此目錄。",
     "customAgentIconNotAnImage": "請選擇圖片檔案。",
     "customAgentIconTooLarge": "圖示需小於 {limit} KB。",
     "customAgentIconReadFailed": "無法讀取該圖片。",

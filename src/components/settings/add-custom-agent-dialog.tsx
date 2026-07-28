@@ -162,6 +162,7 @@ export function AddCustomAgentDialog({
   )
   const [manualIcon, setManualIcon] = useState<string | null>(null)
   const [manualSkills, setManualSkills] = useState(false)
+  const [manualSkillsDir, setManualSkillsDir] = useState("")
   const [savingManual, setSavingManual] = useState(false)
   const iconInputRef = useRef<HTMLInputElement>(null)
 
@@ -194,6 +195,7 @@ export function AddCustomAgentDialog({
     setManualKind(null)
     setManualIcon(null)
     setManualSkills(false)
+    setManualSkillsDir("")
   }, [open])
 
   const handlePickIcon = useCallback(
@@ -284,6 +286,7 @@ export function AddCustomAgentDialog({
         // An upload wins over an `icon` URL carried by a pasted registry entry.
         iconUrl: manualIcon ?? manualParsed.iconUrl ?? null,
         skillsSharedStore: manualSkills,
+        skillsDir: manualSkillsDir.trim() || null,
       })
       toast.success(
         t("customAgentAdded", { name: effectiveName || effectiveId })
@@ -303,6 +306,7 @@ export function AddCustomAgentDialog({
     manualVersion,
     manualIcon,
     manualSkills,
+    manualSkillsDir,
     onAdded,
     onOpenChange,
     t,
@@ -587,6 +591,22 @@ export function AddCustomAgentDialog({
                   {t("customAgentSkillsHint")}
                 </p>
               </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="custom-agent-skills-dir" className="text-xs">
+                {t("customAgentSkillsDirLabel")}
+              </Label>
+              <Input
+                id="custom-agent-skills-dir"
+                value={manualSkillsDir}
+                onChange={(e) => setManualSkillsDir(e.target.value)}
+                placeholder="~/.my-agent/skills"
+                className="h-8 text-xs font-mono"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {t("customAgentSkillsDirHint")}
+              </p>
             </div>
           </TabsContent>
         </Tabs>

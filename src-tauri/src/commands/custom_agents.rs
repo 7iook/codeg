@@ -41,6 +41,9 @@ pub struct CustomAgentInfo {
     /// Mirrors [`CustomAgentDef::skills_shared_store`] so the edit form can
     /// prefill the declaration.
     pub skills_shared_store: bool,
+    /// Mirrors [`CustomAgentDef::skills_dir`] — the agent's own skills
+    /// directory, already normalized to an absolute path.
+    pub skills_dir: Option<String>,
     /// False when the stored definition cannot produce launch metadata (e.g.
     /// a binary-only agent with no release for this platform). The row still
     /// lists, with the reason, instead of vanishing.
@@ -66,6 +69,7 @@ fn info_from_def(def: &CustomAgentDef) -> CustomAgentInfo {
         spec: def.spec.clone(),
         icon_url: def.icon_url.clone(),
         skills_shared_store: def.skills_shared_store,
+        skills_dir: def.skills_dir.clone(),
         launchable: problem.is_none(),
         problem,
     }
@@ -85,6 +89,10 @@ pub async fn acp_save_custom_agent_core(
 ) -> Result<(), AcpError> {
     let mut def = def;
     def.icon_url = normalize_icon(def.icon_url.take()).await;
+    // Both runtimes save through here, so this is where the dedicated skills
+    // directory is pinned down to an absolute path (or rejected) — the skills
+    // surfaces read it back without a workspace to resolve against.
+    def.skills_dir = normalize_skills_dir(def.skills_dir.take())?;
     custom_agent_service::upsert(&db.conn, &def)
         .await
         .map_err(|e| AcpError::protocol(e.to_string()))?;
@@ -206,6 +214,42 @@ pub async fn acp_add_registry_agent_core(
     // The registry's `icon` rides along on `def`; `acp_save_custom_agent_core`
     // inlines it.
     acp_save_custom_agent_core(def, db, emitter).await
+}
+
+/// Pin a declared skills directory down to a stored, absolute path.
+///
+/// Blank input reads as "not declared". A leading `~` is expanded so the form
+/// accepts the spelling every skills doc uses; anything still relative after
+/// that is rejected rather than silently resolved against whatever the
+/// process's working directory happens to be. Deliberately NOT part of
+/// `custom_registry::validate` — a bad skills path must never make the agent
+/// itself unlaunchable (hydrate skips rows that fail validation).
+fn normalize_skills_dir(raw: Option<String>) -> Result<Option<String>, AcpError> {
+    let Some(raw) = raw else { return Ok(None) };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let expanded = expand_home(trimmed);
+    if !expanded.is_absolute() {
+        return Err(AcpError::protocol(format!(
+            "skills directory must be an absolute path (got {trimmed:?})"
+        )));
+    }
+    Ok(Some(expanded.to_string_lossy().into_owned()))
+}
+
+/// `~` / `~/…` (and the `~\…` Windows spelling) resolved against the home
+/// directory; anything else passes through untouched.
+fn expand_home(path: &str) -> std::path::PathBuf {
+    let home = || dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    if path == "~" {
+        return home();
+    }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        return home().join(rest);
+    }
+    std::path::PathBuf::from(path)
 }
 
 /// Largest icon codeg will inline. Registry marks are 650 B–5 KB SVGs, so this
@@ -406,6 +450,10 @@ pub struct SaveCustomAgentParams {
     /// older frontends keep the agent out of the skills surfaces.
     #[serde(default)]
     pub skills_shared_store: bool,
+    /// See [`CustomAgentDef::skills_dir`]. Normalized (and possibly rejected)
+    /// by the save path, so the form can send what the user typed.
+    #[serde(default)]
+    pub skills_dir: Option<String>,
 }
 
 impl SaveCustomAgentParams {
@@ -426,6 +474,7 @@ impl SaveCustomAgentParams {
             spec: self.spec,
             icon_url: self.icon_url,
             skills_shared_store: self.skills_shared_store,
+            skills_dir: self.skills_dir,
         })
     }
 }
@@ -509,6 +558,7 @@ mod tests {
             spec: CustomAgentSpec::default(),
             icon_url: None,
             skills_shared_store: false,
+            skills_dir: None,
         };
         assert!(params.into_def().is_err());
     }
@@ -524,6 +574,7 @@ mod tests {
             spec: CustomAgentSpec::default(),
             icon_url: None,
             skills_shared_store: false,
+            skills_dir: None,
         };
         assert_eq!(params.into_def().unwrap().registry_id, "goose");
     }
@@ -553,10 +604,51 @@ mod tests {
             },
             icon_url: None,
             skills_shared_store: false,
+            skills_dir: None,
         };
         let info = info_from_def(&def);
         assert!(!info.launchable);
         assert!(info.problem.unwrap().contains("no binary release"));
+    }
+
+    #[test]
+    fn skills_dir_normalization_expands_home_and_rejects_relative_paths() {
+        // HOME is pinned so a parallel test rewriting it cannot flip the
+        // expansion mid-test; expectations still derive from `dirs::home_dir()`
+        // itself, which ignores $HOME on Windows.
+        temp_env::with_var("HOME", Some("/tmp/codeg-skills-home"), || {
+            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+
+            // Blank input reads as "not declared".
+            assert_eq!(normalize_skills_dir(None).unwrap(), None);
+            assert_eq!(normalize_skills_dir(Some("   ".into())).unwrap(), None);
+
+            // `~` spellings land on the home directory.
+            assert_eq!(
+                normalize_skills_dir(Some("~/qwen/skills".into())).unwrap(),
+                Some(home.join("qwen/skills").to_string_lossy().into_owned())
+            );
+            assert_eq!(
+                normalize_skills_dir(Some("~".into())).unwrap(),
+                Some(home.to_string_lossy().into_owned())
+            );
+
+            // An absolute path passes through, trimmed.
+            let absolute = home.join("elsewhere");
+            assert_eq!(
+                normalize_skills_dir(Some(format!("  {}  ", absolute.display()))).unwrap(),
+                Some(absolute.to_string_lossy().into_owned())
+            );
+
+            // Relative paths are rejected rather than silently resolved
+            // against whatever the process's working directory happens to be.
+            for bad in ["skills", "./skills", "../skills", "~elsewhere/skills"] {
+                assert!(
+                    normalize_skills_dir(Some(bad.into())).is_err(),
+                    "{bad:?} must be rejected"
+                );
+            }
+        });
     }
 
     #[tokio::test]
@@ -666,6 +758,7 @@ mod tests {
             },
             icon_url: None,
             skills_shared_store: false,
+            skills_dir: None,
         };
         let info = info_from_def(&def);
         assert!(info.launchable);

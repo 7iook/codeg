@@ -32,6 +32,7 @@ pub fn def_from_model(model: &custom_agent::Model) -> Option<CustomAgentDef> {
         spec,
         icon_url: model.icon_url.clone(),
         skills_shared_store: model.skills_shared_store,
+        skills_dir: model.skills_dir.clone(),
     })
 }
 
@@ -105,6 +106,7 @@ pub async fn upsert(conn: &DatabaseConnection, def: &CustomAgentDef) -> Result<(
             active.spec_json = Set(spec_json);
             active.icon_url = Set(def.icon_url.clone());
             active.skills_shared_store = Set(def.skills_shared_store);
+            active.skills_dir = Set(def.skills_dir.clone());
             active.updated_at = Set(now);
             active.update(conn).await?;
         }
@@ -119,6 +121,7 @@ pub async fn upsert(conn: &DatabaseConnection, def: &CustomAgentDef) -> Result<(
                 spec_json: Set(spec_json),
                 icon_url: Set(def.icon_url.clone()),
                 skills_shared_store: Set(def.skills_shared_store),
+                skills_dir: Set(def.skills_dir.clone()),
                 created_at: Set(now),
                 updated_at: Set(now),
             }
@@ -176,6 +179,7 @@ mod tests {
             },
             icon_url: Some("https://example.com/i.svg".into()),
             skills_shared_store: false,
+            skills_dir: None,
         }
     }
 
@@ -254,6 +258,7 @@ mod tests {
             spec_json: Set("{not json".into()),
             icon_url: Set(None),
             skills_shared_store: Set(false),
+            skills_dir: Set(None),
             created_at: Set(Utc::now()),
             updated_at: Set(Utc::now()),
         };
@@ -288,13 +293,17 @@ mod tests {
     #[tokio::test]
     async fn def_round_trips_through_the_row() {
         let db = fresh_in_memory_db().await;
-        let def = npx_def("round-trip");
+        let mut def = npx_def("round-trip");
+        def.skills_shared_store = true;
+        def.skills_dir = Some("/opt/agent/skills".into());
         upsert(&db.conn, &def).await.unwrap();
         let row = get(&db.conn, "round-trip").await.unwrap().unwrap();
         let back = def_from_model(&row).expect("readable");
         assert_eq!(back.registry_id, def.registry_id);
         assert_eq!(back.distribution_kind, def.distribution_kind);
         assert_eq!(back.icon_url, def.icon_url);
+        assert!(back.skills_shared_store);
+        assert_eq!(back.skills_dir.as_deref(), Some("/opt/agent/skills"));
         let npx = back.spec.npx.expect("npx channel survives");
         assert_eq!(npx.package, "@qwen-code/qwen-code@0.21.0");
         assert_eq!(npx.cmd.as_deref(), Some("qwen"));

@@ -1197,6 +1197,8 @@
     "customAgentIconHint": "Salvo junto com o agente, portanto funciona offline. Sem um ícone, usa-se uma inicial colorida.",
     "customAgentSkillsLabel": "Skills (.agents/skills compartilhado)",
     "customAgentSkillsHint": "Declara que este agente lê o repositório compartilhado .agents/skills (diretórios global e de projeto) e o adiciona a todas as matrizes de habilidades. Habilidades vinculadas lá ficam visíveis para todos os agentes que leem esse repositório compartilhado.",
+    "customAgentSkillsDirLabel": "Diretório de skills dedicado",
+    "customAgentSkillsDirHint": "Caminho absoluto do diretório de onde este agente carrega skills — o seu próprio repositório, além do compartilhado ou no lugar dele. ~ expande para o diretório pessoal; skills vinculadas são colocadas aqui primeiro.",
     "customAgentIconNotAnImage": "Selecione um arquivo de imagem.",
     "customAgentIconTooLarge": "O ícone deve ter menos de {limit} KB.",
     "customAgentIconReadFailed": "Não foi possível ler essa imagem.",

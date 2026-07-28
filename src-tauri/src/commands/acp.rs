@@ -6327,22 +6327,47 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
             project_rel_dirs: vec![".cursor/skills", ".agents/skills"],
         }),
         // codeg cannot detect where an arbitrary ACP agent loads skills from,
-        // so custom agents are gated on the user's own declaration that the
-        // agent reads the shared `.agents/skills` store — the cross-agent
+        // so custom agents are gated on the user's own declaration: that the
+        // agent reads the shared `.agents/skills` store (the cross-agent
         // convention OpenCode, Gemini, Cline, Codex, pi, and Cursor already
-        // follow. Undeclared (or deleted) agents return `None`, which is also
-        // the gate that keeps them out of the experts / office / science
-        // matrices (`supported_agents` derives from this function). Unlike the
-        // built-ins there is no agent-own directory to list first, so links
-        // land in the shared store itself and are visible to every agent that
-        // reads it — the add-dialog copy says so.
-        AgentType::Custom(id) => crate::acp::custom_registry::skills_shared_store(id).then(|| {
-            SkillStorageSpec {
-                kind: SkillStorageKind::SkillDirectoryOnly,
-                global_dirs: vec![home_dir_or_default().join(".agents").join("skills")],
-                project_rel_dirs: vec![".agents/skills"],
+        // follow), that it reads a dedicated directory of its own, or both.
+        // The dedicated directory is listed first so linking targets it
+        // without cross-agent side effects on the shared store — the same
+        // ordering rationale as pi and Cursor. Undeclared (or deleted) agents
+        // return `None`, which is also the gate that keeps them out of the
+        // experts / office / science matrices (`supported_agents` derives from
+        // this function). The dedicated path was normalized to absolute at
+        // save time; a non-absolute value (a hand-edited database) is ignored
+        // rather than resolved against an arbitrary working directory.
+        AgentType::Custom(id) => {
+            let decl = crate::acp::custom_registry::skills_decl(id);
+            let mut global_dirs = Vec::new();
+            if let Some(dir) = decl
+                .dir
+                .map(std::path::Path::new)
+                .filter(|p| p.is_absolute())
+            {
+                global_dirs.push(dir.to_path_buf());
             }
-        }),
+            if decl.shared_store {
+                global_dirs.push(home_dir_or_default().join(".agents").join("skills"));
+            }
+            if global_dirs.is_empty() {
+                None
+            } else {
+                Some(SkillStorageSpec {
+                    kind: SkillStorageKind::SkillDirectoryOnly,
+                    global_dirs,
+                    // Only the shared convention has a project-local layout;
+                    // a dedicated directory is global by definition.
+                    project_rel_dirs: if decl.shared_store {
+                        vec![".agents/skills"]
+                    } else {
+                        vec![]
+                    },
+                })
+            }
+        }
     }
 }
 

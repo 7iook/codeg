@@ -1197,6 +1197,8 @@
     "customAgentIconHint": "Se guarda junto al agente, así funciona sin conexión. Si no indicas ninguno, se usa una inicial de color.",
     "customAgentSkillsLabel": "Skills (.agents/skills compartido)",
     "customAgentSkillsHint": "Declara que este agente lee el almacén compartido .agents/skills (directorios global y de proyecto) y lo añade a todas las matrices de habilidades. Las habilidades vinculadas allí son visibles para todos los agentes que leen ese almacén compartido.",
+    "customAgentSkillsDirLabel": "Directorio de skills dedicado",
+    "customAgentSkillsDirHint": "Ruta absoluta del directorio desde el que este agente carga skills: su propio almacén, además del compartido o en su lugar. ~ se expande al directorio personal; las skills vinculadas se colocan aquí primero.",
     "customAgentIconNotAnImage": "Selecciona un archivo de imagen.",
     "customAgentIconTooLarge": "El icono debe pesar menos de {limit} KB.",
     "customAgentIconReadFailed": "No se pudo leer esa imagen.",

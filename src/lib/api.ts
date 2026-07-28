@@ -798,9 +798,11 @@ export interface CustomAgentInfo {
   iconUrl: string | null
   /**
    * User declaration that the agent reads the shared `.agents/skills` store;
-   * gates the skills matrices.
+   * with `skillsDir`, gates the skills matrices.
    */
   skillsSharedStore: boolean
+  /** The agent's own skills directory (absolute), when declared. */
+  skillsDir: string | null
   /** False when the definition cannot launch here (e.g. no build for this OS). */
   launchable: boolean
   problem: string | null
@@ -838,6 +840,7 @@ export async function acpSaveCustomAgent(params: {
   spec: CustomAgentSpec
   iconUrl?: string | null
   skillsSharedStore?: boolean
+  skillsDir?: string | null
 }): Promise<void> {
   return getTransport().call("acp_save_custom_agent", { params })
 }

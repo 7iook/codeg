@@ -324,6 +324,7 @@ pub fn catalog_entry_to_def(
         // The ACP registry catalog does not describe skill directories; the
         // user opts in from the edit form after adding.
         skills_shared_store: false,
+        skills_dir: None,
     })
 }
 

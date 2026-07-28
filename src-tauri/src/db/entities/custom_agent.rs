@@ -20,9 +20,12 @@ pub struct Model {
     pub spec_json: String,
     pub icon_url: Option<String>,
     /// User declaration that the agent reads the shared `.agents/skills`
-    /// store — the gate for every skills surface. See
+    /// store — with `skills_dir`, the gate for every skills surface. See
     /// `CustomAgentDef::skills_shared_store`.
     pub skills_shared_store: bool,
+    /// Absolute path of the agent's own skills directory, when declared. See
+    /// `CustomAgentDef::skills_dir`.
+    pub skills_dir: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

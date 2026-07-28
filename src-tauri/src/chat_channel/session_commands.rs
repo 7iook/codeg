@@ -2173,6 +2173,7 @@ mod tests {
             },
             icon_url: None,
             skills_shared_store: false,
+            skills_dir: None,
         };
         crate::acp::custom_registry::hydrate(std::slice::from_ref(&def));
 

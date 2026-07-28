@@ -1197,6 +1197,8 @@
     "customAgentIconHint": "随智能体一起保存，离线也能显示。不上传则使用彩色首字母。",
     "customAgentSkillsLabel": "Skills（共享 .agents/skills）",
     "customAgentSkillsHint": "声明该智能体会读取共享的 .agents/skills 目录（全局与项目级），并将其加入所有技能矩阵。链接到共享目录的技能对读取该目录的其他智能体同样可见。",
+    "customAgentSkillsDirLabel": "专属技能目录",
+    "customAgentSkillsDirHint": "该智能体自身加载技能的目录绝对路径 —— 可与共享目录并存，也可单独使用。~ 会展开为主目录；链接技能时优先放入此目录。",
     "customAgentIconNotAnImage": "请选择图片文件。",
     "customAgentIconTooLarge": "图标需小于 {limit} KB。",
     "customAgentIconReadFailed": "无法读取该图片。",
