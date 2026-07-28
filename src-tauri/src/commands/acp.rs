@@ -601,12 +601,17 @@ async fn detect_local_version(agent_type: AgentType) -> Option<String> {
     let meta = registry::get_agent_meta(agent_type);
     match meta.distribution {
         registry::AgentDistribution::Npx { cmd, package, .. } => {
-            if !is_cmd_available(cmd).await {
-                return None;
-            }
+            let resolved = resolve_npx_command(cmd).await?;
             // Try `npm list -g <package_name> --json` to get the real installed version.
             let pkg_name = package_name_from_spec(package);
-            detect_npm_global_version(&pkg_name).await
+            let mut version = detect_npm_global_version(&pkg_name).await;
+            // Custom agents: same system-install probe the status/list paths
+            // run, so this detection agrees with them (a disagreement here
+            // clears/flips the persisted version back and forth).
+            if version.is_none() && agent_type.custom_id().is_some() {
+                version = custom_probed_version(agent_type, &resolved, Some(package)).await;
+            }
+            version
         }
         registry::AgentDistribution::Binary { cmd, dir_entry, .. } => {
             let cached = binary_cache::detect_installed_version(agent_type, cmd)
@@ -615,15 +620,28 @@ async fn detect_local_version(agent_type: AgentType) -> Option<String> {
             if cached.is_some() {
                 return cached;
             }
-            // Dir-tree agents: a user-installed CLI (no codeg cache) still
-            // reports a version via `<cmd> --version` (e.g. cursor-agent →
-            // "2026.07.20-8cc9c0b").
+            // A user-installed CLI (no codeg cache) still reports a version
+            // via `<cmd> --version` (e.g. cursor-agent → "2026.07.20-8cc9c0b").
+            // Mirrors the status/list paths — for custom agents, missing this
+            // fallback would CLEAR the persisted system version below and the
+            // next list would write it back, churning events forever.
+            if agent_type.custom_id().is_some() {
+                let bin = resolve_system_agent_binary(cmd)?;
+                return custom_probed_version(agent_type, &bin, None).await;
+            }
             if dir_entry.is_some() {
                 return system_dir_agent_version(cmd).await;
             }
             None
         }
-        registry::AgentDistribution::Uvx { .. } => binary_cache::uvx_prepared_version(agent_type),
+        registry::AgentDistribution::Uvx { cmd, .. } => {
+            let mut version = binary_cache::uvx_prepared_version(agent_type);
+            if version.is_none() && agent_type.custom_id().is_some() {
+                let bin = resolve_command_on_path(cmd)?;
+                version = custom_probed_version(agent_type, &bin, None).await;
+            }
+            version
+        }
     }
 }
 
@@ -1681,7 +1699,38 @@ pub(crate) async fn system_dir_agent_version(cmd: &str) -> Option<String> {
 /// binary changes).
 type ProbeCacheEntry = (std::time::SystemTime, Option<String>);
 
-static CUSTOM_PROBE_CACHE: std::sync::Mutex<Option<HashMap<PathBuf, ProbeCacheEntry>>> =
+/// Cache key for a custom-agent version probe. The binary path alone is NOT
+/// enough: the declared probe command is editable, so an edit must be a cache
+/// miss rather than a stale hit until the binary's mtime changes — and two
+/// agents sharing a launcher path must not read each other's results when
+/// their probes (or, on the auto path, their npm packages) differ.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct ProbeCacheKey {
+    bin: PathBuf,
+    /// The declared `version_probe` in force when the entry was written.
+    probe: Option<String>,
+    /// The npm package the auto path consults; normalized to `None` when a
+    /// declared probe is set (the package is not consulted then).
+    package: Option<String>,
+}
+
+fn probe_cache_key(
+    resolved_bin: &std::path::Path,
+    declared_probe: Option<&str>,
+    npm_package: Option<&str>,
+) -> ProbeCacheKey {
+    ProbeCacheKey {
+        bin: resolved_bin.to_path_buf(),
+        probe: declared_probe.map(str::to_string),
+        package: if declared_probe.is_some() {
+            None
+        } else {
+            npm_package.map(str::to_string)
+        },
+    }
+}
+
+static CUSTOM_PROBE_CACHE: std::sync::Mutex<Option<HashMap<ProbeCacheKey, ProbeCacheEntry>>> =
     std::sync::Mutex::new(None);
 
 /// First version-looking token in probe output: starts with a digit (a leading
@@ -1743,19 +1792,18 @@ pub(crate) async fn custom_probed_version(
     npm_package: Option<&str>,
 ) -> Option<String> {
     let mtime = std::fs::metadata(resolved_bin).ok()?.modified().ok()?;
+    let declared_probe = agent_type
+        .custom_id()
+        .and_then(crate::acp::custom_registry::version_probe_of);
+    let key = probe_cache_key(resolved_bin, declared_probe, npm_package);
     if let Ok(cache) = CUSTOM_PROBE_CACHE.lock() {
-        if let Some((cached_mtime, version)) =
-            cache.as_ref().and_then(|map| map.get(resolved_bin))
-        {
+        if let Some((cached_mtime, version)) = cache.as_ref().and_then(|map| map.get(&key)) {
             if *cached_mtime == mtime {
                 return version.clone();
             }
         }
     }
 
-    let declared_probe = agent_type
-        .custom_id()
-        .and_then(crate::acp::custom_registry::version_probe_of);
     let version = if let Some(probe) = declared_probe {
         // The declared probe is a full command line (`qwen --version`); its
         // program resolves like an agent command (PATH, then npm prefix).
@@ -1785,7 +1833,7 @@ pub(crate) async fn custom_probed_version(
     if let Ok(mut cache) = CUSTOM_PROBE_CACHE.lock() {
         cache
             .get_or_insert_with(HashMap::new)
-            .insert(resolved_bin.to_path_buf(), (mtime, version.clone()));
+            .insert(key, (mtime, version.clone()));
     }
     version
 }
@@ -10799,6 +10847,54 @@ mod tests {
         // Dotted but not digit-led, and digit-led but not dotted.
         assert!(extract_version_token("node.js required").is_none());
         assert!(extract_version_token("exit 1").is_none());
+    }
+
+    #[test]
+    fn probe_cache_key_misses_when_the_declared_probe_or_package_changes() {
+        let bin = std::path::Path::new("/usr/local/bin/agent");
+        // Editing the declared probe MUST be a cache miss — this was the bug:
+        // a path+mtime key kept serving the old probe's result.
+        let auto = probe_cache_key(bin, None, None);
+        let probe_a = probe_cache_key(bin, Some("agent --version"), None);
+        let probe_b = probe_cache_key(bin, Some("agent -V"), None);
+        assert_ne!(auto, probe_a);
+        assert_ne!(probe_a, probe_b);
+        // Removing the probe again returns to the auto key.
+        assert_eq!(probe_cache_key(bin, None, None), auto);
+        // Two agents sharing a launcher but naming different npm packages must
+        // not read each other's auto-path result…
+        let pkg_a = probe_cache_key(bin, None, Some("@scope/a"));
+        let pkg_b = probe_cache_key(bin, None, Some("@scope/b"));
+        assert_ne!(pkg_a, pkg_b);
+        // …while the package is irrelevant (normalized away) once a probe is
+        // declared, so declared-probe results are shared.
+        assert_eq!(
+            probe_cache_key(bin, Some("agent --version"), Some("@scope/a")),
+            probe_cache_key(bin, Some("agent --version"), Some("@scope/b")),
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn custom_probed_version_reads_a_system_cli_via_the_version_convention() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("fake-agent");
+        {
+            let mut f = std::fs::File::create(&bin).expect("create script");
+            f.write_all(b"#!/bin/sh\necho \"fake-agent version 1.2.3\"\n")
+                .expect("write script");
+        }
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        // Unregistered custom id → no declared probe → the auto `--version`
+        // path, exactly what a hand-added agent without a probe gets.
+        let version =
+            custom_probed_version(AgentType::Custom("probe-e2e-test"), &bin, None).await;
+        assert_eq!(version.as_deref(), Some("1.2.3"));
     }
 
     #[test]
