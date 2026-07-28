@@ -21,6 +21,8 @@ import {
   type CustomDistributionKind,
   type RegistryCatalogAgent,
 } from "@/lib/api"
+import { MaskedMonoIcon } from "@/components/agent-icon"
+import { isMonochromeSvgDataUrl } from "@/lib/custom-agents"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -114,6 +116,12 @@ export function specKinds(spec: CustomAgentSpec): CustomDistributionKind[] {
  * the registry), and an unreachable icon degrades to the generic package glyph
  * rather than a broken image. Only once the agent is added does the backend
  * inline the icon, so the settings list works offline afterwards.
+ *
+ * A remote URL cannot be inspected synchronously, so the mono-mask treatment
+ * the inlined icons get is out of reach here; `dark:invert` stands in for it.
+ * Every mark the registry publishes today is a black `currentColor` SVG, so
+ * inverting makes them legible on a dark theme, and once the agent is added
+ * the inlined copy renders through the proper mask.
  */
 function RegistryEntryIcon({ iconUrl }: { iconUrl: string | null }) {
   const [failed, setFailed] = useState(false)
@@ -127,7 +135,7 @@ function RegistryEntryIcon({ iconUrl }: { iconUrl: string | null }) {
       alt=""
       aria-hidden
       onError={() => setFailed(true)}
-      className="h-4 w-4 mt-0.5 shrink-0 rounded-[3px] object-contain"
+      className="h-4 w-4 mt-0.5 shrink-0 rounded-[3px] object-contain dark:invert"
     />
   )
 }
@@ -467,12 +475,21 @@ export function AddCustomAgentDialog({
                 <div className="flex items-center gap-2">
                   {manualIcon ? (
                     <span className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border bg-muted/30">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={manualIcon}
-                        alt=""
-                        className="h-5 w-5 object-contain"
-                      />
+                      {isMonochromeSvgDataUrl(manualIcon) ? (
+                        // A mono upload previews the way it will render: as a
+                        // theme-following mask, not a black-on-dark `<img>`.
+                        <MaskedMonoIcon
+                          iconUrl={manualIcon}
+                          className="h-5 w-5"
+                        />
+                      ) : (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={manualIcon}
+                          alt=""
+                          className="h-5 w-5 object-contain"
+                        />
+                      )}
                       <button
                         type="button"
                         aria-label={t("customAgentIconClear")}
