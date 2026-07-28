@@ -2240,11 +2240,58 @@ fn load_mcp_servers_for_agent(agent_type: AgentType) -> Vec<McpServer> {
 ///
 /// Optional because some test paths spin up `run_connection` without a
 /// full delegation stack — those just skip injection.
+/// Injection-time lookup of which agents the user has disabled in settings.
+///
+/// `delegate_to_agent`'s advertised targets must track the live toggle: a
+/// disabled agent cannot spawn anyway (`build_session_runtime_env` rejects it
+/// inside the delegation spawner), so listing it would only invite doomed
+/// calls. Read fresh on every injection — sessions launched before a toggle
+/// flip keep their launch-time list, and the spawn-time check stays the hard
+/// gate for those.
+#[async_trait::async_trait]
+pub trait AgentAvailabilityLookup: Send + Sync {
+    /// Wire slugs (`AgentType::as_wire`) of the agents disabled in settings.
+    async fn disabled_agent_wire_slugs(&self) -> Vec<String>;
+}
+
+/// [`AgentAvailabilityLookup`] over the live `AppDatabase`: `agent_setting`
+/// rows with `enabled = false`. An absent row means enabled (the settings
+/// default). A read error fails OPEN — the enum then lists everything rather
+/// than taking the whole companion injection down, and the spawn-time
+/// disabled check still enforces.
+pub struct DbAgentAvailabilityLookup {
+    pub db: Arc<crate::db::AppDatabase>,
+}
+
+#[async_trait::async_trait]
+impl AgentAvailabilityLookup for DbAgentAvailabilityLookup {
+    async fn disabled_agent_wire_slugs(&self) -> Vec<String> {
+        match crate::db::service::agent_setting_service::list(&self.db.conn).await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| !row.enabled)
+                .filter_map(|row| serde_json::from_str::<AgentType>(&row.agent_type).ok())
+                .map(|agent_type| agent_type.as_wire().into_owned())
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    "[delegation] reading agent settings failed ({e}); \
+                     delegate targets will not be filtered this launch"
+                );
+                Vec::new()
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DelegationInjection {
     pub broker: Arc<crate::acp::delegation::broker::DelegationBroker>,
     pub tokens: Arc<crate::acp::delegation::listener::TokenRegistry>,
     pub socket_path: PathBuf,
+    /// Which agents are currently disabled in settings, read at injection
+    /// time so `delegate_to_agent` only advertises launchable targets.
+    pub agent_availability: Arc<dyn AgentAvailabilityLookup>,
     /// Hot-swappable "is live-feedback enabled?" flag. Read at injection time
     /// alongside the broker's delegation flag so `codeg-mcp` is injected when
     /// EITHER feature is on, and the companion is told which tool groups to
@@ -2452,18 +2499,27 @@ async fn inject_codeg_mcp(
         "--features".to_string(),
         features_arg,
     ];
-    // Registered custom agents become extra `delegate_to_agent` targets. The
-    // flag is omitted when there are none: the companion then serves its
-    // embedded builtin-only schema unchanged, and an older codeg-mcp binary
-    // (which rejects unknown flags at startup) keeps working for every
-    // installation that has no custom agents.
-    let custom_slugs: Vec<String> = crate::acp::custom_registry::all()
-        .iter()
-        .map(|a| a.as_wire().into_owned())
-        .collect();
+    // Advertised delegate targets track the user's enable toggles, read
+    // fresh at injection time. Registered-and-enabled custom agents become
+    // extra `delegate_to_agent` targets; disabled BUILT-INS are subtracted
+    // companion-side (`--disabled-agents`) so the embedded schema stays the
+    // single source of truth for the builtin list and its order. Either flag
+    // is omitted when empty: the companion then serves its embedded
+    // builtin-only schema unchanged, and an older codeg-mcp binary (which
+    // rejects unknown flags at startup) keeps working for every installation
+    // that needs neither.
+    let disabled = injection
+        .agent_availability
+        .disabled_agent_wire_slugs()
+        .await;
+    let (custom_slugs, disabled_builtins) = delegate_target_args(&disabled);
     if !custom_slugs.is_empty() {
         args.push("--custom-agents".to_string());
         args.push(custom_slugs.join(","));
+    }
+    if !disabled_builtins.is_empty() {
+        args.push("--disabled-agents".to_string());
+        args.push(disabled_builtins.join(","));
     }
     server = server.args(args);
     servers.push(McpServer::Stdio(server));
@@ -2471,6 +2527,29 @@ async fn inject_codeg_mcp(
         token,
         feedback_available: feedback_enabled,
     })
+}
+
+/// Split the delegate-target adjustments into the two companion flags:
+/// custom agents to APPEND to `delegate_to_agent`'s enum (the registered set
+/// minus the disabled ones), and disabled built-ins for the companion to
+/// SUBTRACT from its embedded list. Disabled customs need no subtraction
+/// entry — they are simply never appended. The subtraction list is sorted so
+/// the arg string is deterministic regardless of settings-row order.
+fn delegate_target_args(disabled_wire_slugs: &[String]) -> (Vec<String>, Vec<String>) {
+    let disabled: HashSet<&str> = disabled_wire_slugs.iter().map(String::as_str).collect();
+    let custom_slugs: Vec<String> = crate::acp::custom_registry::all()
+        .iter()
+        .map(|a| a.as_wire().into_owned())
+        .filter(|slug| !disabled.contains(slug.as_str()))
+        .collect();
+    let mut disabled_builtins: Vec<String> = disabled_wire_slugs
+        .iter()
+        .filter(|slug| !slug.starts_with(crate::models::agent::CUSTOM_AGENT_WIRE_PREFIX))
+        .cloned()
+        .collect();
+    disabled_builtins.sort();
+    disabled_builtins.dedup();
+    (custom_slugs, disabled_builtins)
 }
 
 /// Resolve an MCP server `command` to an absolute path.
@@ -10113,10 +10192,18 @@ mod tests {
             }
             async fn cancel_plan_approvals_by_parent(&self, _parent_connection_id: &str) {}
         }
+        struct AllEnabled;
+        #[async_trait::async_trait]
+        impl AgentAvailabilityLookup for AllEnabled {
+            async fn disabled_agent_wire_slugs(&self) -> Vec<String> {
+                Vec::new()
+            }
+        }
         let injection = DelegationInjection {
             broker,
             tokens: Arc::new(TokenRegistry::default()),
             socket_path: std::path::PathBuf::from("/tmp/codeg-mcp.sock"),
+            agent_availability: Arc::new(AllEnabled) as Arc<dyn AgentAvailabilityLookup>,
             feedback: crate::acp::feedback::FeedbackRuntimeConfig::new(),
             ask: crate::acp::question::QuestionRuntimeConfig::new(),
             sessions: crate::acp::session_info::SessionInfoRuntimeConfig::new(),
@@ -10146,6 +10233,65 @@ mod tests {
             injection.tokens.lookup("any-token").await.is_none(),
             "disabled broker must not register a delegate token"
         );
+    }
+
+    // ─── delegate_target_args: enable-toggle filtering ──────────
+    //
+    // The companion's delegate enum must only advertise launchable targets:
+    // enabled customs are appended, disabled customs are never appended (no
+    // subtraction entry either), and disabled builtins ride the sorted
+    // `--disabled-agents` list for companion-side subtraction.
+    #[test]
+    fn delegate_target_args_filter_disabled_agents() {
+        use crate::acp::custom_registry::{
+            hydrate, hydrate_test_guard, CustomAgentDef, CustomAgentSpec, CustomDistributionKind,
+            NpxSpec,
+        };
+        let _guard = hydrate_test_guard();
+        let def = |id: &str| CustomAgentDef {
+            registry_id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            version: "1.0.0".into(),
+            distribution_kind: CustomDistributionKind::Npx,
+            spec: CustomAgentSpec {
+                npx: Some(NpxSpec {
+                    package: format!("{id}@1.0.0"),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            icon_url: None,
+            skills_shared_store: false,
+            skills_dir: None,
+        };
+        assert!(hydrate(&[def("delegate-on"), def("delegate-off")]).is_empty());
+
+        let disabled = vec![
+            "grok".to_string(),
+            "codex".to_string(),
+            "custom:delegate-off".to_string(),
+        ];
+        let (custom_slugs, disabled_builtins) = delegate_target_args(&disabled);
+        assert_eq!(custom_slugs, vec!["custom:delegate-on".to_string()]);
+        assert_eq!(
+            disabled_builtins,
+            vec!["codex".to_string(), "grok".to_string()],
+            "builtins only, sorted for a deterministic arg string"
+        );
+
+        // Nothing disabled → both flags stay omitted (customs all advertised).
+        let (custom_slugs, disabled_builtins) = delegate_target_args(&[]);
+        assert_eq!(
+            custom_slugs,
+            vec![
+                "custom:delegate-off".to_string(),
+                "custom:delegate-on".to_string()
+            ]
+        );
+        assert!(disabled_builtins.is_empty());
+
+        hydrate(&[]);
     }
 
     // ─── companion_features_arg: inject/skip decision + --features value ──
