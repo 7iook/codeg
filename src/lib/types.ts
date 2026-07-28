@@ -2370,9 +2370,6 @@ export type McpAppType =
   | "kimi_code"
   | "grok"
   | "cursor"
-  // A custom ACP agent by wire slug — the same `custom:<id>` string as its
-  // AgentType, assigned into codeg's own per-agent MCP store backend-side.
-  | `custom:${string}`
 
 export interface LocalMcpServer {
   id: string
