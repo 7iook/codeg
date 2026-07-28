@@ -17,6 +17,7 @@ import {
   acpAddRegistryAgent,
   acpCurrentPlatform,
   acpFetchRegistryCatalog,
+  acpListCustomAgents,
   acpSaveCustomAgent,
   type CustomAgentSpec,
   type CustomDistributionKind,
@@ -46,6 +47,13 @@ interface AddCustomAgentDialogProps {
   onOpenChange: (open: boolean) => void
   /** Called after a successful add so the caller can refresh its agent list. */
   onAdded: () => void
+  /**
+   * Edit mode: the registry id of an existing definition to load and edit.
+   * The dialog then shows only the manual form, prefilled, with the id
+   * locked — the id IS the agent's identity (conversations reference
+   * `custom:<id>`), so "changing" it would be an add plus an orphaned agent.
+   */
+  editRegistryId?: string
 }
 
 /**
@@ -211,8 +219,10 @@ export function AddCustomAgentDialog({
   open,
   onOpenChange,
   onAdded,
+  editRegistryId,
 }: AddCustomAgentDialogProps) {
   const t = useTranslations("AcpAgentSettings")
+  const editing = Boolean(editRegistryId)
 
   const [catalog, setCatalog] = useState<RegistryCatalogAgent[]>([])
   const [loadingCatalog, setLoadingCatalog] = useState(false)
@@ -230,6 +240,11 @@ export function AddCustomAgentDialog({
   const [manualIcon, setManualIcon] = useState<string | null>(null)
   const [manualSkills, setManualSkills] = useState(false)
   const [manualSkillsDir, setManualSkillsDir] = useState("")
+  const [manualVersionProbe, setManualVersionProbe] = useState("")
+  // Provenance of the definition being edited ("registry" | "manual"),
+  // carried through the save so an edit never rewrites where the definition
+  // came from. Null until the edit prefill lands (and always in add mode).
+  const [editSource, setEditSource] = useState<string | null>(null)
   const [savingManual, setSavingManual] = useState(false)
   // This machine's binary-platform key (`darwin-aarch64`, …), for the binary
   // template and the hint. A constant on the backend, so one fetch per mount
@@ -250,9 +265,50 @@ export function AddCustomAgentDialog({
   }, [])
 
   useEffect(() => {
-    if (!open) return
+    // Edit mode never shows the registry tab, so don't fetch the catalog.
+    if (!open || editing) return
     void loadCatalog()
-  }, [open, loadCatalog])
+  }, [open, editing, loadCatalog])
+
+  // Edit mode: load the stored definition and prefill the manual form with it.
+  useEffect(() => {
+    if (!open || !editRegistryId) return
+    let cancelled = false
+    acpListCustomAgents()
+      .then((list) => {
+        if (cancelled) return
+        const found = list.find((a) => a.registryId === editRegistryId)
+        if (!found) {
+          toast.error(t("customAgentEditNotFound", { id: editRegistryId }))
+          onOpenChange(false)
+          return
+        }
+        setManualId(found.registryId)
+        setManualName(found.name)
+        setManualVersion(found.version)
+        setManualJson(JSON.stringify(found.spec, null, 2))
+        setManualKind(
+          found.distributionKind === "npx" ||
+            found.distributionKind === "uvx" ||
+            found.distributionKind === "binary"
+            ? found.distributionKind
+            : null
+        )
+        setManualIcon(found.iconUrl)
+        setManualSkills(found.skillsSharedStore)
+        setManualSkillsDir(found.skillsDir ?? "")
+        setManualVersionProbe(found.versionProbe ?? "")
+        setEditSource(found.source)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        toast.error(err instanceof Error ? err.message : String(err))
+        onOpenChange(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, editRegistryId, onOpenChange, t])
 
   useEffect(() => {
     if (!open || platform !== null) return
@@ -276,6 +332,8 @@ export function AddCustomAgentDialog({
     setManualIcon(null)
     setManualSkills(false)
     setManualSkillsDir("")
+    setManualVersionProbe("")
+    setEditSource(null)
   }, [open])
 
   const handlePickIcon = useCallback(
@@ -351,7 +409,11 @@ export function AddCustomAgentDialog({
     manualKind && manualKinds.includes(manualKind)
       ? manualKind
       : (manualKinds[0] ?? null)
-  const effectiveId = manualId.trim() || manualParsed?.registryId?.trim() || ""
+  // In edit mode the id is the row identity — locked, and never taken from a
+  // pasted registry entry.
+  const effectiveId = editing
+    ? (editRegistryId ?? "")
+    : manualId.trim() || manualParsed?.registryId?.trim() || ""
   const effectiveName = manualName.trim() || manualParsed?.name?.trim() || ""
   const manualReady =
     Boolean(manualParsed?.spec) &&
@@ -373,9 +435,15 @@ export function AddCustomAgentDialog({
         iconUrl: manualIcon ?? manualParsed.iconUrl ?? null,
         skillsSharedStore: manualSkills,
         skillsDir: manualSkillsDir.trim() || null,
+        // An edit carries the stored provenance through; a fresh manual save
+        // IS the manual provenance.
+        source: editing ? (editSource ?? undefined) : "manual",
+        versionProbe: manualVersionProbe.trim() || null,
       })
       toast.success(
-        t("customAgentAdded", { name: effectiveName || effectiveId })
+        editing
+          ? t("customAgentSaved", { name: effectiveName || effectiveId })
+          : t("customAgentAdded", { name: effectiveName || effectiveId })
       )
       onAdded()
       onOpenChange(false)
@@ -393,6 +461,9 @@ export function AddCustomAgentDialog({
     manualIcon,
     manualSkills,
     manualSkillsDir,
+    manualVersionProbe,
+    editing,
+    editSource,
     onAdded,
     onOpenChange,
     t,
@@ -402,19 +473,31 @@ export function AddCustomAgentDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{t("addCustomAgent")}</DialogTitle>
-          <DialogDescription>{t("addCustomAgentHint")}</DialogDescription>
+          <DialogTitle>
+            {editing ? t("customAgentEdit") : t("addCustomAgent")}
+          </DialogTitle>
+          <DialogDescription>
+            {editing ? t("customAgentEditHint") : t("addCustomAgentHint")}
+          </DialogDescription>
         </DialogHeader>
 
-        <Tabs defaultValue="registry" className="min-h-0">
-          <TabsList className="w-full">
-            <TabsTrigger value="registry" className="flex-1">
-              {t("customAgentFromRegistry")}
-            </TabsTrigger>
-            <TabsTrigger value="manual" className="flex-1">
-              {t("customAgentManual")}
-            </TabsTrigger>
-          </TabsList>
+        {/* Edit mode pins the manual form (a registry entry cannot "re-add"
+            an existing id) and drops the tab strip. */}
+        <Tabs
+          defaultValue="registry"
+          value={editing ? "manual" : undefined}
+          className="min-h-0"
+        >
+          {!editing && (
+            <TabsList className="w-full">
+              <TabsTrigger value="registry" className="flex-1">
+                {t("customAgentFromRegistry")}
+              </TabsTrigger>
+              <TabsTrigger value="manual" className="flex-1">
+                {t("customAgentManual")}
+              </TabsTrigger>
+            </TabsList>
+          )}
 
           <TabsContent value="registry" className="mt-3 space-y-3">
             <div className="relative">
@@ -534,6 +617,7 @@ export function AddCustomAgentDialog({
                   value={effectiveId}
                   onChange={(e) => setManualId(e.target.value)}
                   placeholder="goose"
+                  disabled={editing}
                   className="h-8 text-xs font-mono"
                 />
               </div>
@@ -726,6 +810,22 @@ export function AddCustomAgentDialog({
                 {t("customAgentSkillsDirHint")}
               </p>
             </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="custom-agent-version-probe" className="text-xs">
+                {t("customAgentVersionProbeLabel")}
+              </Label>
+              <Input
+                id="custom-agent-version-probe"
+                value={manualVersionProbe}
+                onChange={(e) => setManualVersionProbe(e.target.value)}
+                placeholder="qwen --version"
+                className="h-8 text-xs font-mono"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {t("customAgentVersionProbeHint")}
+              </p>
+            </div>
           </TabsContent>
         </Tabs>
 
@@ -740,7 +840,7 @@ export function AddCustomAgentDialog({
             {savingManual && (
               <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
             )}
-            {t("customAgentSave")}
+            {editing ? t("customAgentSaveChanges") : t("customAgentSave")}
           </Button>
         </DialogFooter>
       </DialogContent>

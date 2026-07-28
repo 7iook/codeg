@@ -1783,6 +1783,12 @@ export interface AcpAgentInfo {
   description: string
   available: boolean
   distribution_type: string
+  /**
+   * For custom agents, where the definition came from ("registry" | "manual");
+   * null for built-ins. A manual definition's registry_version is user-typed,
+   * so the version-status check shows only the local version for those.
+   */
+  custom_source: string | null
   enabled: boolean
   sort_order: number
   installed_version: string | null

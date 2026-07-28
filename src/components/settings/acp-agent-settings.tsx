@@ -25,6 +25,7 @@ import {
   Loader2,
   Minus,
   PackagePlus,
+  Pencil,
   Plug,
   Plus,
   RefreshCw,
@@ -3365,11 +3366,17 @@ export function buildVersionCheck(
   const remoteVersion = agent.registry_version ?? "unknown"
   const localVersion =
     agent.installed_version ?? acpText("version.notInstalled", "Not installed")
-  const versionText = acpText(
-    "version.remoteLocal",
-    "Remote: {remoteVersion} · Local: {localVersion}",
-    { remoteVersion, localVersion }
-  )
+  // A manually written definition has no registry behind it — its stored
+  // version is whatever the user typed — so "Remote:" would be comparing
+  // against noise. Every message shows the local side alone.
+  const manualSource = agent.custom_source === "manual"
+  const versionText = manualSource
+    ? acpText("version.localOnly", "Local: {localVersion}", { localVersion })
+    : acpText(
+        "version.remoteLocal",
+        "Remote: {remoteVersion} · Local: {localVersion}",
+        { remoteVersion, localVersion }
+      )
   const installAction: RunningActionKind =
     agent.distribution_type === "binary" ? "download_binary" : "install_npx"
   const upgradeAction: RunningActionKind =
@@ -3461,6 +3468,27 @@ export function buildVersionCheck(
         {
           label: acpText("actions.install", "Install"),
           kind: installAction,
+          payload: agent.agent_type,
+        },
+      ]),
+    }
+  }
+
+  // Manual definitions stop here: installed is the whole story, and the
+  // registry-comparison branches below would only manufacture "upgrade
+  // available" noise against a user-typed version.
+  if (manualSource) {
+    return {
+      check_id: "version_status",
+      label: acpText("version.statusLabel", "Version Status"),
+      status: "pass",
+      message: acpText("version.localInstalled", "{versionText}. Installed.", {
+        versionText,
+      }),
+      fixes: withCustomInstall([
+        {
+          label: acpText("actions.uninstall", "Uninstall"),
+          kind: uninstallAction,
           payload: agent.agent_type,
         },
       ]),
@@ -4345,6 +4373,12 @@ export function AcpAgentSettings() {
   const [agents, setAgents] = useState<AcpAgentInfo[]>([])
   const [loadingAgents, setLoadingAgents] = useState(true)
   const [addCustomOpen, setAddCustomOpen] = useState(false)
+  // Registry id of the custom agent being edited; non-null renders the edit
+  // instance of the add dialog (its own instance so the two flows never share
+  // form state).
+  const [editCustomAgentId, setEditCustomAgentId] = useState<string | null>(
+    null
+  )
   const [removingCustomAgent, setRemovingCustomAgent] = useState(false)
   const [loadingError, setLoadingError] = useState<string | null>(null)
   const [checkState, setCheckState] = useState<
@@ -7669,6 +7703,19 @@ export function AcpAgentSettings() {
         onOpenChange={setAddCustomOpen}
         onAdded={() => void refreshAgents()}
       />
+
+      {/* Keyed by the id so switching agents never leaks a previous form. */}
+      {editCustomAgentId !== null && (
+        <AddCustomAgentDialog
+          key={editCustomAgentId}
+          open
+          editRegistryId={editCustomAgentId}
+          onOpenChange={(next) => {
+            if (!next) setEditCustomAgentId(null)
+          }}
+          onAdded={() => void refreshAgents()}
+        />
+      )}
 
       {loadingError && (
         <div className="mb-3 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-400">
@@ -11090,6 +11137,28 @@ supports_websockets = true`}
                   // surface — plus the skills declaration and removing the
                   // agent.
                   <>
+                    <div className="space-y-3 rounded-md border bg-muted/10 p-3">
+                      <div>
+                        <label className="text-xs font-medium">
+                          {t("customAgentEdit")}
+                        </label>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {t("customAgentEditHint")}
+                        </p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          setEditCustomAgentId(
+                            customAgentId(selectedAgent.agent_type)
+                          )
+                        }
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        {t("customAgentEdit")}
+                      </Button>
+                    </div>
                     <CustomAgentSkillsToggle
                       registryId={customAgentId(selectedAgent.agent_type) ?? ""}
                     />

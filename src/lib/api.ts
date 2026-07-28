@@ -803,6 +803,13 @@ export interface CustomAgentInfo {
   skillsSharedStore: boolean
   /** The agent's own skills directory (absolute), when declared. */
   skillsDir: string | null
+  /**
+   * "registry" | "manual". Every whole-definition re-save must send it back,
+   * or the definition's provenance would reset.
+   */
+  source: string
+  /** Optional command that prints the locally installed version. */
+  versionProbe: string | null
   /** False when the definition cannot launch here (e.g. no build for this OS). */
   launchable: boolean
   problem: string | null
@@ -841,6 +848,13 @@ export async function acpSaveCustomAgent(params: {
   iconUrl?: string | null
   skillsSharedStore?: boolean
   skillsDir?: string | null
+  /**
+   * "registry" | "manual". Omitted = the backend keeps the stored row's
+   * provenance (or "manual" for a new row).
+   */
+  source?: string
+  /** Optional version-probe command; full-replace like the skills fields. */
+  versionProbe?: string | null
 }): Promise<void> {
   return getTransport().call("acp_save_custom_agent", { params })
 }

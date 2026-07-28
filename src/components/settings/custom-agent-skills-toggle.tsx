@@ -81,6 +81,11 @@ export function CustomAgentSkillsToggle({
         distributionKind: current.distributionKind as CustomDistributionKind,
         spec: current.spec,
         iconUrl: current.iconUrl,
+        // Whole-definition re-save: every field must ride along, or this
+        // card would silently reset it (provenance and the version probe
+        // included).
+        source: current.source,
+        versionProbe: current.versionProbe,
         ...next,
       })
     },
@@ -185,7 +190,7 @@ export function CustomAgentSkillsToggle({
               onClick={() => void handleSaveDir()}
             >
               {saving && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
-              {t("customAgentSave")}
+              {t("customAgentSaveChanges")}
             </Button>
           )}
         </div>
