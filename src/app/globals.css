@@ -8,6 +8,19 @@
 @import "@fontsource-variable/jetbrains-mono";
 @import "@fontsource-variable/fira-code";
 @import "@fontsource-variable/geist-mono";
+
+/* Tailwind v4 的 oxide 自动源扫描会把 `.agent-workspace/` 下的归档报告也当成
+ * 源文件扫描 class 候选。报告正文常抄录 Windows 路径 / 会话 id,一旦出现反斜杠
+ * 紧跟 6 位十六进制(如 `\b36bfd`),扫描器会把它当作 CSS 码点转义交给 unescape,
+ * 算出越界码点(0xb36bfd = 11758589 > 0x10FFFF)抛 RangeError;而 postcss 拿不到
+ * 节点位置,会把错误误报成本文件 1:1 —— 与真实触发点毫无关系,极难定位。
+ *
+ * 归档目录本就不含任何 CSS class,排除它既治根又让未来新增的报告免疫。
+ * 上游已在 tailwindcss 4.2.3 修复(PR #19829,按 spec 越界替换为 U+FFFD);
+ * 升级后本行仍建议保留 —— 缩小扫描面本身是对的。
+ * RCA: .agent-workspace/.archive/2026-07-28/build-css-failure/build-css-failure-rca.md
+ */
+@source not "../../.agent-workspace";
 @custom-variant dark (&:is(.dark *));
 
 :root {
