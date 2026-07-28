@@ -5402,11 +5402,13 @@ export function AcpAgentSettings() {
                       variant="outline"
                       className={cn(
                         "h-6 bg-muted/30 hover:bg-muted/50",
-                        // Two disabled looks: a backend-declared inapplicable fix
-                        // (and the button showing the spinner) keeps the full-
-                        // opacity chip look; one parked only by the global
-                        // one-package-op-at-a-time gate dims, so the lockout
-                        // shows on agents other than the busy one.
+                        // Two disabled looks: while the global one-package-op-
+                        // at-a-time gate is busy, every parked package action
+                        // dims (backend-disabled or not) so the lockout shows
+                        // on agents other than the busy one; only the button
+                        // showing the spinner, and — when the gate is idle — a
+                        // backend-declared inapplicable fix, keep the full-
+                        // opacity chip look.
                         busyGated && !running
                           ? "disabled:opacity-50"
                           : "disabled:bg-muted/30 disabled:opacity-100"

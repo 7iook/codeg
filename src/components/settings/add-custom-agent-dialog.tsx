@@ -119,13 +119,6 @@ export function specKinds(spec: CustomAgentSpec): CustomDistributionKind[] {
 }
 
 /**
- * Platform key used when the backend has not answered (or could not be
- * reached) by the time a binary template is requested. The lookup is a local
- * constant, so in practice only a dropped server connection ever gets here.
- */
-export const FALLBACK_PLATFORM = "linux-x86_64"
-
-/**
  * Starter JSON for the manual form's distribution field, one per channel.
  *
  * The templates double as the field's documentation: each carries every field
@@ -133,12 +126,15 @@ export const FALLBACK_PLATFORM = "linux-x86_64"
  * kept failing to teach — with values shaped like real registry entries, so
  * filling one in is a matter of replacing values rather than recalling keys.
  * `platform` keys the binary example so the entry it produces is one this
- * machine can actually install.
+ * machine can actually install; until the backend has answered what that is
+ * (`null`), there is no honest binary template — a guessed key would read as
+ * authoritative and then fail validation on every other platform — so the
+ * binary branch returns `null` and the caller keeps its button gated.
  */
 export function buildSpecTemplate(
   kind: CustomDistributionKind,
-  platform: string
-): string {
+  platform: string | null
+): string | null {
   if (kind === "npx") {
     return JSON.stringify(
       {
@@ -165,6 +161,7 @@ export function buildSpecTemplate(
       2
     )
   }
+  if (platform === null) return null
   return JSON.stringify(
     {
       binary: {
@@ -261,7 +258,8 @@ export function AddCustomAgentDialog({
     if (!open || platform !== null) return
     acpCurrentPlatform()
       .then(setPlatform)
-      // Leave the fallback in place; nothing here is worth an error surface.
+      // On failure the binary template stays gated and the hint shows no
+      // platform; reopening the dialog retries. Not worth an error surface.
       .catch(() => {})
   }, [open, platform])
 
@@ -633,10 +631,14 @@ export function AddCustomAgentDialog({
                       size="sm"
                       variant="outline"
                       className="h-6 px-2 text-[11px] font-mono"
+                      // The binary template needs the real platform key; until
+                      // the backend has answered (ms after open, barring a
+                      // dropped connection) there is nothing honest to insert.
+                      disabled={kind === "binary" && platform === null}
                       onClick={() => {
-                        setManualJson(
-                          buildSpecTemplate(kind, platform ?? FALLBACK_PLATFORM)
-                        )
+                        const template = buildSpecTemplate(kind, platform)
+                        if (template === null) return
+                        setManualJson(template)
                         // A kind chosen for the previous content has no claim
                         // on the template's single channel.
                         setManualKind(null)
@@ -658,9 +660,9 @@ export function AddCustomAgentDialog({
                 className="text-xs font-mono"
               />
               <p className="text-[11px] text-muted-foreground">
-                {t("customAgentSpecHint", {
-                  platform: platform ?? FALLBACK_PLATFORM,
-                })}
+                {/* An ellipsis until the backend answers — never a guessed
+                    platform presented as this machine's. */}
+                {t("customAgentSpecHint", { platform: platform ?? "…" })}
               </p>
             </div>
 
