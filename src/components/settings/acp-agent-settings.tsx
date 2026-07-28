@@ -36,7 +36,11 @@ import {
 import { isDesktop, openUrl } from "@/lib/platform"
 import { getActiveRemoteConnectionId } from "@/lib/transport"
 import { toast } from "sonner"
-import { customAgentId, isCustomAgentType } from "@/lib/custom-agents"
+import {
+  customAgentId,
+  isCustomAgentType,
+  setCustomAgentDisplay,
+} from "@/lib/custom-agents"
 import { AgentIcon } from "@/components/agent-icon"
 import { AddCustomAgentDialog } from "@/components/settings/add-custom-agent-dialog"
 import { CustomAgentSkillsToggle } from "@/components/settings/custom-agent-skills-toggle"
@@ -308,6 +312,23 @@ function acpText(
 ): string {
   if (!acpTranslator) return fallback
   return acpTranslator(key, values)
+}
+
+/**
+ * Publish a freshly fetched agent list into the custom-agent display map
+ * (names + icons behind `getAgentLabel` / `getAgentIconUrl`). The map is
+ * normally hydrated by `useAcpAgents`, but that hook lives in the workspace
+ * surfaces — the settings window fetches its own list, so without this every
+ * custom agent here falls back to the initial-letter glyph.
+ */
+function publishAgentDisplay(list: AcpAgentInfo[]): void {
+  setCustomAgentDisplay(
+    list.map((agent) => ({
+      agentType: agent.agent_type,
+      name: agent.name,
+      iconUrl: agent.icon_url,
+    }))
+  )
 }
 
 function statusTone(status: CheckStatus): string {
@@ -4328,6 +4349,8 @@ export function AcpAgentSettings() {
   const [modelProviders, setModelProviders] = useState<ModelProviderInfo[]>([])
   const [uninstallConfirmAgent, setUninstallConfirmAgent] =
     useState<AcpAgentInfo | null>(null)
+  const [removeConfirmAgent, setRemoveConfirmAgent] =
+    useState<AcpAgentInfo | null>(null)
   const [customInstallAgent, setCustomInstallAgent] =
     useState<AcpAgentInfo | null>(null)
   const [customVersionInput, setCustomVersionInput] = useState("")
@@ -4444,6 +4467,7 @@ export function AcpAgentSettings() {
         listModelProviders().catch(() => [] as ModelProviderInfo[]),
       ])
       setAgents(next)
+      publishAgentDisplay(next)
       setModelProviders(providers)
       setDrafts((prev) => {
         const updated = { ...prev }
@@ -4830,6 +4854,7 @@ export function AcpAgentSettings() {
     try {
       const fresh = await acpListAgents()
       setAgents(fresh)
+      publishAgentDisplay(fresh)
       const grok = fresh.find((a) => a.agent_type === "grok")
       if (grok) {
         setDrafts((prev) => ({ ...prev, grok: buildAgentDraft(grok) }))
@@ -5060,13 +5085,15 @@ export function AcpAgentSettings() {
    * Remove a custom agent's definition. Recorded transcripts are kept — the
    * conversations that reference this agent are still readable afterwards,
    * they just cannot be resumed. Deleting them is a separate, explicit action.
+   *
+   * Confirmation happens in the `removeConfirmAgent` AlertDialog, never via
+   * `window.confirm`: the Tauri webview does not reliably block on the native
+   * prompt, so the deletion used to run before the user answered.
    */
   const handleRemoveCustomAgent = useCallback(
     async (agent: AcpAgentInfo) => {
       const id = customAgentId(agent.agent_type)
       if (!id) return
-      if (!window.confirm(t("customAgentRemoveConfirm", { name: agent.name })))
-        return
       setRemovingCustomAgent(true)
       try {
         await acpDeleteCustomAgent(id, false)
@@ -5225,6 +5252,18 @@ export function AcpAgentSettings() {
     await runPreflight(agent.agent_type)
   }
 
+  const confirmRemoveCustomAgent = useCallback(() => {
+    if (!removeConfirmAgent) return
+    const target = removeConfirmAgent
+    handleRemoveCustomAgent(target)
+      .catch((err) => {
+        console.error("[Settings] remove custom agent failed:", err)
+      })
+      .finally(() => {
+        setRemoveConfirmAgent(null)
+      })
+  }, [handleRemoveCustomAgent, removeConfirmAgent])
+
   const confirmUninstall = useCallback(() => {
     if (!uninstallConfirmAgent) return
     const target = uninstallConfirmAgent
@@ -5283,6 +5322,13 @@ export function AcpAgentSettings() {
     pendingOrderRef.current = reordered.map((agent) => agent.agent_type)
   }, [])
 
+  // One package operation at a time across ALL agents: while any
+  // install/upgrade/uninstall runs, every agent's package-action buttons are
+  // disabled — the busy flag is keyed per agent, so without this, selecting
+  // another agent in the list offers a second, concurrent install. The
+  // spinner stays precise via the per-agent `runningActionKind`.
+  const anyBinaryActionBusy = Object.values(busyBinaryAction).some(Boolean)
+
   const renderCheck = (agent: AcpAgentInfo, check: UiCheckItem) => {
     const checkKey = `${agent.agent_type}:${check.check_id}`
     const expanded = expandedChecks[checkKey] ?? check.status !== "pass"
@@ -5332,7 +5378,7 @@ export function AcpAgentSettings() {
                     className="h-6 bg-muted/30 hover:bg-muted/50 disabled:bg-muted/30 disabled:opacity-100"
                     disabled={
                       ("disabled" in fix && fix.disabled === true) ||
-                      (Boolean(busyBinaryAction[agent.agent_type]) &&
+                      (anyBinaryActionBusy &&
                         [
                           "download_binary",
                           "upgrade_binary",
@@ -11035,9 +11081,7 @@ supports_websockets = true`}
                         size="sm"
                         className="text-destructive hover:text-destructive"
                         disabled={removingCustomAgent}
-                        onClick={() =>
-                          void handleRemoveCustomAgent(selectedAgent)
-                        }
+                        onClick={() => setRemoveConfirmAgent(selectedAgent)}
                       >
                         {removingCustomAgent ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -11742,6 +11786,41 @@ supports_websockets = true`}
                   {t("actions.confirmUninstall")}
                 </>
               )}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={Boolean(removeConfirmAgent)}
+        onOpenChange={(open) => {
+          if (!open) setRemoveConfirmAgent(null)
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("customAgentRemove")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("customAgentRemoveConfirm", {
+                name: removeConfirmAgent?.name ?? "Agent",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={removingCustomAgent}>
+              {t("actions.cancel")}
+            </AlertDialogCancel>
+            <Button
+              variant="destructive"
+              onClick={confirmRemoveCustomAgent}
+              disabled={removingCustomAgent}
+            >
+              {removingCustomAgent ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5" />
+              )}
+              {t("customAgentRemove")}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
