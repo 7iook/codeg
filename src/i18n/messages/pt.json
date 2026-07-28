@@ -2710,6 +2710,7 @@
         "agentPromptLabel": "Instrução",
         "agentModelLabel": "Modelo",
         "agentRunning": "Em execução...",
+        "agentLiveTranscript": "Atividade ao vivo",
         "agentFallbackTitle": "Iniciando subagente…",
         "agentStatsBash": "Comandos",
         "agentStatsRead": "Arquivos lidos",

@@ -2067,6 +2067,48 @@ fn claude_raw_sdk_session_meta(
     Some(meta)
 }
 
+/// The client capabilities codeg advertises on Initialize, with per-agent
+/// gates. Extracted for testability — each gate is a documented product
+/// decision:
+///
+/// - Everyone: filesystem read/write + terminal, for ACP tool execution.
+/// - Codex only: form elicitation, so codex's native Plan-mode
+///   `request_user_input` is delivered as `elicitation/create` (handled by
+///   `handle_elicitation_request`) instead of being silently answered `{}`.
+///   NOTE this reroutes codex's WHOLE form-elicitation surface — MCP
+///   tool-call approvals and MCP-server forms included — so the handler must
+///   cover every shape (`classify_elicitation`). URL elicitation is
+///   deliberately NOT advertised: codex-acp then falls back to
+///   `session/request_permission`, which codeg already handles. Scoped to
+///   Codex to keep the blast radius off other agents (e.g. Claude's native
+///   AskUserQuestion, which would otherwise un-gate and duplicate the
+///   codeg-mcp ask tool).
+/// - Claude Code only: `_meta["subagent-transcript"] = true` — opt into
+///   claude-agent-acp ≥0.63's subagent transcript forwarding (#881, SDK
+///   `forwardSubagentText`). Subagent text/thought chunks then stream with
+///   update-level `_meta.claudeCode.parentToolUseId` instead of being
+///   filtered; codeg routes them into the live Agent capsule (see
+///   `claude_chunk_parent_tool_use_id`). The adapter checks strictly
+///   `=== true`, and a pre-0.63 binary ignores the unknown key, so this is
+///   inert everywhere it isn't understood.
+fn build_client_capabilities(agent_type: AgentType) -> ClientCapabilities {
+    let mut client_capabilities = ClientCapabilities::new().terminal(true).fs(
+        FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(true),
+    );
+    if agent_type == AgentType::Codex {
+        client_capabilities = client_capabilities
+            .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
+    }
+    if agent_type == AgentType::ClaudeCode {
+        let mut meta = serde_json::Map::new();
+        meta.insert("subagent-transcript".to_string(), serde_json::Value::Bool(true));
+        client_capabilities = client_capabilities.meta(meta);
+    }
+    client_capabilities
+}
+
 fn build_new_session_request(
     agent_type: AgentType,
     cwd: &Path,
@@ -2925,29 +2967,8 @@ async fn run_connection(
             let state = state_outer;
             let agent_name_for_log = registry::get_agent_meta(agent_type).name;
 
-            // Advertise filesystem + terminal capabilities for ACP tool execution.
-            let mut client_capabilities = ClientCapabilities::new()
-                .terminal(true)
-                .fs(FileSystemCapabilities::new()
-                    .read_text_file(true)
-                    .write_text_file(true));
-            // Codex only: advertise form elicitation so codex's native Plan-mode
-            // `request_user_input` tool is delivered as an `elicitation/create`
-            // request (handled below) instead of being silently answered `{}`.
-            // NOTE this reroutes codex's WHOLE form-elicitation surface — MCP
-            // tool-call approvals and MCP-server forms included — so the
-            // handler must cover every shape (`classify_elicitation`). URL
-            // elicitation is deliberately NOT advertised: codex-acp then falls
-            // back to `session/request_permission`, which codeg already
-            // handles. Scoped to Codex to keep the blast radius off other
-            // agents (e.g. Claude's native AskUserQuestion, which would
-            // otherwise un-gate and duplicate the codeg-mcp ask tool).
-            if agent_type == AgentType::Codex {
-                client_capabilities = client_capabilities
-                    .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
-            }
             let init_request = InitializeRequest::new(ProtocolVersion::LATEST)
-                .client_capabilities(client_capabilities);
+                .client_capabilities(build_client_capabilities(agent_type));
             // Bound the Initialize handshake so an outdated / incompatible
             // cached binary that never responds can't leave the frontend
             // stuck on "Connecting...". A healthy agent answers in <1s; we
@@ -6700,8 +6721,12 @@ fn codebuddy_chunk_marks_subagent(
 
 /// Whether a live thought/message chunk should be dropped from the top-level
 /// stream because it belongs to a CodeBuddy sub-agent (whose work is already
-/// represented by the Agent pill + its nested tool calls). Matches Claude Code,
-/// which never streams a sub-agent's internal reasoning onto the main session.
+/// represented by the Agent pill + its nested tool calls).
+///
+/// Claude Code is NOT handled here: its sub-agent chunks (claude-agent-acp
+/// ≥0.63 with the `subagent-transcript` capability) arrive with a precise
+/// per-chunk `_meta.claudeCode.parentToolUseId` and are forwarded WITH that
+/// attribution instead of suppressed — see `claude_chunk_parent_tool_use_id`.
 ///
 /// Suppress while we're inside an open sub-agent window OR when the chunk's own
 /// meta marks it. The window safety rests on a structural invariant: the window
@@ -6722,6 +6747,29 @@ fn should_suppress_subagent_chunk(
         return false;
     }
     window_open || codebuddy_chunk_marks_subagent(agent_type, chunk_meta)
+}
+
+/// Extract the update-level `_meta.claudeCode.parentToolUseId` of a live
+/// text/thought chunk — set by claude-agent-acp ≥0.63 on a subagent's
+/// forwarded chunks once the client advertises the `subagent-transcript`
+/// capability (see `build_client_capabilities`). The chunk is emitted WITH
+/// this attribution (never suppressed): the frontend routes parented chunks
+/// into the live Agent capsule instead of the main thread. Gated on
+/// ClaudeCode so no other agent's namespaced meta can alias into parented
+/// routing; empty strings are treated as absent.
+fn claude_chunk_parent_tool_use_id(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    if agent_type != AgentType::ClaudeCode {
+        return None;
+    }
+    meta?
+        .get("claudeCode")?
+        .get("parentToolUseId")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 /// Maintain the set of OPEN CodeBuddy sub-agent tool calls (`open`). `is_agent`
@@ -7129,7 +7177,20 @@ async fn emit_conversation_update(
                 !cb_state.open_subagents.is_empty(),
                 meta.as_ref(),
             ) {
-                emit_with_state(state, emitter, AcpEvent::ContentDelta { text: text.text }).await;
+                // Claude subagent chunks (claude-agent-acp ≥0.63 with the
+                // `subagent-transcript` capability) are NOT suppressed: they
+                // emit with their parent id so the frontend can route them
+                // into the live Agent capsule.
+                let parent_tool_use_id = claude_chunk_parent_tool_use_id(agent_type, meta.as_ref());
+                emit_with_state(
+                    state,
+                    emitter,
+                    AcpEvent::ContentDelta {
+                        text: text.text,
+                        parent_tool_use_id,
+                    },
+                )
+                .await;
             }
         }
         SessionUpdate::AgentMessageChunk(_) => {
@@ -7146,7 +7207,16 @@ async fn emit_conversation_update(
                 !cb_state.open_subagents.is_empty(),
                 meta.as_ref(),
             ) {
-                emit_with_state(state, emitter, AcpEvent::Thinking { text: text.text }).await;
+                let parent_tool_use_id = claude_chunk_parent_tool_use_id(agent_type, meta.as_ref());
+                emit_with_state(
+                    state,
+                    emitter,
+                    AcpEvent::Thinking {
+                        text: text.text,
+                        parent_tool_use_id,
+                    },
+                )
+                .await;
             }
         }
         SessionUpdate::AgentThoughtChunk(_) => {
@@ -8167,6 +8237,36 @@ mod tests {
             env.keys().filter(|k| k.eq_ignore_ascii_case("PATH")).collect();
         assert_eq!(path_keys.len(), 1, "exactly one PATH-ish key must remain: {env:?}");
         assert_eq!(env.get("Path").unwrap(), r"C:\OfficeCLI;C:\b");
+    }
+
+    #[test]
+    fn client_capabilities_gate_per_agent() {
+        // Serialize to inspect the wire shape — `_meta` is the serde rename
+        // and the exact key path the adapters read.
+        let caps_of = |agent: AgentType| {
+            serde_json::to_value(build_client_capabilities(agent)).expect("caps serialize")
+        };
+
+        // Claude Code: subagent-transcript opt-in (strict boolean true), and
+        // no elicitation (which would un-gate AskUserQuestion duplication).
+        let claude = caps_of(AgentType::ClaudeCode);
+        assert_eq!(
+            claude["_meta"]["subagent-transcript"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(claude.get("elicitation").is_none());
+
+        // Codex: form elicitation, no subagent-transcript meta.
+        let codex = caps_of(AgentType::Codex);
+        assert!(codex.get("elicitation").is_some());
+        assert!(codex.get("_meta").is_none());
+
+        // Everyone else: neither gate; fs + terminal always advertised.
+        let other = caps_of(AgentType::Gemini);
+        assert!(other.get("_meta").is_none());
+        assert!(other.get("elicitation").is_none());
+        assert_eq!(other["terminal"], serde_json::Value::Bool(true));
+        assert_eq!(other["fs"]["readTextFile"], serde_json::Value::Bool(true));
     }
 
     #[test]
@@ -10111,6 +10211,41 @@ mod tests {
         }
         // Other agents never suppress, even inside a (spurious) open window.
         assert!(!should_suppress_subagent_chunk(AgentType::OpenCode, true, None));
+    }
+
+    #[test]
+    fn claude_chunk_parent_reads_only_wellformed_claude_meta() {
+        let valid = serde_json::json!({ "claudeCode": { "parentToolUseId": "toolu_01A" } });
+        assert_eq!(
+            claude_chunk_parent_tool_use_id(AgentType::ClaudeCode, valid.as_object()),
+            Some("toolu_01A".to_string())
+        );
+        // Gated on ClaudeCode — the same meta on another agent must not alias
+        // into parented routing.
+        assert_eq!(
+            claude_chunk_parent_tool_use_id(AgentType::CodeBuddy, valid.as_object()),
+            None
+        );
+        // Absent meta / absent key / wrong type / empty string → None.
+        assert_eq!(
+            claude_chunk_parent_tool_use_id(AgentType::ClaudeCode, None),
+            None
+        );
+        let no_key = serde_json::json!({ "claudeCode": { "toolName": "Agent" } });
+        assert_eq!(
+            claude_chunk_parent_tool_use_id(AgentType::ClaudeCode, no_key.as_object()),
+            None
+        );
+        let wrong_type = serde_json::json!({ "claudeCode": { "parentToolUseId": 42 } });
+        assert_eq!(
+            claude_chunk_parent_tool_use_id(AgentType::ClaudeCode, wrong_type.as_object()),
+            None
+        );
+        let empty = serde_json::json!({ "claudeCode": { "parentToolUseId": "" } });
+        assert_eq!(
+            claude_chunk_parent_tool_use_id(AgentType::ClaudeCode, empty.as_object()),
+            None
+        );
     }
 
     #[test]

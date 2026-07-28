@@ -2710,6 +2710,7 @@
         "agentPromptLabel": "Eingabe",
         "agentModelLabel": "Modell",
         "agentRunning": "Läuft...",
+        "agentLiveTranscript": "Live-Aktivität",
         "agentFallbackTitle": "Sub-Agent wird gestartet…",
         "agentStatsBash": "Befehle",
         "agentStatsRead": "Dateien gelesen",

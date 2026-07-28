@@ -221,9 +221,24 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             supports_mcp: true,
             name: "Claude Code",
             description: "ACP wrapper for Anthropic's Claude",
+            // 0.63.0 (claude-agent-sdk 0.3.220) adds the opt-in
+            // `clientCapabilities._meta["subagent-transcript"]` capability
+            // (#881): when advertised (see `build_client_capabilities`),
+            // subagent text/thought chunks stream with update-level
+            // `_meta.claudeCode.parentToolUseId` instead of being filtered;
+            // codeg routes them into the live Agent capsule. Independent of
+            // the capability, every tool_call now carries
+            // `_meta.claudeCode.subagent: true` on Agent/Task launches and
+            // `_meta.claudeCode.title` (the Bash `description` input) on
+            // normal AND eager-permission tool calls. 0.63.0 also fixes
+            // phantom `tool_progress` heartbeat entries under never-announced
+            // ids (#916), Bash terminal metas keyed off an empty id (#917),
+            // and `permission_denied` resolving unannounced tool calls
+            // (#923). Fast mode's config option now folds the SDK's
+            // `fast_mode_disabled_reason` into its description (#921).
             distribution: AgentDistribution::Npx {
-                version: "0.62.0",
-                package: "@agentclientprotocol/claude-agent-acp@0.62.0",
+                version: "0.63.0",
+                package: "@agentclientprotocol/claude-agent-acp@0.63.0",
                 cmd: "claude-agent-acp",
                 args: &[],
                 env: &[],
@@ -671,8 +686,8 @@ mod tests {
     fn registry_pins_current_acp_agent_versions() {
         assert_npx_version(
             AgentType::ClaudeCode,
-            "0.62.0",
-            "@agentclientprotocol/claude-agent-acp@0.62.0",
+            "0.63.0",
+            "@agentclientprotocol/claude-agent-acp@0.63.0",
             Some("22.0.0"),
         );
         assert_npx_version(

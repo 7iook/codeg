@@ -124,6 +124,17 @@ export interface AgentExecutionStats {
 }
 
 /**
+ * One entry of a live subagent transcript (LIVE-only — never persisted, never
+ * emitted by the Rust parsers). Entries arrive pre-merged: the reducer/backend
+ * split blocks only at kind/attribution boundaries, so consecutive same-kind
+ * chunks of one subagent are a single growing entry.
+ */
+export interface AgentTranscriptEntry {
+  type: "text" | "thinking"
+  text: string
+}
+
+/**
  * Image payload shared across `ContentBlock::Image` /
  * `ContentBlock::ImageGeneration` / ACP wire `ToolCallImageInfo`. Mirror of
  * Rust `models::message::ImageData`.
@@ -203,6 +214,16 @@ export type ContentBlock =
        * Absent/empty for the common text-only tool result.
        */
       images?: ImageData[] | null
+      /**
+       * Frontend-only, LIVE-stream data (same doctrine as the `plan` block:
+       * never persisted, never emitted by the Rust JSONL parsers). The
+       * in-flight transcript of a Claude native subagent — text/thinking
+       * chunks attributed to this Agent tool call via
+       * `_meta.claudeCode.parentToolUseId` (claude-agent-acp ≥0.63) —
+       * rendered inside the live Agent capsule. Detached at settle:
+       * history shows the parsed `agent_stats` shape only.
+       */
+      agent_transcript?: AgentTranscriptEntry[] | null
     }
   | { type: "thinking"; text: string }
   /**
@@ -1268,8 +1289,15 @@ export interface BackgroundSettledInfo {
 }
 
 export type AcpEvent =
-  | { type: "content_delta"; text: string }
-  | { type: "thinking"; text: string }
+  /**
+   * `parent_tool_use_id` = subagent attribution (claude-agent-acp ≥0.63 with
+   * the `subagent-transcript` capability): chunks of a live subagent carry the
+   * launching Agent tool call's id and route into its capsule, never the main
+   * thread. Absent/null = main-thread content (every other agent, and Claude
+   * main-thread chunks).
+   */
+  | { type: "content_delta"; text: string; parent_tool_use_id?: string | null }
+  | { type: "thinking"; text: string; parent_tool_use_id?: string | null }
   | {
       type: "claude_sdk_message"
       session_id: string
@@ -1626,8 +1654,9 @@ export interface ToolCallState {
 }
 
 export type LiveContentBlock =
-  | { kind: "text"; text: string }
-  | { kind: "thinking"; text: string }
+  /** `parent_tool_use_id`: see `AcpEvent.content_delta` — subagent attribution. */
+  | { kind: "text"; text: string; parent_tool_use_id?: string | null }
+  | { kind: "thinking"; text: string; parent_tool_use_id?: string | null }
   | { kind: "tool_call_ref"; tool_call_id: string }
   | { kind: "plan"; entries: unknown }
 

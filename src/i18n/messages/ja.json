@@ -2710,6 +2710,7 @@
         "agentPromptLabel": "プロンプト",
         "agentModelLabel": "モデル",
         "agentRunning": "実行中...",
+        "agentLiveTranscript": "ライブアクティビティ",
         "agentFallbackTitle": "サブエージェント起動中…",
         "agentStatsBash": "コマンド",
         "agentStatsRead": "ファイル読取",
