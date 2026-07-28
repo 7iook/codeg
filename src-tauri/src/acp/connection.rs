@@ -612,7 +612,7 @@ async fn build_agent(
             args,
             env,
             platforms,
-            dir_entry,
+            ..
         } => {
             let platform = registry::current_platform();
             let _ = platforms
@@ -631,11 +631,11 @@ async fn build_agent(
             // only when nothing is cached, so the frontend can prompt
             // the user to install it from the Agent Settings page.
             //
-            // Dir-tree agents (Cursor) and custom agents additionally
-            // fall back to a user-installed CLI on PATH (e.g.
-            // `cursor-agent` from the official install script, or the
-            // user's own install of the tool they registered) before
-            // giving up — mirroring the Uvx `system_cmd` fallback.
+            // With nothing cached, every binary agent falls back to a
+            // user-installed CLI on PATH (e.g. `cursor-agent` from the
+            // official install script, a brew `opencode`, or the user's
+            // own install of a custom tool) before giving up — mirroring
+            // the Uvx `system_cmd` fallback.
             //
             // INVARIANT: the substring "is not installed" is matched
             // verbatim by the frontend catch block in
@@ -659,18 +659,13 @@ async fn build_agent(
                     path
                 }
                 None => {
-                    let system = crate::commands::acp::binary_system_fallback_allowed(
-                        agent_type,
-                        dir_entry.is_some(),
-                    )
-                    .then(|| crate::commands::acp::resolve_system_agent_binary(cmd))
-                    .flatten()
-                    .ok_or_else(|| {
-                        AcpError::SdkNotInstalled(format!(
-                            "{} is not installed. Please install it in Agent Settings.",
-                            meta.name
-                        ))
-                    })?;
+                    let system = crate::commands::acp::resolve_system_agent_binary(cmd)
+                        .ok_or_else(|| {
+                            AcpError::SdkNotInstalled(format!(
+                                "{} is not installed. Please install it in Agent Settings.",
+                                meta.name
+                            ))
+                        })?;
                     tracing::info!(
                         "[ACP][{}] No cached binary; using system {} from PATH",
                         meta.name,

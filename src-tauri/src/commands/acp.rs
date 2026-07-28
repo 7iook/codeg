@@ -201,19 +201,13 @@ pub(crate) fn resolve_command_on_path(cmd: &str) -> Option<PathBuf> {
     which::which(cmd).ok()
 }
 
-/// Whether a binary agent with nothing cached may fall back to a same-named
-/// system CLI: dir-tree agents (Cursor's official install script) and every
-/// custom agent — the user's own install is exactly the CLI they registered,
-/// so refusing it would demand a second, managed copy of a working tool.
-/// Built-in single-file agents keep the cache-only gate.
-pub(crate) fn binary_system_fallback_allowed(agent_type: AgentType, has_dir_entry: bool) -> bool {
-    has_dir_entry || agent_type.custom_id().is_some()
-}
-
-/// Resolve a dir-tree binary agent's user-installed CLI (e.g. `cursor-agent`
-/// from Cursor's official install script). Checks PATH first, then
-/// `~/.local/bin` — the script's install target, which a macOS GUI app's
-/// PATH typically lacks.
+/// Resolve a binary agent's user-installed CLI (e.g. `cursor-agent` from
+/// Cursor's official install script, a brew `opencode`, or a custom agent's
+/// own tool). Every binary agent may fall back to this when nothing is
+/// cached — the managed cache always wins, the system CLI only fills the
+/// gap, mirroring how npx agents already prefer a PATH install at launch.
+/// Checks PATH first, then `~/.local/bin` — a common install-script target
+/// a macOS GUI app's PATH typically lacks.
 pub(crate) fn resolve_system_agent_binary(cmd: &str) -> Option<PathBuf> {
     if let Some(path) = resolve_command_on_path(cmd) {
         return Some(path);
@@ -490,12 +484,7 @@ pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), 
             }
             Ok(())
         }
-        registry::AgentDistribution::Binary {
-            cmd,
-            platforms,
-            dir_entry,
-            ..
-        } => {
+        registry::AgentDistribution::Binary { cmd, platforms, .. } => {
             let platform = registry::current_platform();
             if !platforms.iter().any(|p| p.platform == platform) {
                 return Err(AcpError::PlatformNotSupported(format!(
@@ -505,13 +494,11 @@ pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), 
             }
             // Accept any cached version — the Settings page will still
             // surface "upgrade available" for stale caches via its own
-            // version-badge flow. Dir-tree agents (Cursor) and custom agents
-            // additionally accept a user-installed CLI, the same fallback
-            // `build_agent` launches with.
+            // version-badge flow. A user-installed CLI also counts, the same
+            // fallback `build_agent` launches with.
             let launchable = binary_cache::find_best_cached_binary_for_agent(agent_type, cmd)?
                 .is_some()
-                || (binary_system_fallback_allowed(agent_type, dir_entry.is_some())
-                    && resolve_system_agent_binary(cmd).is_some());
+                || resolve_system_agent_binary(cmd).is_some();
             if !launchable {
                 // INVARIANT: see note above — "is not installed" is a
                 // stable substring the frontend matches against.
@@ -605,11 +592,12 @@ async fn detect_local_version(agent_type: AgentType) -> Option<String> {
             // Try `npm list -g <package_name> --json` to get the real installed version.
             let pkg_name = package_name_from_spec(package);
             let mut version = detect_npm_global_version(&pkg_name).await;
-            // Custom agents: same system-install probe the status/list paths
-            // run, so this detection agrees with them (a disagreement here
-            // clears/flips the persisted version back and forth).
-            if version.is_none() && agent_type.custom_id().is_some() {
-                version = custom_probed_version(agent_type, &resolved, Some(package)).await;
+            // Same system-install probe the status/list paths run (covers
+            // installs npm can't see: bun/pnpm globals, brew, …), so this
+            // detection agrees with them (a disagreement here clears/flips
+            // the persisted version back and forth).
+            if version.is_none() {
+                version = system_probed_version(agent_type, &resolved, Some(package)).await;
             }
             version
         }
@@ -622,23 +610,28 @@ async fn detect_local_version(agent_type: AgentType) -> Option<String> {
             }
             // A user-installed CLI (no codeg cache) still reports a version
             // via `<cmd> --version` (e.g. cursor-agent → "2026.07.20-8cc9c0b").
-            // Mirrors the status/list paths — for custom agents, missing this
-            // fallback would CLEAR the persisted system version below and the
-            // next list would write it back, churning events forever.
-            if agent_type.custom_id().is_some() {
-                let bin = resolve_system_agent_binary(cmd)?;
-                return custom_probed_version(agent_type, &bin, None).await;
-            }
+            // Mirrors the status/list paths — missing a fallback here would
+            // CLEAR the persisted system version below and the next list
+            // would write it back, churning events forever.
             if dir_entry.is_some() {
                 return system_dir_agent_version(cmd).await;
             }
-            None
+            let bin = resolve_system_agent_binary(cmd)?;
+            system_probed_version(agent_type, &bin, None).await
         }
-        registry::AgentDistribution::Uvx { cmd, .. } => {
+        registry::AgentDistribution::Uvx {
+            cmd, system_cmd, ..
+        } => {
             let mut version = binary_cache::uvx_prepared_version(agent_type);
-            if version.is_none() && agent_type.custom_id().is_some() {
-                let bin = resolve_command_on_path(cmd)?;
-                version = custom_probed_version(agent_type, &bin, None).await;
+            // No prepared marker: probe the package's console script on PATH,
+            // then the system-fallback command a launch would actually use
+            // (Hermes: `hermes-acp` from the uvx package vs a pipx `hermes`).
+            if version.is_none() {
+                let bin = resolve_command_on_path(cmd)
+                    .or_else(|| system_cmd.and_then(|(c, _)| resolve_command_on_path(c)));
+                if let Some(bin) = bin {
+                    version = system_probed_version(agent_type, &bin, None).await;
+                }
             }
             version
         }
@@ -937,22 +930,16 @@ async fn collect_agent_diag(
             .ok()
             .flatten();
         }
-        registry::AgentDistribution::Binary {
-            cmd,
-            platforms,
-            dir_entry,
-            ..
-        } => {
+        registry::AgentDistribution::Binary { cmd, platforms, .. } => {
             diag.cmd = cmd.to_string();
             diag.distribution = "binary";
             // Mirror verify_agent_installed exactly: it first rejects unsupported
             // platforms, then evaluates
-            // `find_best_cached_binary_for_agent(..)?.is_some() || (fallback
-            // allowed && system)`. So an unsupported platform — and a cache-read
-            // *error* — both FAIL the gate (the latter propagated via `?`)
-            // rather than falling through to the system binary. Reflect both
-            // here so diagnostics never reports "ok" for a case where connect
-            // errors out.
+            // `find_best_cached_binary_for_agent(..)?.is_some() || system`. So
+            // an unsupported platform — and a cache-read *error* — both FAIL
+            // the gate (the latter propagated via `?`) rather than falling
+            // through to the system binary. Reflect both here so diagnostics
+            // never reports "ok" for a case where connect errors out.
             let supported = platforms
                 .iter()
                 .any(|p| p.platform == registry::current_platform());
@@ -961,10 +948,8 @@ async fn collect_agent_diag(
             } else {
                 match binary_cache::find_best_cached_binary_for_agent(agent_type, cmd) {
                     Ok(Some((path, _version))) => Some(path),
-                    Ok(None) if binary_system_fallback_allowed(agent_type, dir_entry.is_some()) => {
-                        resolve_system_agent_binary(cmd)
-                    }
-                    Ok(None) | Err(_) => None,
+                    Ok(None) => resolve_system_agent_binary(cmd),
+                    Err(_) => None,
                 }
                 .map(|p| p.to_string_lossy().to_string())
             };
@@ -1688,29 +1673,29 @@ pub(crate) async fn system_dir_agent_version(cmd: &str) -> Option<String> {
     Some(version)
 }
 
-/// Process-local cache for custom agents' system-CLI version probes, keyed by
-/// the agent command's resolved path and invalidated by its mtime. Failures
-/// are cached too — a CLI that does not understand `--version` must not be
-/// re-spawned on every settings refresh — and unlike the single-slot dir-tree
-/// cache above, this one holds an entry per agent so several custom agents
-/// don't evict each other.
+/// Process-local cache for system-CLI version probes, keyed by the agent
+/// command's resolved path and invalidated by its mtime. Failures are cached
+/// too — a CLI that does not understand `--version` must not be re-spawned on
+/// every settings refresh — and unlike the single-slot dir-tree cache above,
+/// this one holds an entry per agent so several agents don't evict each other.
 /// One probe result: the binary's mtime when probed, and the version it
 /// reported (`None` = the probe failed, cached so it isn't retried until the
 /// binary changes).
 type ProbeCacheEntry = (std::time::SystemTime, Option<String>);
 
-/// Cache key for a custom-agent version probe. The binary path alone is NOT
+/// Cache key for a system version probe. The binary path alone is NOT
 /// enough: the declared probe command is editable, so an edit must be a cache
 /// miss rather than a stale hit until the binary's mtime changes — and two
 /// agents sharing a launcher path must not read each other's results when
-/// their probes (or, on the auto path, their npm packages) differ.
+/// their probes or npm packages differ.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct ProbeCacheKey {
     bin: PathBuf,
     /// The declared `version_probe` in force when the entry was written.
     probe: Option<String>,
-    /// The npm package the auto path consults; normalized to `None` when a
-    /// declared probe is set (the package is not consulted then).
+    /// The npm package the npm-list step consults. Part of the key even when
+    /// a probe is declared — a failing probe falls back to the package
+    /// conventions, so the package still shapes the result.
     package: Option<String>,
 }
 
@@ -1722,40 +1707,45 @@ fn probe_cache_key(
     ProbeCacheKey {
         bin: resolved_bin.to_path_buf(),
         probe: declared_probe.map(str::to_string),
-        package: if declared_probe.is_some() {
-            None
-        } else {
-            npm_package.map(str::to_string)
-        },
+        package: npm_package.map(str::to_string),
     }
 }
 
-static CUSTOM_PROBE_CACHE: std::sync::Mutex<Option<HashMap<ProbeCacheKey, ProbeCacheEntry>>> =
+static SYSTEM_PROBE_CACHE: std::sync::Mutex<Option<HashMap<ProbeCacheKey, ProbeCacheEntry>>> =
     std::sync::Mutex::new(None);
 
 /// First version-looking token in probe output: starts with a digit (a leading
 /// `v` is tolerated and stripped), is dotted, and is drawn from the semver /
-/// calendar-version alphabet. Scans lines top-down so a banner's real version
-/// wins over trailing build metadata.
+/// calendar-version alphabet. Whitespace tokens are additionally split on `/`
+/// and `@` so `name/version` banners (curl-style `omp/17.1.7`) and npm-style
+/// `package@1.2.3` match; URL-shaped tokens are skipped entirely so a help
+/// link's path segment never reads as a version. Scans lines top-down so a
+/// banner's real version wins over trailing build metadata.
 fn extract_version_token(text: &str) -> Option<String> {
+    fn version_candidate(piece: &str) -> Option<String> {
+        let piece = piece.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | ';' | ':'));
+        let candidate = piece
+            .strip_prefix('v')
+            .or_else(|| piece.strip_prefix('V'))
+            .unwrap_or(piece);
+        let starts_digit = candidate
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit());
+        (starts_digit
+            && candidate.contains('.')
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')))
+        .then(|| candidate.to_string())
+    }
     for line in text.lines() {
         for token in line.split_whitespace() {
-            let token = token.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | ';' | ':'));
-            let candidate = token
-                .strip_prefix('v')
-                .or_else(|| token.strip_prefix('V'))
-                .unwrap_or(token);
-            let starts_digit = candidate
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit());
-            if starts_digit
-                && candidate.contains('.')
-                && candidate
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
-            {
-                return Some(candidate.to_string());
+            if token.contains("://") {
+                continue;
+            }
+            if let Some(version) = token.split(['/', '@']).find_map(version_candidate) {
+                return Some(version);
             }
         }
     }
@@ -1779,24 +1769,36 @@ async fn probe_cli_version_token(bin: &std::path::Path, args: &[String]) -> Opti
         .or_else(|| extract_version_token(&String::from_utf8_lossy(&output.stderr)))
 }
 
-/// Version of a custom agent's SYSTEM install (the user's own `npm -g`, brew,
+/// Version of an agent's SYSTEM install (the user's own `npm -g`, bun, brew,
 /// installer script, …), for the status/list paths when codeg has no managed
-/// install record. Cached per binary (see [`CUSTOM_PROBE_CACHE`]).
-///
-/// Probe order: the definition's declared `version_probe` command wins; then
-/// `npm list -g` for npx packages (exact installed version, both prefixes);
-/// then the near-universal `<cmd> --version` convention.
-pub(crate) async fn custom_probed_version(
+/// install record. Works for built-ins and custom agents alike — a declared
+/// `version_probe` only exists on custom definitions, so built-ins always
+/// take the convention path. Cached per (binary, probe, package) (see
+/// [`SYSTEM_PROBE_CACHE`]).
+pub(crate) async fn system_probed_version(
     agent_type: AgentType,
     resolved_bin: &std::path::Path,
     npm_package: Option<&str>,
 ) -> Option<String> {
-    let mtime = std::fs::metadata(resolved_bin).ok()?.modified().ok()?;
     let declared_probe = agent_type
         .custom_id()
         .and_then(crate::acp::custom_registry::version_probe_of);
+    system_probed_version_with(declared_probe, resolved_bin, npm_package).await
+}
+
+/// Probe order: the declared `version_probe` command wins when it yields a
+/// version; then `npm list -g` for npx packages (exact installed version,
+/// both prefixes); then the near-universal `<cmd> --version` convention. A
+/// declared probe that fails (unknown flag, unparsable banner) falls through
+/// to the conventions rather than reading as "not installed".
+async fn system_probed_version_with(
+    declared_probe: Option<&str>,
+    resolved_bin: &std::path::Path,
+    npm_package: Option<&str>,
+) -> Option<String> {
+    let mtime = std::fs::metadata(resolved_bin).ok()?.modified().ok()?;
     let key = probe_cache_key(resolved_bin, declared_probe, npm_package);
-    if let Ok(cache) = CUSTOM_PROBE_CACHE.lock() {
+    if let Ok(cache) = SYSTEM_PROBE_CACHE.lock() {
         if let Some((cached_mtime, version)) = cache.as_ref().and_then(|map| map.get(&key)) {
             if *cached_mtime == mtime {
                 return version.clone();
@@ -1804,33 +1806,28 @@ pub(crate) async fn custom_probed_version(
         }
     }
 
-    let version = if let Some(probe) = declared_probe {
-        // The declared probe is a full command line (`qwen --version`); its
-        // program resolves like an agent command (PATH, then npm prefix).
+    let mut version = None;
+    if let Some(probe) = declared_probe {
+        // The declared probe is a full command line (`agent-cli --version`);
+        // its program resolves like an agent command (PATH, then npm prefix).
         let mut parts = probe.split_whitespace();
-        match parts.next() {
-            Some(program) => {
-                let args: Vec<String> = parts.map(str::to_string).collect();
-                match resolve_npx_command(program).await {
-                    Some(path) => probe_cli_version_token(&path, &args).await,
-                    None => None,
-                }
+        if let Some(program) = parts.next() {
+            let args: Vec<String> = parts.map(str::to_string).collect();
+            if let Some(path) = resolve_npx_command(program).await {
+                version = probe_cli_version_token(&path, &args).await;
             }
-            None => None,
         }
-    } else {
-        let mut version = None;
+    }
+    if version.is_none() {
         if let Some(package) = npm_package {
             version = detect_npm_global_version(&package_name_from_spec(package)).await;
         }
-        if version.is_none() {
-            version =
-                probe_cli_version_token(resolved_bin, &["--version".to_string()]).await;
-        }
-        version
-    };
+    }
+    if version.is_none() {
+        version = probe_cli_version_token(resolved_bin, &["--version".to_string()]).await;
+    }
 
-    if let Ok(mut cache) = CUSTOM_PROBE_CACHE.lock() {
+    if let Ok(mut cache) = SYSTEM_PROBE_CACHE.lock() {
         cache
             .get_or_insert_with(HashMap::new)
             .insert(key, (mtime, version.clone()));
@@ -8455,13 +8452,14 @@ pub(crate) async fn acp_get_agent_status_core(
             let mut version = resolved
                 .as_ref()
                 .and_then(|_| setting.as_ref().and_then(|m| m.installed_version.clone()));
-            // A custom agent the user installed themselves (npm -g, brew, …)
+            // An agent the user installed themselves (npm -g, bun, brew, …)
             // resolves but has no managed install record — probe the system
-            // install so it reads as installed rather than demanding a second,
-            // managed copy.
-            if version.is_none() && agent_type.custom_id().is_some() {
+            // install so it reads as installed rather than demanding a
+            // second, managed copy. Launch already prefers the PATH
+            // resolution, so this only makes the UI agree with what runs.
+            if version.is_none() {
                 if let Some(bin) = &resolved {
-                    version = custom_probed_version(agent_type, bin, Some(package)).await;
+                    version = system_probed_version(agent_type, bin, Some(package)).await;
                 }
             }
             (true, version)
@@ -8478,16 +8476,14 @@ pub(crate) async fn acp_get_agent_status_core(
             // A system install is launchable via the connect path's PATH
             // fallback, and the frontend gates connect on a non-null
             // installed_version — report the probed system version so such an
-            // install isn't blocked as "not installed". Custom agents go
-            // through the per-agent probe cache (their probe may be declared);
-            // dir-tree built-ins (Cursor) keep their dedicated probe.
+            // install isn't blocked as "not installed". Dir-tree agents
+            // (Cursor) keep their dedicated probe; everyone else (custom or
+            // built-in) goes through the per-agent probe cache.
             if detected.is_none() {
-                if agent_type.custom_id().is_some() {
-                    if let Some(bin) = resolve_system_agent_binary(cmd) {
-                        detected = custom_probed_version(agent_type, &bin, None).await;
-                    }
-                } else if dir_entry.is_some() {
+                if dir_entry.is_some() {
                     detected = system_dir_agent_version(cmd).await;
+                } else if let Some(bin) = resolve_system_agent_binary(cmd) {
+                    detected = system_probed_version(agent_type, &bin, None).await;
                 }
             }
             (platforms.iter().any(|p| p.platform == platform), detected)
@@ -8496,11 +8492,15 @@ pub(crate) async fn acp_get_agent_status_core(
             cmd, system_cmd, ..
         } => {
             let mut version = binary_cache::uvx_prepared_version(agent_type);
-            // Same story as npx: a custom uvx agent's CLI installed by the
-            // user (pipx, uv tool install, …) is a real install.
-            if version.is_none() && agent_type.custom_id().is_some() {
-                if let Some(bin) = resolve_command_on_path(cmd) {
-                    version = custom_probed_version(agent_type, &bin, None).await;
+            // Same story as npx: a CLI installed by the user (pipx, uv tool
+            // install, …) is a real install. Probe the package's console
+            // script first, then the system-fallback command a launch would
+            // actually use (Hermes: `hermes-acp` vs a pipx `hermes`).
+            if version.is_none() {
+                let bin = resolve_command_on_path(cmd)
+                    .or_else(|| (*system_cmd).and_then(|(c, _)| resolve_command_on_path(c)));
+                if let Some(bin) = bin {
+                    version = system_probed_version(agent_type, &bin, None).await;
                 }
             }
             (uvx_agent_launchable(*system_cmd), version)
@@ -8561,11 +8561,11 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
                 let mut version = resolved
                     .as_ref()
                     .and_then(|_| setting.and_then(|m| m.installed_version.clone()));
-                // Mirror the status path: a custom agent's own system install
+                // Mirror the status path: an agent's own system install
                 // counts as installed (per-agent cached probe).
-                if version.is_none() && agent_type.custom_id().is_some() {
+                if version.is_none() {
                     if let Some(bin) = &resolved {
-                        version = custom_probed_version(agent_type, bin, Some(package)).await;
+                        version = system_probed_version(agent_type, bin, Some(package)).await;
                     }
                 }
                 (true, "npx", version)
@@ -8584,12 +8584,10 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
                 // call). Without this, the list would also persist
                 // `installed_version = None` over the detected value.
                 if detected.is_none() {
-                    if agent_type.custom_id().is_some() {
-                        if let Some(bin) = resolve_system_agent_binary(cmd) {
-                            detected = custom_probed_version(agent_type, &bin, None).await;
-                        }
-                    } else if dir_entry.is_some() {
+                    if dir_entry.is_some() {
                         detected = system_dir_agent_version(cmd).await;
+                    } else if let Some(bin) = resolve_system_agent_binary(cmd) {
+                        detected = system_probed_version(agent_type, &bin, None).await;
                     }
                 }
                 (
@@ -8602,9 +8600,11 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
                 cmd, system_cmd, ..
             } => {
                 let mut version = binary_cache::uvx_prepared_version(agent_type);
-                if version.is_none() && agent_type.custom_id().is_some() {
-                    if let Some(bin) = resolve_command_on_path(cmd) {
-                        version = custom_probed_version(agent_type, &bin, None).await;
+                if version.is_none() {
+                    let bin = resolve_command_on_path(cmd)
+                        .or_else(|| (*system_cmd).and_then(|(c, _)| resolve_command_on_path(c)));
+                    if let Some(bin) = bin {
+                        version = system_probed_version(agent_type, &bin, None).await;
                     }
                 }
                 (uvx_agent_launchable(*system_cmd), "uvx", version)
@@ -10838,6 +10838,16 @@ mod tests {
             extract_version_token("version v10.2.30").as_deref(),
             Some("10.2.30")
         );
+        // curl-style `name/version` banners (omp prints exactly this).
+        assert_eq!(
+            extract_version_token("omp/17.1.7").as_deref(),
+            Some("17.1.7")
+        );
+        // npm-style `package@version`, scoped packages included.
+        assert_eq!(
+            extract_version_token("@oh-my-pi/pi-coding-agent@17.1.7").as_deref(),
+            Some("17.1.7")
+        );
     }
 
     #[test]
@@ -10847,6 +10857,10 @@ mod tests {
         // Dotted but not digit-led, and digit-led but not dotted.
         assert!(extract_version_token("node.js required").is_none());
         assert!(extract_version_token("exit 1").is_none());
+        // A URL's path segment must not read as a version, and slash-split
+        // pieces without a dot don't qualify either.
+        assert!(extract_version_token("docs: https://example.com/2.0/setup").is_none());
+        assert!(extract_version_token("built 2026/07").is_none());
     }
 
     #[test]
@@ -10866,47 +10880,60 @@ mod tests {
         let pkg_a = probe_cache_key(bin, None, Some("@scope/a"));
         let pkg_b = probe_cache_key(bin, None, Some("@scope/b"));
         assert_ne!(pkg_a, pkg_b);
-        // …while the package is irrelevant (normalized away) once a probe is
-        // declared, so declared-probe results are shared.
-        assert_eq!(
+        // …and the package stays in the key even with a declared probe: a
+        // failing probe falls back to the package conventions, so the package
+        // still shapes the cached result.
+        assert_ne!(
             probe_cache_key(bin, Some("agent --version"), Some("@scope/a")),
             probe_cache_key(bin, Some("agent --version"), Some("@scope/b")),
         );
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn custom_probed_version_reads_a_system_cli_via_the_version_convention() {
+    fn fake_version_script(dir: &std::path::Path, name: &str, banner: &str) -> PathBuf {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let bin = dir.path().join("fake-agent");
+        let bin = dir.join(name);
         {
             let mut f = std::fs::File::create(&bin).expect("create script");
-            f.write_all(b"#!/bin/sh\necho \"fake-agent version 1.2.3\"\n")
+            f.write_all(format!("#!/bin/sh\necho \"{banner}\"\n").as_bytes())
                 .expect("write script");
         }
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        bin
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn system_probed_version_reads_a_system_cli_via_the_version_convention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = fake_version_script(dir.path(), "fake-agent", "fake-agent version 1.2.3");
 
         // Unregistered custom id → no declared probe → the auto `--version`
-        // path, exactly what a hand-added agent without a probe gets.
+        // path, exactly what a hand-added agent without a probe gets. The
+        // same path serves built-ins, which can never declare a probe.
         let version =
-            custom_probed_version(AgentType::Custom("probe-e2e-test"), &bin, None).await;
+            system_probed_version(AgentType::Custom("probe-e2e-test"), &bin, None).await;
         assert_eq!(version.as_deref(), Some("1.2.3"));
     }
 
-    #[test]
-    fn binary_system_fallback_covers_dir_trees_and_customs() {
-        // Built-in single-file binaries stay cache-only…
-        assert!(!binary_system_fallback_allowed(AgentType::OpenCode, false));
-        // …dir-tree built-ins (Cursor) and custom agents accept a system CLI.
-        assert!(binary_system_fallback_allowed(AgentType::Cursor, true));
-        assert!(binary_system_fallback_allowed(
-            AgentType::Custom("goose"),
-            false
-        ));
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failing_declared_probe_falls_back_to_the_version_convention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // `name/version` banner — the shape that motivated the token split.
+        let bin = fake_version_script(dir.path(), "fallback-agent", "fallback-agent/3.2.1");
+
+        // The declared probe's program doesn't exist, so the probe yields
+        // nothing; the convention path must still read the real install.
+        let version = system_probed_version_with(
+            Some("codeg-missing-probe-cmd-e2e --version"),
+            &bin,
+            None,
+        )
+        .await;
+        assert_eq!(version.as_deref(), Some("3.2.1"));
     }
 
     #[test]
