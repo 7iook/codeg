@@ -143,6 +143,40 @@ pub struct CustomAgentSpec {
     pub binary: BTreeMap<String, BinaryPlatformSpec>,
 }
 
+/// Where a definition came from. A `Manual` definition's `version` is whatever
+/// the user typed (or the fallback), so there is no meaningful "registry
+/// version" to compare the installed one against — the version-status display
+/// keys off this to show the local version alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomAgentSource {
+    #[default]
+    Registry,
+    Manual,
+}
+
+impl CustomAgentSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CustomAgentSource::Registry => "registry",
+            CustomAgentSource::Manual => "manual",
+        }
+    }
+
+    /// Unknown strings fall back to `Registry` — the value that keeps the
+    /// display behavior rows had before the column existed.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "manual" => CustomAgentSource::Manual,
+            _ => CustomAgentSource::Registry,
+        }
+    }
+}
+
+fn is_registry_source(source: &CustomAgentSource) -> bool {
+    *source == CustomAgentSource::Registry
+}
+
 /// A full custom-agent definition as stored in the `custom_agent` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomAgentDef {
@@ -183,6 +217,17 @@ pub struct CustomAgentDef {
     /// must be absolute) by `commands::custom_agents::normalize_skills_dir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_dir: Option<String>,
+    /// [`CustomAgentSource::Registry`] is skipped when serializing so
+    /// registry-added definitions keep their pre-column JSON shape (the def
+    /// JSON participates in cache fingerprints).
+    #[serde(default, skip_serializing_if = "is_registry_source")]
+    pub source: CustomAgentSource,
+    /// Optional user-supplied command that prints the locally installed
+    /// version (e.g. `qwen --version`). `None` means "run the agent command
+    /// with `--version`". Consulted by the system-install version probe only;
+    /// never used to launch the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_probe: Option<String>,
 }
 
 /// Version stamped on a definition that carries none. Used as a cache key and
@@ -433,18 +478,21 @@ pub fn build_meta(def: &CustomAgentDef) -> Result<AcpAgentMeta, CustomAgentError
             if uvx.package.trim().is_empty() {
                 return Err(CustomAgentError::MissingPackage("uvx"));
             }
+            let cmd = intern(&resolved_cmd(uvx.cmd.as_deref(), &uvx.package));
+            let args = intern_args(&uvx.args);
             AgentDistribution::Uvx {
                 version,
                 package: intern(uvx.package.trim()),
-                cmd: intern(&resolved_cmd(uvx.cmd.as_deref(), &uvx.package)),
-                args: intern_args(&uvx.args),
+                cmd,
+                args,
                 env: intern_env(&uvx.env),
                 uv_required: uvx.uv_required.as_deref().map(intern),
                 python: uvx.python.as_deref().map(intern),
-                // Custom agents have no vetted "installed via the official
-                // installer" fallback command; PATH resolution still happens
-                // inside the uvx path itself.
-                system_cmd: None,
+                // The user's own install of the CLI (pipx, `uv tool install`,
+                // …) is a legitimate launcher for a custom agent — same
+                // recipe as the uvx entry script, used when the uv runner is
+                // absent (mirrors the Hermes system fallback).
+                system_cmd: Some((cmd, args)),
             }
         }
         CustomDistributionKind::Binary => build_binary_distribution(&def.spec, version)?,
@@ -599,6 +647,11 @@ struct Entry {
     /// The declared dedicated skills directory, if any. See
     /// [`CustomAgentDef::skills_dir`].
     skills_dir: Option<&'static str>,
+    /// Registry-added vs hand-written. Display data like `icon`; drives the
+    /// version-status presentation, not the launch.
+    source: CustomAgentSource,
+    /// Optional version-probe command. See [`CustomAgentDef::version_probe`].
+    version_probe: Option<&'static str>,
 }
 
 fn registry() -> &'static RwLock<HashMap<&'static str, Entry>> {
@@ -634,6 +687,8 @@ pub fn hydrate(defs: &[CustomAgentDef]) -> Vec<(String, CustomAgentError)> {
                     icon: prev.icon,
                     skills_shared_store: prev.skills_shared_store,
                     skills_dir: prev.skills_dir,
+                    source: prev.source,
+                    version_probe: prev.version_probe,
                 },
             );
             continue;
@@ -654,6 +709,13 @@ pub fn hydrate(defs: &[CustomAgentDef]) -> Vec<(String, CustomAgentError)> {
                         skills_shared_store: def.skills_shared_store,
                         skills_dir: def
                             .skills_dir
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(intern),
+                        source: def.source,
+                        version_probe: def
+                            .version_probe
                             .as_deref()
                             .map(str::trim)
                             .filter(|s| !s.is_empty())
@@ -724,6 +786,26 @@ pub fn icon_for(registry_id: &str) -> Option<&'static str> {
         .unwrap_or_else(|e| e.into_inner())
         .get(registry_id)
         .and_then(|e| e.icon)
+}
+
+/// Where a registered definition came from. `None` when the id is not
+/// registered.
+pub fn source_of(registry_id: &str) -> Option<CustomAgentSource> {
+    registry()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(registry_id)
+        .map(|e| e.source)
+}
+
+/// The user-declared version-probe command for a registered definition, if
+/// any. See [`CustomAgentDef::version_probe`].
+pub fn version_probe_of(registry_id: &str) -> Option<&'static str> {
+    registry()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(registry_id)
+        .and_then(|e| e.version_probe)
 }
 
 /// True when `registry_id` currently resolves to launch metadata.
@@ -811,6 +893,8 @@ mod tests {
             icon_url: None,
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         }
     }
 
@@ -916,6 +1000,8 @@ mod tests {
             icon_url: None,
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         }
     }
 
@@ -1180,6 +1266,77 @@ mod tests {
         // must not survive its agent.
         assert!(hydrate(&[]).is_empty());
         assert_eq!(skills_decl("skills-flag-agent"), CustomSkillsDecl::default());
+    }
+
+    #[test]
+    fn source_and_version_probe_survive_hydrate_and_gate_by_registration() {
+        let _guard = hydrate_guard();
+        let mut def = npx_def("provenance-agent");
+        assert!(hydrate(std::slice::from_ref(&def)).is_empty());
+        assert_eq!(
+            source_of("provenance-agent"),
+            Some(CustomAgentSource::Registry)
+        );
+        assert_eq!(version_probe_of("provenance-agent"), None);
+
+        def.source = CustomAgentSource::Manual;
+        def.version_probe = Some("qwen --version".into());
+        assert!(hydrate(std::slice::from_ref(&def)).is_empty());
+        assert_eq!(
+            source_of("provenance-agent"),
+            Some(CustomAgentSource::Manual)
+        );
+        assert_eq!(version_probe_of("provenance-agent"), Some("qwen --version"));
+
+        // A blank probe reads as undeclared rather than as an empty command.
+        def.version_probe = Some("   ".into());
+        assert!(hydrate(std::slice::from_ref(&def)).is_empty());
+        assert_eq!(version_probe_of("provenance-agent"), None);
+
+        assert!(hydrate(&[]).is_empty());
+        assert_eq!(source_of("provenance-agent"), None);
+    }
+
+    #[test]
+    fn a_custom_uvx_agent_advertises_its_own_cli_as_system_fallback() {
+        // The uvx launch path falls back to `system_cmd` when the uv runner is
+        // absent; for a custom agent the user's own install of the CLI is that
+        // fallback, with the same entry-script args.
+        let def = CustomAgentDef {
+            registry_id: "uvx-fallback-agent".to_string(),
+            name: "Fast Agent".into(),
+            description: String::new(),
+            version: "0.9.24".into(),
+            distribution_kind: CustomDistributionKind::Uvx,
+            spec: CustomAgentSpec {
+                uvx: Some(UvxSpec {
+                    package: "fast-agent-acp==0.9.24".into(),
+                    args: vec!["--acp".into()],
+                    cmd: Some("fast-agent".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            icon_url: None,
+            skills_shared_store: false,
+            skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
+        };
+        let meta = build_meta(&def).expect("builds");
+        match meta.distribution {
+            AgentDistribution::Uvx {
+                cmd,
+                args,
+                system_cmd,
+                ..
+            } => {
+                assert_eq!(system_cmd, Some((cmd, args)));
+                assert_eq!(cmd, "fast-agent");
+                assert_eq!(args, ["--acp"]);
+            }
+            _ => panic!("expected a uvx distribution"),
+        }
     }
 
     #[test]

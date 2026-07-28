@@ -631,10 +631,11 @@ async fn build_agent(
             // only when nothing is cached, so the frontend can prompt
             // the user to install it from the Agent Settings page.
             //
-            // Dir-tree agents (Cursor) additionally fall back to a
-            // user-installed CLI on PATH (e.g. `cursor-agent` from the
-            // official install script) before giving up — mirroring the
-            // Uvx `system_cmd` fallback.
+            // Dir-tree agents (Cursor) and custom agents additionally
+            // fall back to a user-installed CLI on PATH (e.g.
+            // `cursor-agent` from the official install script, or the
+            // user's own install of the tool they registered) before
+            // giving up — mirroring the Uvx `system_cmd` fallback.
             //
             // INVARIANT: the substring "is not installed" is matched
             // verbatim by the frontend catch block in
@@ -658,14 +659,18 @@ async fn build_agent(
                     path
                 }
                 None => {
-                    let system = dir_entry
-                        .and_then(|_| crate::commands::acp::resolve_system_agent_binary(cmd))
-                        .ok_or_else(|| {
-                            AcpError::SdkNotInstalled(format!(
-                                "{} is not installed. Please install it in Agent Settings.",
-                                meta.name
-                            ))
-                        })?;
+                    let system = crate::commands::acp::binary_system_fallback_allowed(
+                        agent_type,
+                        dir_entry.is_some(),
+                    )
+                    .then(|| crate::commands::acp::resolve_system_agent_binary(cmd))
+                    .flatten()
+                    .ok_or_else(|| {
+                        AcpError::SdkNotInstalled(format!(
+                            "{} is not installed. Please install it in Agent Settings.",
+                            meta.name
+                        ))
+                    })?;
                     tracing::info!(
                         "[ACP][{}] No cached binary; using system {} from PATH",
                         meta.name,
@@ -10264,6 +10269,8 @@ mod tests {
             icon_url: None,
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         };
         assert!(hydrate(&[def("delegate-on"), def("delegate-off")]).is_empty());
 

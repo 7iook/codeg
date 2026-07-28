@@ -44,6 +44,11 @@ pub struct CustomAgentInfo {
     /// Mirrors [`CustomAgentDef::skills_dir`] — the agent's own skills
     /// directory, already normalized to an absolute path.
     pub skills_dir: Option<String>,
+    /// `registry` | `manual`. The edit form and every whole-definition
+    /// re-save must send it back, or provenance would reset.
+    pub source: String,
+    /// Mirrors [`CustomAgentDef::version_probe`] for the edit form.
+    pub version_probe: Option<String>,
     /// False when the stored definition cannot produce launch metadata (e.g.
     /// a binary-only agent with no release for this platform). The row still
     /// lists, with the reason, instead of vanishing.
@@ -70,6 +75,8 @@ fn info_from_def(def: &CustomAgentDef) -> CustomAgentInfo {
         icon_url: def.icon_url.clone(),
         skills_shared_store: def.skills_shared_store,
         skills_dir: def.skills_dir.clone(),
+        source: def.source.as_str().to_string(),
+        version_probe: def.version_probe.clone(),
         launchable: problem.is_none(),
         problem,
     }
@@ -462,6 +469,18 @@ pub struct SaveCustomAgentParams {
     /// by the save path, so the form can send what the user typed.
     #[serde(default)]
     pub skills_dir: Option<String>,
+    /// See [`CustomAgentDef::source`]. `None` preserves the stored row's value
+    /// (or `manual` for a brand-new row) — a caller that doesn't know the
+    /// provenance can never flip it. Resolved in
+    /// [`acp_save_custom_agent_params_core`], the only params path with DB
+    /// access.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// See [`CustomAgentDef::version_probe`]. Full-replace like the skills
+    /// fields: every save carries the whole declaration, so a save that
+    /// omits it clears it.
+    #[serde(default)]
+    pub version_probe: Option<String>,
 }
 
 impl SaveCustomAgentParams {
@@ -483,8 +502,42 @@ impl SaveCustomAgentParams {
             icon_url: self.icon_url,
             skills_shared_store: self.skills_shared_store,
             skills_dir: self.skills_dir,
+            // Placeholder — `acp_save_custom_agent_params_core` resolves the
+            // real value (params override / stored row / Manual).
+            source: Default::default(),
+            version_probe: self
+                .version_probe
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         })
     }
+}
+
+/// Save through the params surface (both runtimes' `acp_save_custom_agent`).
+///
+/// Split from [`acp_save_custom_agent_core`] because resolving the definition
+/// source needs the DB: an absent `params.source` keeps the stored row's
+/// provenance (a registry-added agent edited through a partial caller must not
+/// silently become "manual"), and only a genuinely new row defaults to
+/// `Manual` — the params surface is the manual form.
+pub async fn acp_save_custom_agent_params_core(
+    params: SaveCustomAgentParams,
+    db: &AppDatabase,
+    emitter: &EventEmitter,
+) -> Result<(), AcpError> {
+    let source = match params.source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => custom_registry::CustomAgentSource::parse(raw),
+        None => custom_agent_service::get(&db.conn, params.registry_id.trim())
+            .await
+            .map_err(|e| AcpError::protocol(e.to_string()))?
+            .map(|row| custom_registry::CustomAgentSource::parse(&row.source))
+            .unwrap_or(custom_registry::CustomAgentSource::Manual),
+    };
+    let mut def = params.into_def()?;
+    def.source = source;
+    acp_save_custom_agent_core(def, db, emitter).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -503,7 +556,7 @@ pub async fn acp_save_custom_agent(
     app: tauri::AppHandle,
 ) -> Result<(), AcpError> {
     let emitter = EventEmitter::Tauri(app);
-    acp_save_custom_agent_core(params.into_def()?, &db, &emitter).await
+    acp_save_custom_agent_params_core(params, &db, &emitter).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -573,6 +626,8 @@ mod tests {
             icon_url: None,
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         };
         assert!(params.into_def().is_err());
     }
@@ -589,6 +644,8 @@ mod tests {
             icon_url: None,
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         };
         assert_eq!(params.into_def().unwrap().registry_id, "goose");
     }
@@ -619,6 +676,8 @@ mod tests {
             icon_url: None,
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         };
         let info = info_from_def(&def);
         assert!(!info.launchable);
@@ -773,6 +832,8 @@ mod tests {
             icon_url: None,
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         };
         let info = info_from_def(&def);
         assert!(info.launchable);

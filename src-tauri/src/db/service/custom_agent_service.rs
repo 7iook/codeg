@@ -11,7 +11,8 @@ use sea_orm::{
 };
 
 use crate::acp::custom_registry::{
-    self, CustomAgentDef, CustomAgentSpec, CustomDistributionKind, FALLBACK_VERSION,
+    self, CustomAgentDef, CustomAgentSource, CustomAgentSpec, CustomDistributionKind,
+    FALLBACK_VERSION,
 };
 use crate::db::entities::custom_agent;
 use crate::db::error::DbError;
@@ -33,6 +34,13 @@ pub fn def_from_model(model: &custom_agent::Model) -> Option<CustomAgentDef> {
         icon_url: model.icon_url.clone(),
         skills_shared_store: model.skills_shared_store,
         skills_dir: model.skills_dir.clone(),
+        source: CustomAgentSource::parse(&model.source),
+        version_probe: model
+            .version_probe
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -107,6 +115,8 @@ pub async fn upsert(conn: &DatabaseConnection, def: &CustomAgentDef) -> Result<(
             active.icon_url = Set(def.icon_url.clone());
             active.skills_shared_store = Set(def.skills_shared_store);
             active.skills_dir = Set(def.skills_dir.clone());
+            active.source = Set(def.source.as_str().to_string());
+            active.version_probe = Set(def.version_probe.clone());
             active.updated_at = Set(now);
             active.update(conn).await?;
         }
@@ -122,6 +132,8 @@ pub async fn upsert(conn: &DatabaseConnection, def: &CustomAgentDef) -> Result<(
                 icon_url: Set(def.icon_url.clone()),
                 skills_shared_store: Set(def.skills_shared_store),
                 skills_dir: Set(def.skills_dir.clone()),
+                source: Set(def.source.as_str().to_string()),
+                version_probe: Set(def.version_probe.clone()),
                 created_at: Set(now),
                 updated_at: Set(now),
             }
@@ -180,6 +192,8 @@ mod tests {
             icon_url: Some("https://example.com/i.svg".into()),
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         }
     }
 
@@ -259,6 +273,8 @@ mod tests {
             icon_url: Set(None),
             skills_shared_store: Set(false),
             skills_dir: Set(None),
+            source: Set("registry".into()),
+            version_probe: Set(None),
             created_at: Set(Utc::now()),
             updated_at: Set(Utc::now()),
         };
@@ -296,6 +312,8 @@ mod tests {
         let mut def = npx_def("round-trip");
         def.skills_shared_store = true;
         def.skills_dir = Some("/opt/agent/skills".into());
+        def.source = CustomAgentSource::Manual;
+        def.version_probe = Some("qwen --version".into());
         upsert(&db.conn, &def).await.unwrap();
         let row = get(&db.conn, "round-trip").await.unwrap().unwrap();
         let back = def_from_model(&row).expect("readable");
@@ -304,6 +322,8 @@ mod tests {
         assert_eq!(back.icon_url, def.icon_url);
         assert!(back.skills_shared_store);
         assert_eq!(back.skills_dir.as_deref(), Some("/opt/agent/skills"));
+        assert_eq!(back.source, CustomAgentSource::Manual);
+        assert_eq!(back.version_probe.as_deref(), Some("qwen --version"));
         let npx = back.spec.npx.expect("npx channel survives");
         assert_eq!(npx.package, "@qwen-code/qwen-code@0.21.0");
         assert_eq!(npx.cmd.as_deref(), Some("qwen"));

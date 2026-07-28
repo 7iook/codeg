@@ -656,6 +656,11 @@ pub struct AcpAgentInfo {
     pub description: String,
     pub available: bool,
     pub distribution_type: String,
+    /// For custom agents, where the definition came from (`registry` |
+    /// `manual`); `None` for built-ins. A manual definition's
+    /// `registry_version` is user-typed, so the version-status display shows
+    /// only the local version for those.
+    pub custom_source: Option<String>,
     pub enabled: bool,
     pub sort_order: i32,
     pub installed_version: Option<String>,

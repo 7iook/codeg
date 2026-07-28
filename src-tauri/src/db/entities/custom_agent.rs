@@ -26,6 +26,11 @@ pub struct Model {
     /// Absolute path of the agent's own skills directory, when declared. See
     /// `CustomAgentDef::skills_dir`.
     pub skills_dir: Option<String>,
+    /// `registry` | `manual`. See `CustomAgentDef::source`.
+    pub source: String,
+    /// Optional command that prints the locally installed version. See
+    /// `CustomAgentDef::version_probe`.
+    pub version_probe: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

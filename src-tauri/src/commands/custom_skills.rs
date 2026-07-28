@@ -852,6 +852,8 @@ mod tests {
             icon_url: None,
             skills_shared_store: false,
             skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
         };
         let agent = crate::models::agent::AgentType::custom("skills-matrix-agent").unwrap();
         // Absolute on every platform — a unix literal would not be on Windows.
