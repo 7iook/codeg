@@ -2961,6 +2961,20 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     }>
   >([])
   const toolCallUpdateRafId = useRef<number | null>(null)
+  // Timeout backstop for the rAF batcher. `requestAnimationFrame` does NOT run
+  // while the page is hidden or the tab is backgrounded (per spec), and a
+  // freshly-created conversation schedules its first updates while its window
+  // is still initializing — so a rAF-only flush strands them in the queue and
+  // the first tool calls of a new session stay stuck on "running" until some
+  // other synchronous dispatch happens to drain them. Mirrors the streaming
+  // queue above: rAF for smooth in-frame batching, a timer so progress still
+  // lands when rAF never fires, and a size cap so a burst can't grow unbounded.
+  const toolCallUpdateTimerId = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  )
+
+  /** Max queued tool-call updates before forcing a synchronous flush. */
+  const TOOL_CALL_UPDATE_FLUSH_THRESHOLD = 256
 
   const flushPendingToolCallUpdates = useCallback(() => {
     if (pendingToolCallUpdates.current.length === 0) return
@@ -2968,23 +2982,46 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       cancelAnimationFrame(toolCallUpdateRafId.current)
       toolCallUpdateRafId.current = null
     }
+    if (toolCallUpdateTimerId.current !== null) {
+      clearTimeout(toolCallUpdateTimerId.current)
+      toolCallUpdateTimerId.current = null
+    }
     const batch = pendingToolCallUpdates.current
     pendingToolCallUpdates.current = []
     dispatch({ type: "BATCH_TOOL_CALL_UPDATES", actions: batch })
   }, [dispatch])
 
   const scheduleToolCallUpdateFlush = useCallback(() => {
-    if (toolCallUpdateRafId.current !== null) return
-    toolCallUpdateRafId.current = requestAnimationFrame(() => {
-      toolCallUpdateRafId.current = null
+    // A long burst flushes immediately rather than waiting on either timer.
+    if (
+      pendingToolCallUpdates.current.length >= TOOL_CALL_UPDATE_FLUSH_THRESHOLD
+    ) {
       flushPendingToolCallUpdates()
-    })
+      return
+    }
+    if (toolCallUpdateRafId.current === null) {
+      toolCallUpdateRafId.current = requestAnimationFrame(() => {
+        toolCallUpdateRafId.current = null
+        flushPendingToolCallUpdates()
+      })
+    }
+    // Independent of the rAF handle: when rAF is suspended this is the only
+    // path that fires, so it must be armed even though a frame is pending.
+    if (toolCallUpdateTimerId.current === null) {
+      toolCallUpdateTimerId.current = setTimeout(() => {
+        toolCallUpdateTimerId.current = null
+        flushPendingToolCallUpdates()
+      }, 16)
+    }
   }, [flushPendingToolCallUpdates])
 
   useEffect(() => {
     return () => {
       if (toolCallUpdateRafId.current !== null) {
         cancelAnimationFrame(toolCallUpdateRafId.current)
+      }
+      if (toolCallUpdateTimerId.current !== null) {
+        clearTimeout(toolCallUpdateTimerId.current)
       }
     }
   }, [])

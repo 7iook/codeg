@@ -456,6 +456,85 @@ describe("AcpConnectionsProvider permission request details", () => {
     }
   })
 
+  it("applies tool-call updates through the timer backstop when rAF never fires", async () => {
+    // `requestAnimationFrame` does not run while the page is hidden or the tab
+    // is backgrounded, which is exactly the state a freshly-created
+    // conversation's window is in when its first tool calls stream in. A
+    // rAF-only batcher strands those updates and the cards stay on "running"
+    // (status never advances to completed) until some unrelated synchronous
+    // dispatch happens to drain the queue — the reported "first few tools of a
+    // new session hang, then everything is smooth after an interrupt".
+    const originalRaf = globalThis.requestAnimationFrame
+    const originalCancelRaf = globalThis.cancelAnimationFrame
+    // Never invokes the callback: a suspended frame loop.
+    vi.stubGlobal("requestAnimationFrame", () => 1)
+    vi.stubGlobal("cancelAnimationFrame", () => {})
+
+    try {
+      await mountProvider()
+
+      await act(async () => {
+        await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+      })
+
+      const handlers = latestAttachHandlers()
+
+      // A turn must be running for `liveMessage` to exist at all.
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "status_changed",
+        status: "prompting",
+      })
+
+      emitAcpEvent(handlers, {
+        seq: 2,
+        connection_id: "spawned-conn",
+        type: "tool_call",
+        tool_call_id: "call_hang",
+        title: "Bash",
+        kind: "execute",
+        status: "pending",
+        content: null,
+        raw_input: JSON.stringify({ command: "pnpm build" }),
+        raw_output: null,
+      })
+
+      emitAcpEvent(handlers, {
+        seq: 3,
+        connection_id: "spawned-conn",
+        type: "tool_call_update",
+        tool_call_id: "call_hang",
+        title: "Bash",
+        status: "completed",
+        content: "done",
+        raw_input: null,
+        raw_output: null,
+      })
+
+      const blockStatus = (): string | null | undefined => {
+        const live = h.store!.getConnection(TAB)?.liveMessage
+        const block = live?.content.find(
+          (b) => b.type === "tool_call" && b.info.tool_call_id === "call_hang"
+        )
+        return block?.type === "tool_call" ? block.info.status : undefined
+      }
+
+      // Still queued: no frame ever ran.
+      expect(blockStatus()).toBe("pending")
+
+      // The timer backstop drains it.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+
+      expect(blockStatus()).toBe("completed")
+    } finally {
+      vi.stubGlobal("requestAnimationFrame", originalRaf)
+      vi.stubGlobal("cancelAnimationFrame", originalCancelRaf)
+    }
+  })
+
   it("hydrates snapshot permission details from active tool call input", async () => {
     await mountProvider()
 
