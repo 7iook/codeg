@@ -1976,6 +1976,9 @@
       },
       "branchSelector": {
         "label": "ブランチ",
+        "head": "HEAD",
+        "headHint": "現在のブランチに追従",
+        "headHintWithBranch": "現在のブランチに追従（{branch}）",
         "searchBranch": "ブランチを検索...",
         "noBranches": "ブランチがありません",
         "selectBranchPlaceholder": "ブランチを選択...",
