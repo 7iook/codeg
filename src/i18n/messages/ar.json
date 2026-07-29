@@ -1993,6 +1993,9 @@
       },
       "branchSelector": {
         "label": "الفرع",
+        "head": "HEAD",
+        "headHint": "يتبع الفرع الحالي",
+        "headHintWithBranch": "يتبع الفرع الحالي ({branch})",
         "searchBranch": "بحث عن فرع...",
         "noBranches": "لا توجد فروع",
         "selectBranchPlaceholder": "اختر فرعًا...",

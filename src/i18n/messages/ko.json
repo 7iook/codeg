@@ -1993,6 +1993,9 @@
       },
       "branchSelector": {
         "label": "브랜치",
+        "head": "HEAD",
+        "headHint": "현재 브랜치를 따라감",
+        "headHintWithBranch": "현재 브랜치를 따라감 ({branch})",
         "searchBranch": "브랜치 검색...",
         "noBranches": "브랜치 없음",
         "selectBranchPlaceholder": "브랜치 선택...",

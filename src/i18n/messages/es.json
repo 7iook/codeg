@@ -1993,6 +1993,9 @@
       },
       "branchSelector": {
         "label": "Rama",
+        "head": "HEAD",
+        "headHint": "Sigue la rama actual",
+        "headHintWithBranch": "Sigue la rama actual ({branch})",
         "searchBranch": "Buscar rama...",
         "noBranches": "Sin ramas",
         "selectBranchPlaceholder": "Seleccionar rama...",

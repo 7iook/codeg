@@ -1993,6 +1993,9 @@
       },
       "branchSelector": {
         "label": "分支",
+        "head": "HEAD",
+        "headHint": "跟隨目前分支",
+        "headHintWithBranch": "跟隨目前分支（{branch}）",
         "searchBranch": "搜尋分支...",
         "noBranches": "無分支",
         "selectBranchPlaceholder": "選擇分支...",

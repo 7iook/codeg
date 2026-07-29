@@ -1993,6 +1993,9 @@
       },
       "branchSelector": {
         "label": "Branch",
+        "head": "HEAD",
+        "headHint": "Acompanha a branch atual",
+        "headHintWithBranch": "Acompanha a branch atual ({branch})",
         "searchBranch": "Pesquisar branch...",
         "noBranches": "Nenhum branch",
         "selectBranchPlaceholder": "Selecionar branch...",
