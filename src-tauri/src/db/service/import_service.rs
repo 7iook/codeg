@@ -12,11 +12,11 @@ use crate::parsers::cline::ClineParser;
 use crate::parsers::codebuddy::CodeBuddyParser;
 use crate::parsers::codex::CodexParser;
 use crate::parsers::cursor::CursorParser;
-use crate::parsers::kiro::KiroParser;
 use crate::parsers::gemini::GeminiParser;
 use crate::parsers::grok::GrokParser;
 use crate::parsers::hermes::HermesParser;
 use crate::parsers::kimi_code::KimiCodeParser;
+use crate::parsers::kiro::KiroParser;
 use crate::parsers::pi::PiParser;
 use crate::parsers::openclaw::OpenClawParser;
 use crate::parsers::opencode::OpenCodeParser;
@@ -54,6 +54,10 @@ fn build_parser(agent_type: AgentType) -> Box<dyn AgentParser> {
         AgentType::Grok => Box::new(GrokParser::new()),
         AgentType::Cursor => Box::new(CursorParser::new()),
         AgentType::Kiro => Box::new(KiroParser::new()),
+        // Custom agents' history lives in codeg's own ACP transcript.
+        AgentType::Custom(_) => Box::new(crate::parsers::acp_native::AcpNativeParser::new(
+            agent_type,
+        )),
     }
 }
 

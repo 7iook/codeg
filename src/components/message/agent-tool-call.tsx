@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, type ReactNode } from "react"
+﻿import { memo, useMemo, useState, type ReactNode } from "react"
 import type { AdaptedContentPart } from "@/lib/adapters/ai-elements-adapter"
 import type { AgentToolCall } from "@/lib/types"
 import { tryParseJson, extractJsonField } from "./content-parts-renderer"

@@ -1,4 +1,4 @@
-import { type ReactElement } from "react"
+﻿import { type ReactElement } from "react"
 import { fireEvent, render, screen } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { describe, expect, it } from "vitest"
