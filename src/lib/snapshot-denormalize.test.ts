@@ -28,6 +28,30 @@ function baseSnapshot(
   }
 }
 
+describe("denormalizeSnapshot — steering capability (T1 / R2.2)", () => {
+  it("carries a confirmed supported flag through to the patch", () => {
+    const patch = denormalizeSnapshot(
+      baseSnapshot({ steering_supported: true })
+    )
+    expect(patch.supportsSteering).toBe(true)
+  })
+
+  it("carries a confirmed unsupported flag as false, not undefined", () => {
+    const patch = denormalizeSnapshot(
+      baseSnapshot({ steering_supported: false })
+    )
+    expect(patch.supportsSteering).toBe(false)
+  })
+
+  it("maps an absent flag to undefined (unknown), NOT to false", () => {
+    // An older server that omits the field must stay distinguishable from one
+    // that confirmed "unsupported" — the UI treats unknown conservatively but
+    // must not record it as a confirmed capability answer.
+    const patch = denormalizeSnapshot(baseSnapshot())
+    expect(patch.supportsSteering).toBeUndefined()
+  })
+})
+
 describe("denormalizeSnapshot — active_delegations", () => {
   it("carries active_delegations through to the patch", () => {
     const patch = denormalizeSnapshot(

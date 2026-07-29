@@ -40,13 +40,25 @@ use crate::acp::types::{
     PermissionOptionInfo, PlanEntryInfo, PromptCapabilitiesInfo, PromptInputBlock,
     SessionConfigKindInfo, SessionConfigOptionInfo, SessionConfigSelectGroupInfo,
     SessionConfigSelectInfo, SessionConfigSelectOptionInfo, SessionModeInfo, SessionModeStateInfo,
-    ToolCallImageInfo, UserMessageBlock,
+    SteerOutcome, ToolCallImageInfo, UserMessageBlock,
 };
 use crate::models::agent::AgentType;
 use crate::network::proxy;
 use crate::web::event_bridge::{emit_with_state, EventEmitter};
 
 const DEFAULT_COMMAND_COLOR_ENV: [(&str, &str); 1] = [("CLICOLOR_FORCE", "1")];
+
+/// JSON-RPC method for mid-turn steering: inject a message into the RUNNING turn
+/// instead of queueing it as a separate `session/prompt` (R1.1).
+///
+/// An agent PRIVATE extension (`_`-prefixed), not a spec method — hence sent via
+/// `UntypedMessage`, and hence gated on the `initialize`-time capability probe
+/// (`parse_steering_supported`) rather than assumed present.
+///
+/// Two agents implement this same name with different outcome unions; see
+/// [`classify_steer_outcome`]. Named as a constant so the wiring gate can anchor
+/// on one definition rather than a scattered string literal.
+const STEERING_METHOD: &str = "_session/steering";
 
 fn merge_agent_env(
     env: &[(&'static str, &'static str)],
@@ -373,6 +385,23 @@ pub enum ConnectionCommand {
     },
     GoalControl {
         action: GoalControlAction,
+    },
+    /// Inject a message into the RUNNING turn via `_session/steering` (R1.1).
+    ///
+    /// Unlike [`Self::GoalControl`] — which is fire-and-forget because codex
+    /// re-pushes the resulting goal as a normal update — the steer OUTCOME is
+    /// load-bearing: `injected` / `startedNewTurn` / `failed` / no-response each
+    /// drive a different queue-item transition on the caller's side (design
+    /// §2.5.1). Hence the oneshot `reply`; dropping the response here would
+    /// destroy the very distinction the feature rests on.
+    Steer {
+        blocks: Vec<PromptInputBlock>,
+        /// Client-generated id of the queue item being delivered. Carried for
+        /// log correlation and for the caller's own book-keeping. NOT an
+        /// idempotency key on the wire: `_session/steering` accepts only
+        /// `{sessionId, prompt}`, so the agent never sees this (design §2.5.1).
+        message_id: String,
+        reply: tokio::sync::oneshot::Sender<Result<crate::acp::types::SteerOutcome, AcpError>>,
     },
     Cancel,
     RespondPermission {
@@ -1655,6 +1684,37 @@ fn grok_effort_description(id: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether the agent advertised mid-turn steering support (the
+/// `_session/steering` extension request) in its `initialize` response.
+///
+/// ⚠️ **COUNTER-INTUITIVE LOCATION — read this before "fixing" the path.**
+/// The flag lives at the **TOP LEVEL** of the initialize response `_meta`, i.e.
+/// a **SIBLING of `agentCapabilities`**, NOT a field inside it:
+///
+/// ```json
+/// { "agentCapabilities": { ... }, "_meta": { "steering": { "supported": true } } }
+/// ```
+///
+/// So the caller passes `init_resp.meta` — NOT `init_resp.agent_capabilities`.
+/// Looking for it under `agent_capabilities.…` (the intuitive place, and where
+/// `fork` / `resume` / `load_session` genuinely live) will **always** yield
+/// `None`, silently classifying every agent as unsupported. This is an agent
+/// **private extension**, not a spec field, hence the off-spec placement — see
+/// `claude-agent-acp/dist/acp-agent.js:636`, which emits it.
+///
+/// Anything other than a literal `true` bool at `steering.supported` → `false`
+/// (conservative: absent, malformed, wrong type, or nested in the wrong place
+/// all mean "do not steer this agent"). Never panics on malformed input.
+///
+/// Takes the `_meta` object map as it appears on the response
+/// (`InitializeResponse.meta: Option<serde_json::Map<String, Value>>`).
+fn parse_steering_supported(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    meta.and_then(|m| m.get("steering"))
+        .and_then(|s| s.get("supported"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// Parse Grok's raw top-level `models` (from a session-establishment response)
 /// into a per-`modelId` reasoning-effort spec map. Absent `models` /
 /// `availableModels` → empty map (caller falls back to the flat
@@ -2585,6 +2645,12 @@ pub struct DelegationInjection {
     /// through this, and the cleanup guard calls `cancel_plan_approvals_by_parent`
     /// on disconnect (mirroring the question teardown cascade).
     pub plan_approvals: Arc<dyn crate::acp::plan_approval::SessionPlanApprovalAccess>,
+    /// Live cancel-scope preview tokens (spec R4 · design §4). Lives here so the
+    /// preview and the confirmed cancel reach the SAME registry regardless of
+    /// transport — a token minted through the Tauri command is honored by the
+    /// Web handler and vice versa. In-memory and per-process by design: a
+    /// token's lifetime is shorter than one user interaction.
+    pub cancel_scope_tokens: crate::acp::delegation::cancel_scope::CancelScopeTokens,
 }
 
 /// Locate the `codeg-mcp` companion binary across the supported deployment
@@ -3254,9 +3320,21 @@ async fn run_connection(
                 .session_capabilities
                 .resume
                 .is_some();
+            // Mid-turn steering (`_session/steering`) support. ⚠️ NOTE the
+            // source: this flag is read off `init_resp.meta` — the TOP-LEVEL
+            // `_meta` of the initialize response, a SIBLING of
+            // `agentCapabilities` — NOT from `init_resp.agent_capabilities`
+            // like `fork` / `resume` / `load_session` above. It is an agent
+            // private extension, not a spec field. Reading it under
+            // `agent_capabilities.…` always yields None and would classify
+            // every agent as unsupported. See `parse_steering_supported`.
+            let supports_steering = parse_steering_supported(init_resp.meta.as_ref());
             tracing::info!(
-                "[ACP] Agent capabilities: load_session={}, fork={}, resume={}",
-                init_resp.agent_capabilities.load_session, supports_fork, supports_resume
+                "[ACP] Agent capabilities: load_session={}, fork={}, resume={}, steering={}",
+                init_resp.agent_capabilities.load_session,
+                supports_fork,
+                supports_resume,
+                supports_steering
             );
             // Persist the self-reported continuation capabilities onto the
             // session state (design D3.1) — the broker / availability query
@@ -3267,6 +3345,7 @@ async fn run_connection(
                 s.agent_supports_load_session = init_resp.agent_capabilities.load_session;
                 s.agent_supports_resume = supports_resume;
                 s.agent_supports_fork = supports_fork;
+                s.agent_supports_steering = supports_steering;
             }
 
             // Whether this agent accepts MCP server entries over the ACP wire
@@ -3351,6 +3430,21 @@ async fn run_connection(
                 &emitter_clone,
                 AcpEvent::ForkSupported {
                     supported: supports_fork,
+                },
+            )
+            .await;
+
+            // Emit steering support capability (R2.2 wire contract). Paired
+            // with the `steering_supported` snapshot field: for a FRESH session
+            // `spawn_agent` returns before this handshake completes, so the
+            // frontend's connect-time snapshot can predate the probe — this
+            // event closes that window, and the snapshot serves clients that
+            // attach later (refresh / new window) and missed the event.
+            emit_with_state(
+                &state,
+                &emitter_clone,
+                AcpEvent::SteeringSupported {
+                    supported: supports_steering,
                 },
             )
             .await;
@@ -4514,6 +4608,110 @@ async fn send_goal_control(
     })?;
     cx.send_request_to(Agent, untyped_req).block_task().await?;
     Ok(())
+}
+
+/// Classify the agent's `outcome` string into a [`SteerOutcome`].
+///
+/// Known values come from two agents that implement the SAME method name with
+/// DIFFERENT unions: `claude-agent-acp` answers `injected` | `startedNewTurn`
+/// (`dist/acp-agent.js:942` / `:950`), while `codex-acp` adds `failed` for a turn
+/// kind it refuses to steer (review / compact). An agent that only ever answers
+/// the first two never produces `Failed` — that is expected, not a gap.
+///
+/// An UNRECOGNIZED value maps to [`SteerOutcome::Unknown`], not to a failure: the
+/// agent answered something we cannot interpret, so whether it took the message
+/// is precisely unknown, and `Unknown` is the variant that forbids auto-retry.
+/// Calling an unreadable answer "failed" would invite a duplicate execution.
+fn classify_steer_outcome(raw: &serde_json::Value) -> SteerOutcome {
+    match raw.get("outcome").and_then(|v| v.as_str()) {
+        Some("injected") => SteerOutcome::Injected,
+        Some("startedNewTurn") => SteerOutcome::StartedNewTurn,
+        Some("failed") => SteerOutcome::Failed,
+        _ => SteerOutcome::Unknown,
+    }
+}
+
+/// Whether a transport-level error PROVES the agent received the request and
+/// declined it without accepting the message.
+///
+/// This is the load-bearing half of the §2.5.1 split, and it is decided
+/// STRUCTURALLY (by JSON-RPC code) rather than by matching error text.
+///
+/// `sacp` collapses two very different situations into one `sacp::Error`: a real
+/// error RESPONSE from the agent, and "no response ever arrived" (`block_task`,
+/// `jsonrpc.rs:2971-2975`, which fabricates an `InternalError`). The codes below
+/// can only originate from a peer that parsed and answered our request — every
+/// locally-generated failure on the outgoing path (`request build failed`,
+/// `send failed`, `never received`) is an `InternalError`. So:
+///
+/// - `MethodNotFound` — the agent has no `_session/steering` handler at all.
+/// - `InvalidParams` — the agent's `parseSteerRequest` rejected our params.
+/// - `ResourceNotFound` — the agent has no such session.
+///
+/// Each means the message is definitively NOT in the agent's input, so the caller
+/// may safely re-queue it.
+///
+/// `InternalError` is deliberately absent: it is genuinely ambiguous (either the
+/// agent's own internal failure OR our own "never received"), and the conservative
+/// reading of an ambiguous result is `Unknown` — no auto-retry. Mis-labelling a
+/// possibly-accepted message as a safe retry is the one error class with an
+/// irreversible cost (the user's instruction runs twice).
+fn steer_error_proves_rejection(e: &sacp::Error) -> bool {
+    matches!(
+        e.code,
+        sacp::ErrorCode::MethodNotFound
+            | sacp::ErrorCode::InvalidParams
+            | sacp::ErrorCode::ResourceNotFound
+    )
+}
+
+/// Send the `_session/steering` extension request: inject `blocks` into the
+/// session's RUNNING turn so a user whose agent has delegated to sub-agents can
+/// still talk to it without cancelling the turn (R1.1).
+///
+/// Sent via `UntypedMessage` because `_session/…` is an agent private extension
+/// with no sacp typed variant — the same escape hatch `send_goal_control` and
+/// `set_session_config_option_inner` use.
+///
+/// Wire params are exactly `{sessionId, prompt}` (anchored on the agent's own
+/// `parseSteerRequest`, `claude-agent-acp/dist/acp-agent.js:67-81`, which requires
+/// a non-empty `sessionId` and a non-empty `prompt` array). Note what is NOT
+/// there: any idempotency key. That absence is why [`SteerOutcome::Unknown`]
+/// exists and why it must never be auto-retried.
+///
+/// NEVER returns `Err` for a steer that reached a verdict — the four-way outcome
+/// IS the result, and an `Err` here would collapse the refusal/unknown
+/// distinction the caller depends on. `Err` is reserved for the local, pre-send
+/// failure of building the request.
+async fn send_steering(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    blocks: Vec<PromptInputBlock>,
+) -> Result<SteerOutcome, sacp::Error> {
+    let params = serde_json::json!({
+        "sessionId": session_id,
+        "prompt": map_prompt_blocks(blocks),
+    });
+    let untyped_req = UntypedMessage::new(STEERING_METHOD, params).map_err(|e| {
+        sacp::util::internal_error(format!("Failed to build steering request: {e}"))
+    })?;
+    match cx.send_request_to(Agent, untyped_req).block_task().await {
+        Ok(raw) => Ok(classify_steer_outcome(&raw)),
+        Err(e) => {
+            if steer_error_proves_rejection(&e) {
+                tracing::warn!("[ACP] steering refused by agent (code={:?}): {e}", e.code);
+                Ok(SteerOutcome::Failed)
+            } else {
+                // Ambiguous: the agent may have accepted the message before the
+                // transport broke. Report `Unknown` so nothing auto-retries.
+                tracing::warn!(
+                    "[ACP] steering delivery result UNKNOWN (code={:?}): {e}",
+                    e.code
+                );
+                Ok(SteerOutcome::Unknown)
+            }
+        }
+    }
 }
 
 /// Apply user-saved mode and config-option preferences to a freshly-attached
@@ -6034,6 +6232,60 @@ async fn run_conversation_loop<'a>(
                                         .await;
                                     }
                                 }
+                                // ⚠️ THE arm this whole feature depends on: steering
+                                // is only meaningful while a turn is RUNNING, and
+                                // this is the only command handler reachable in the
+                                // prompting state. Handled in the idle arm too, but
+                                // that one is the residual race (turn ended before
+                                // we dequeued), not the main path. If this arm is
+                                // removed, injection silently never reaches the
+                                // agent — the in-turn catch-all (`_ => {}`) would
+                                // drop the command AND the oneshot, and the caller
+                                // would see a closed channel. Guarded by
+                                // `steer_arm_reachable_in_prompting_state`.
+                                Some(ConnectionCommand::Steer {
+                                    blocks,
+                                    message_id,
+                                    reply,
+                                }) => {
+                                    let outcome = send_steering(&cx, &sid, blocks).await;
+                                    match outcome {
+                                        Ok(o) => {
+                                            tracing::info!(
+                                                "[ACP] steering delivered mid-turn: outcome={o:?} \
+                                                 message_id={message_id}"
+                                            );
+                                            // `startedNewTurn` here means the turn
+                                            // settled agent-side between the
+                                            // manager's atomic path choice and this
+                                            // send. The message is ALREADY running
+                                            // in a turn we can never see the end of
+                                            // (§2.4) — record that honestly instead
+                                            // of touching `turn_in_flight`, which
+                                            // still describes only OUR turn.
+                                            if o == SteerOutcome::StartedNewTurn {
+                                                emit_with_state(
+                                                    state,
+                                                    emitter,
+                                                    AcpEvent::DetachedTurnPending {
+                                                        pending: true,
+                                                    },
+                                                )
+                                                .await;
+                                            }
+                                            let _ = reply.send(Ok(o));
+                                        }
+                                        Err(e) => {
+                                            // Local pre-send failure only (building
+                                            // the request); every outcome that
+                                            // reached the agent, including a
+                                            // refusal, comes back as `Ok`.
+                                            let _ = reply.send(Err(AcpError::protocol(
+                                                format!("Failed to send steering: {e}"),
+                                            )));
+                                        }
+                                    }
+                                }
                                 Some(ConnectionCommand::Cancel) => {
                                     // Send CancelNotification to agent to stop the current turn
                                     let _ = cx.send_notification_to(
@@ -6242,6 +6494,47 @@ async fn run_conversation_loop<'a>(
                         },
                     )
                     .await;
+                }
+            }
+            // Residual-race counterpart of the in-prompt arm above: the manager
+            // chose the steering path while a turn was in flight, but the turn
+            // settled before the loop dequeued this command. Kept because
+            // dropping it would strand the caller's oneshot; the agent answers
+            // `startedNewTurn` here, which is a SUCCESS (§2.4) — it has already
+            // begun executing the message, so nothing may re-send it.
+            Some(ConnectionCommand::Steer {
+                blocks,
+                message_id,
+                reply,
+            }) => {
+                let cx = session.connection();
+                let sid = session.session_id().clone();
+                match send_steering(&cx, &sid, blocks).await {
+                    Ok(o) => {
+                        tracing::info!(
+                            "[ACP] steering delivered while idle: outcome={o:?} \
+                             message_id={message_id}"
+                        );
+                        if o == SteerOutcome::StartedNewTurn {
+                            // Expected on this path. Track it as what it is: an
+                            // agent-initiated turn we cannot observe the end of.
+                            // NOT `turn_in_flight` — no `TurnComplete` is owed to
+                            // us, so setting that flag would wedge the connection
+                            // into rejecting every later prompt forever.
+                            emit_with_state(
+                                state,
+                                emitter,
+                                AcpEvent::DetachedTurnPending { pending: true },
+                            )
+                            .await;
+                        }
+                        let _ = reply.send(Ok(o));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(AcpError::protocol(format!(
+                            "Failed to send steering: {e}"
+                        ))));
+                    }
                 }
             }
             Some(ConnectionCommand::Cancel) => {
@@ -9556,6 +9849,353 @@ mod tests {
         assert!(fast.options.is_empty());
     }
 
+    /// T1 (R2.1) red: the steering flag lives at the TOP LEVEL of the
+    /// `initialize` response `_meta`, as a SIBLING of `agentCapabilities`.
+    #[test]
+    fn parse_steering_supported_reads_top_level_meta() {
+        let meta = meta_map(serde_json::json!({ "steering": { "supported": true } }));
+        assert!(parse_steering_supported(Some(&meta)));
+        // Explicit `false` is honoured as unsupported.
+        let off = meta_map(serde_json::json!({ "steering": { "supported": false } }));
+        assert!(!parse_steering_supported(Some(&off)));
+    }
+
+    /// Absent flag / absent `_meta` → unsupported (conservative default: an
+    /// agent that never advertises steering must never be steered).
+    #[test]
+    fn parse_steering_supported_absent_is_unsupported() {
+        assert!(!parse_steering_supported(None));
+        assert!(!parse_steering_supported(Some(&meta_map(
+            serde_json::json!({})
+        ))));
+        // `steering` present but `supported` missing → unsupported.
+        assert!(!parse_steering_supported(Some(&meta_map(
+            serde_json::json!({ "steering": {} })
+        ))));
+    }
+
+    /// Malformed `_meta` must degrade to unsupported without panicking.
+    #[test]
+    fn parse_steering_supported_malformed_is_unsupported_and_never_panics() {
+        // `steering` is a string, not an object.
+        assert!(!parse_steering_supported(Some(&meta_map(
+            serde_json::json!({ "steering": "yes" })
+        ))));
+        // `supported` is a string / number / null, not a bool — no truthiness
+        // coercion (`"true"` and `1` must NOT read as supported).
+        assert!(!parse_steering_supported(Some(&meta_map(
+            serde_json::json!({ "steering": { "supported": "true" } })
+        ))));
+        assert!(!parse_steering_supported(Some(&meta_map(
+            serde_json::json!({ "steering": { "supported": 1 } })
+        ))));
+        assert!(!parse_steering_supported(Some(&meta_map(
+            serde_json::json!({ "steering": { "supported": null } })
+        ))));
+        // `steering` is an array / nested deeper than expected.
+        assert!(!parse_steering_supported(Some(&meta_map(
+            serde_json::json!({ "steering": [{ "supported": true }] })
+        ))));
+    }
+
+    /// NEGATIVE / regression guard for the counter-intuitive location: the
+    /// plausible-but-WRONG place to look is inside `agentCapabilities`. A flag
+    /// found only there must report UNSUPPORTED — if this test ever goes green
+    /// while the probe reads `agent_capabilities`, the probe is wrong.
+    #[test]
+    fn parse_steering_supported_ignores_flag_nested_in_agent_capabilities() {
+        let wrong_place = meta_map(serde_json::json!({
+            "agentCapabilities": { "steering": { "supported": true } }
+        }));
+        assert!(
+            !parse_steering_supported(Some(&wrong_place)),
+            "the flag is a SIBLING of agentCapabilities, not a child — a flag \
+             nested inside agentCapabilities must not count as support"
+        );
+        // Even when nested-wrong AND top-level says false, still unsupported.
+        let both = meta_map(serde_json::json!({
+            "agentCapabilities": { "steering": { "supported": true } },
+            "steering": { "supported": false }
+        }));
+        assert!(!parse_steering_supported(Some(&both)));
+    }
+
+    /// Positive control paired with the negative test above: the EXACT shape
+    /// `claude-agent-acp` emits (`dist/acp-agent.js:636`) must read as
+    /// supported, with `agentCapabilities` present as a sibling. Without this,
+    /// a probe that always returns `false` would pass every negative test.
+    #[test]
+    fn parse_steering_supported_accepts_real_claude_agent_acp_shape() {
+        let real = meta_map(serde_json::json!({ "steering": { "supported": true } }));
+        assert!(parse_steering_supported(Some(&real)));
+        let alongside_caps = meta_map(serde_json::json!({
+            "steering": { "supported": true },
+            "agentCapabilities": { "loadSession": true }
+        }));
+        assert!(parse_steering_supported(Some(&alongside_caps)));
+    }
+
+    /// Wiring gate (E-091): the four `parse_steering_supported` unit tests above
+    /// all pass even if the PRODUCTION probe call is rewired to the wrong source
+    /// — they exercise the parser, not the assembly point. The probe lives deep
+    /// inside the connection spawn closure (needs a live agent handshake), so
+    /// there is no unit-reachable seam; assert on the source line instead.
+    ///
+    /// Guards the two ways the wiring can silently rot: passing something other
+    /// than the initialize response's top-level `_meta`, or "fixing" it to read
+    /// `agent_capabilities` (the intuitive-but-always-None location).
+    #[test]
+    fn production_steering_probe_reads_top_level_init_meta() {
+        let src = include_str!("connection.rs");
+        // NOTE: the needles are assembled from split pieces via `concat!`. If
+        // they were written as whole literals, THIS test's own source would
+        // match them (`include_str!` reads the file this test lives in), making
+        // the positive assertion self-satisfying — a fake gate that stays green
+        // even if the production line is deleted. Split needles appear verbatim
+        // ONLY in the production line, so the counts below are meaningful.
+        let probe_call = concat!(
+            "let supports_steering = parse_steering_supported(",
+            "init_resp.meta.as_ref());"
+        );
+        assert_eq!(
+            src.matches(probe_call).count(),
+            1,
+            "the production steering probe must read `init_resp.meta` (the \
+             initialize response's TOP-LEVEL `_meta`) exactly once. If this \
+             fails, the probe was rewired, renamed, or removed — steering \
+             capability would silently report unsupported for every agent."
+        );
+        let wrong_source = concat!("parse_steering_supported(", "init_resp.agent_capabilities");
+        assert_eq!(
+            src.matches(wrong_source).count(),
+            0,
+            "the steering flag is a SIBLING of `agentCapabilities`, never a \
+             child of it — reading it there always yields None"
+        );
+        // The probe result must actually be persisted onto the session state,
+        // not merely computed and logged (the pre-existing shape of this code
+        // was log-only for the continuation capabilities).
+        let persist = concat!("s.agent_supports_steering = ", "supports_steering;");
+        assert_eq!(
+            src.matches(persist).count(),
+            1,
+            "the probed capability must be written to the session state"
+        );
+        // ...and shipped to the frontend, otherwise the wire contract dangles.
+        let emit = concat!("AcpEvent::SteeringSupported ", "{");
+        assert_eq!(
+            src.matches(emit).count(),
+            1,
+            "the capability must be emitted so a fresh connect (whose snapshot \
+             can predate the handshake) still learns it"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // T2 — Steer command path (R1.1)
+    // ---------------------------------------------------------------------
+
+    /// The two outcomes `claude-agent-acp` can answer, mapped to the two
+    /// caller-visible successes. Both are DELIVERED; the difference is only which
+    /// turn is carrying the message.
+    #[test]
+    fn classify_steer_outcome_maps_agent_success_values() {
+        assert_eq!(
+            classify_steer_outcome(&serde_json::json!({ "outcome": "injected" })),
+            SteerOutcome::Injected
+        );
+        assert_eq!(
+            classify_steer_outcome(&serde_json::json!({ "outcome": "startedNewTurn" })),
+            SteerOutcome::StartedNewTurn
+        );
+        assert!(SteerOutcome::Injected.is_delivered());
+        assert!(
+            SteerOutcome::StartedNewTurn.is_delivered(),
+            "startedNewTurn means the agent is ALREADY executing the message — \
+             treating it as not-delivered is what causes the same user \
+             instruction to run twice (design §2.4 / review A2)"
+        );
+    }
+
+    /// `failed` is codex-acp's explicit refusal (`NonSteerableTurnKind`: a review /
+    /// compact turn cannot be steered). It must stay distinct from `Unknown`,
+    /// because only `failed` proves the message was NOT accepted.
+    #[test]
+    fn classify_steer_outcome_maps_codex_explicit_refusal() {
+        assert_eq!(
+            classify_steer_outcome(&serde_json::json!({ "outcome": "failed" })),
+            SteerOutcome::Failed
+        );
+        assert!(!SteerOutcome::Failed.is_delivered());
+        assert_ne!(
+            SteerOutcome::Failed,
+            SteerOutcome::Unknown,
+            "an explicit refusal is retry-safe; an unknown result is not — \
+             collapsing them is the §2.5.1 defect"
+        );
+    }
+
+    /// An answer we cannot read is `Unknown`, NOT `Failed`. Calling an
+    /// uninterpretable response "failed" would advertise it as retry-safe, and a
+    /// retry can re-execute a message the agent may have accepted.
+    #[test]
+    fn classify_steer_outcome_unreadable_answer_is_unknown_not_failed() {
+        for raw in [
+            serde_json::json!({}),
+            serde_json::json!({ "outcome": "someFutureVariant" }),
+            serde_json::json!({ "outcome": 7 }),
+            serde_json::json!({ "outcome": null }),
+            serde_json::json!("injected"), // right word, wrong shape (not an object)
+        ] {
+            assert_eq!(
+                classify_steer_outcome(&raw),
+                SteerOutcome::Unknown,
+                "unreadable steer answer must be Unknown (no auto-retry), got a \
+                 different classification for {raw:?}"
+            );
+        }
+    }
+
+    /// Structural refusal detection (§2.5.1). These three codes can only come from
+    /// a peer that parsed and answered the request, so they prove non-acceptance.
+    #[test]
+    fn steer_error_codes_that_prove_the_message_was_rejected() {
+        for code in [
+            sacp::ErrorCode::MethodNotFound,
+            sacp::ErrorCode::InvalidParams,
+            sacp::ErrorCode::ResourceNotFound,
+        ] {
+            let e = sacp::Error::from(code);
+            assert!(
+                steer_error_proves_rejection(&e),
+                "{code:?} is an answer FROM the agent — the message is \
+                 definitively not in its input, so a retry is safe"
+            );
+        }
+    }
+
+    /// The other half, and the one with teeth: `InternalError` is what `sacp`
+    /// fabricates when NO response ever arrived (`block_task`,
+    /// `jsonrpc.rs:2971-2975`) — indistinguishable from the agent's own internal
+    /// failure. Ambiguous ⇒ must NOT be reported as a proven rejection, or the
+    /// caller would treat a possibly-accepted message as safe to re-send.
+    #[test]
+    fn steer_transport_ambiguity_is_never_reported_as_a_proven_rejection() {
+        // Exactly the error `block_task` builds when the response channel dies.
+        let never_received =
+            sacp::util::internal_error("response to `_session/steering` never received: closed");
+        assert!(
+            !steer_error_proves_rejection(&never_received),
+            "no response at all cannot prove the message was rejected"
+        );
+        assert!(!steer_error_proves_rejection(&sacp::Error::internal_error()));
+        // A future/unknown code is ambiguous too — default to Unknown.
+        assert!(!steer_error_proves_rejection(&sacp::Error::new(
+            -32099,
+            "some new code"
+        )));
+    }
+
+    /// WIRING GATE (E-091 / E-052 · design §8 negative-mutation criterion).
+    ///
+    /// The behavioral tests above all pass while `ConnectionCommand::Steer` is
+    /// unreachable in production: they exercise the classifier, not the assembly
+    /// point. Steering is only meaningful DURING a turn, and the prompting-state
+    /// command handler lives inside `run_conversation_loop`'s in-turn `select!`,
+    /// which needs a live agent handshake — there is no unit-reachable seam, so the
+    /// assertion is on the source layout instead.
+    ///
+    /// Without this gate the feature can be "complete" and 100% dead: the in-turn
+    /// match ends in a catch-all `_ => {}`, so a missing `Steer` arm silently
+    /// discards the command (and its oneshot) rather than failing to compile.
+    ///
+    /// ⚠️ Needles are assembled with `concat!` for a reason: `include_str!` reads
+    /// THIS file, so a whole-literal needle would match the test's own source and
+    /// the gate would stay green even with the production arm deleted (E-085: a
+    /// self-satisfying assertion is a fake gate). Split pieces appear verbatim only
+    /// in production code, so the counts below mean something. Verified by deleting
+    /// the production arm and watching this test fail.
+    #[test]
+    fn steer_arm_reachable_in_prompting_state() {
+        let src = include_str!("connection.rs");
+        let arm = concat!("Some(ConnectionCommand::Steer ", "{");
+        // Both loops must handle it: the in-turn one (the whole point) and the idle
+        // one (residual race — dropping it would strand the caller's oneshot).
+        assert_eq!(
+            src.matches(arm).count(),
+            2,
+            "expected a `Steer` arm in BOTH the in-turn and the idle command \
+             match. Fewer means one path drops the command: in-turn loss kills \
+             the feature outright (mid-turn injection never reaches the agent), \
+             idle loss strands the caller on a closed reply channel."
+        );
+
+        // Positional check — the arm being *somewhere* in the file is not enough;
+        // it must be inside the PROMPTING-state handler. That handler is delimited
+        // by the in-turn `cmd_rx.recv()` select arm and the `disconnect_requested`
+        // break that closes it (each occurring exactly once in this file).
+        let in_turn_cmd_start = concat!("cmd = cmd_rx.recv()", " => {");
+        let in_turn_cmd_end = concat!("if disconnect_requested ", "{");
+        let start = src
+            .find(in_turn_cmd_start)
+            .expect("in-turn command dispatch (`cmd = cmd_rx.recv() => {`) not found");
+        let end = src
+            .find(in_turn_cmd_end)
+            .expect("in-turn command block terminator (`if disconnect_requested {`) not found");
+        assert!(
+            start < end,
+            "file layout changed; the prompting-state window is no longer \
+             delimited by these two anchors — re-derive the window before \
+             trusting this gate"
+        );
+        assert_eq!(
+            src[start..end].matches(arm).count(),
+            1,
+            "the `Steer` arm must live INSIDE the prompting-state command \
+             handler. It is absent from that window, so mid-turn injection is \
+             unreachable and the in-turn catch-all `_ => {{}}` swallows the \
+             command: the user's message never reaches the running turn, which \
+             is the entire feature."
+        );
+
+        // The arm must actually send the ext request and return the outcome — an
+        // arm that merely logs would satisfy the checks above.
+        let send_call = concat!("send_steering(", "&cx, &sid, blocks)");
+        assert_eq!(
+            src.matches(send_call).count(),
+            2,
+            "each Steer arm must call `send_steering`"
+        );
+        // The method name must be the agent's, sourced from the shared constant.
+        let method_const = concat!("const STEERING_METHOD: &str = ", "\"_session/steering\";");
+        assert_eq!(
+            src.matches(method_const).count(),
+            1,
+            "the wire method must stay `_session/steering` (the name both \
+             claude-agent-acp and codex-acp implement)"
+        );
+
+        // ANTI-REGRESSION for review R2-A3: the detached turn must never be
+        // recorded by faking `turn_in_flight`. Nothing can ever clear that flag for
+        // an agent-initiated turn (no `TurnComplete` is owed to us), so writing it
+        // here would wedge the prompt gate permanently.
+        let fake_flag = concat!("s.turn_in_flight = true", ";");
+        assert_eq!(
+            src.matches(fake_flag).count(),
+            0,
+            "connection.rs must not set `turn_in_flight` — only the manager's \
+             prompt path owns that flag, and a detached (agent-initiated) turn \
+             must use `detached_turn_pending` instead"
+        );
+        let detached_event = concat!("AcpEvent::DetachedTurnPending ", "{");
+        assert_eq!(
+            src.matches(detached_event).count(),
+            2,
+            "each Steer arm must record a `startedNewTurn` as a DETACHED turn \
+             (the honest, separate state), not as `turn_in_flight`"
+        );
+    }
+
     #[test]
     fn parse_grok_effort_specs_absent_models_is_empty() {
         assert!(parse_grok_effort_specs(None).is_empty());
@@ -11154,6 +11794,7 @@ mod tests {
                 as Arc<dyn crate::acp::question::SessionQuestionAccess>,
             plan_approvals: Arc::new(NoPlanApprovals)
                 as Arc<dyn crate::acp::plan_approval::SessionPlanApprovalAccess>,
+            cancel_scope_tokens: crate::acp::delegation::cancel_scope::CancelScopeTokens::new(),
         };
 
         let mut servers: Vec<McpServer> = Vec::new();

@@ -399,6 +399,33 @@ pub async fn acp_goal_control(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AcpSteerParams {
+    pub connection_id: String,
+    pub blocks: Vec<crate::acp::types::PromptInputBlock>,
+    pub message_id: String,
+}
+
+/// Web twin of the `acp_steer` Tauri command. Mounted behind the existing
+/// `require_token` middleware like every other `/acp_*` route — no unauthenticated
+/// path is introduced (design §2.2.1). All validation lives in
+/// `ConnectionManager::steer`, shared with the Tauri side.
+///
+/// The `SteerOutcome` is returned in the JSON body: the caller needs it to decide
+/// between "delivered", "safe to retry", and "result unknown — ask the user".
+pub async fn acp_steer(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<AcpSteerParams>,
+) -> Result<Json<crate::acp::types::SteerOutcome>, AppCommandError> {
+    let manager = &state.connection_manager;
+    let outcome = manager
+        .steer(&params.connection_id, params.blocks, params.message_id)
+        .await
+        .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
+    Ok(Json(outcome))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AcpDescribeAgentOptionsParams {
     pub agent_type: crate::models::AgentType,
     #[serde(default)]
@@ -431,6 +458,63 @@ pub async fn acp_cancel(
         .await
         .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
     Ok(Json(()))
+}
+
+/// Read-only cancel-scope preview (spec R4.1/R4.2). Web mirror of the
+/// `acp_preview_cancel_scope` Tauri command — both go through
+/// `ConnectionManager::preview_cancel_scope`, so the reachability check and the
+/// scope computation are shared rather than duplicated per transport.
+///
+/// Mounted on the token-protected router (`web/router.rs`); there is no
+/// unauthenticated variant.
+pub async fn acp_preview_cancel_scope(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<AcpConnectionIdParams>,
+) -> Result<Json<crate::acp::delegation::cancel_scope::CancelScopePreview>, AppCommandError> {
+    let preview = state
+        .connection_manager
+        .preview_cancel_scope(&params.connection_id)
+        .await
+        .map_err(map_cancel_scope_error)?;
+    Ok(Json(preview))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpCancelWithScopeTokenParams {
+    pub connection_id: String,
+    pub scope_token: String,
+}
+
+/// Confirmed cancel under a preview token (spec R4.3). Responds with the
+/// `task_id`s ACTUALLY terminated — a subset of the token's set when some
+/// delegations finished on their own. A refused token or a grown scope cancels
+/// nothing and answers 4xx (a recoverable client condition: re-preview).
+pub async fn acp_cancel_with_scope_token(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<AcpCancelWithScopeTokenParams>,
+) -> Result<Json<Vec<String>>, AppCommandError> {
+    let terminated = state
+        .connection_manager
+        .cancel_with_scope_token(&state.db.conn, &params.connection_id, &params.scope_token)
+        .await
+        .map_err(map_cancel_scope_error)?;
+    Ok(Json(terminated))
+}
+
+/// Expected, recoverable client conditions → 4xx rather than a 500: a stale
+/// token or a scope that grew both mean "re-run the preview", and an unknown
+/// connection is a client-side staleness too. Anything else is a real fault.
+fn map_cancel_scope_error(e: AcpError) -> AppCommandError {
+    let message = e.to_string();
+    match e {
+        AcpError::CancelScopeTokenRejected(_)
+        | AcpError::CancelScopeChanged
+        | AcpError::ConnectionNotFound(_) => {
+            AppCommandError::new(AppErrorCode::InvalidInput, message)
+        }
+        _ => AppCommandError::task_execution_failed(message),
+    }
 }
 
 pub async fn acp_fork(

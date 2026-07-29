@@ -1413,6 +1413,10 @@ export type AcpEvent =
       supported: boolean
     }
   | {
+      type: "steering_supported"
+      supported: boolean
+    }
+  | {
       type: "mode_changed"
       mode_id: string
     }
@@ -1814,6 +1818,11 @@ export interface LiveSessionSnapshot {
   prompt_capabilities: PromptCapabilitiesInfo | null
   usage: SessionUsageUpdateInfo | null
   fork_supported: boolean
+  /** Whether the agent supports mid-turn steering (`_session/steering`), i.e.
+   *  whether a queued message can be injected into the RUNNING turn. Absent on
+   *  older server payloads — the frontend then treats it as `undefined`
+   *  ("unknown"), which is handled conservatively like unsupported. */
+  steering_supported?: boolean
   available_commands: AvailableCommandInfo[]
   selectors_ready: boolean
   /** Whether the running session is on stale (launch-time) config after a later

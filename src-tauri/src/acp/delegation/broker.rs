@@ -312,6 +312,36 @@ struct RunningTask {
     origin: TurnOrigin,
 }
 
+/// The set of delegations a parent-turn cancel on one connection would
+/// terminate, as computed by the single shared
+/// [`PendingInner::parent_cancel_scope`] used by BOTH the preview and the
+/// execution (spec R4.2 / design §4).
+///
+/// Two members because a cancel reaches delegations through two registries:
+/// `running` holds the registered ones (stable `task_id`s), `starting` holds
+/// the dispatched-but-not-yet-parked setups, which have no `task_id` yet and so
+/// are identified by their `inflight` key. Both are killed, so both are counted
+/// — omitting `starting` would under-report during the start-up window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParentCancelScope {
+    /// `task_id`s of delegations already registered in `running`.
+    pub running: Vec<String>,
+    /// `inflight` keys of setups dispatched but not yet parked.
+    pub starting: Vec<u64>,
+}
+
+impl ParentCancelScope {
+    /// How many delegations this cancel would terminate — the number the
+    /// confirmation dialog shows. Counts both sources.
+    pub fn count(&self) -> usize {
+        self.running.len() + self.starting.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count() == 0
+    }
+}
+
 /// A terminal delegation result retained so `get_delegation_status` /
 /// `cancel_delegation` can answer after the lifecycle resolved the task.
 /// Parent-scoped, FIFO-evicted once the parent's retained result text exceeds
@@ -769,6 +799,50 @@ impl PendingInner {
                 setup.canceled_at = Some(stamp);
             }
         }
+    }
+
+    /// **The single scope computation** behind both the cancel-scope preview and
+    /// its execution (spec R4.2 / design §4). Everything a parent-turn cancel
+    /// would destroy, and nothing else — so a preview can never disagree with
+    /// what the cancel then kills.
+    ///
+    /// It reads BOTH sources `drain_for_parent_cancel` acts on, because a cancel
+    /// reaches a delegation through either one:
+    ///
+    ///   * `running` — registered delegations, drained by the running scan;
+    ///   * `inflight` — dispatched but not yet parked (spawning / sending), only
+    ///     reachable via `mark_inflight_canceled_for_parent`.
+    ///
+    /// Counting `running` alone would under-report during the start-up window
+    /// (the few hundred ms between dispatch and `running`), and those setups are
+    /// killed all the same — the parent's stop would then destroy more than the
+    /// dialog showed. An in-flight setup has no `task_id` yet (its `call_id` is
+    /// minted later, at `start_delegation`'s send step), so `starting` carries
+    /// the `inflight` registry keys — enough to count them and to recognize
+    /// them, which is all the scope needs.
+    ///
+    /// Already-canceled in-flight setups are EXCLUDED: they are torn down by the
+    /// cancel that flagged them, so a later preview must not count them again.
+    fn parent_cancel_scope(&self, parent_connection_id: &str) -> ParentCancelScope {
+        let mut running: Vec<String> = self
+            .running
+            .iter()
+            .filter(|(_, v)| v.parent_connection_id == parent_connection_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        // Deterministic order so a preview and its commit report the same
+        // sequence (HashMap iteration order is not stable).
+        running.sort();
+        let mut starting: Vec<u64> = self
+            .inflight
+            .iter()
+            .filter(|(_, s)| {
+                s.parent_connection_id == parent_connection_id && s.canceled_at.is_none()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        starting.sort_unstable();
+        ParentCancelScope { running, starting }
     }
 
     /// Insert a terminal result into the completed-cache, then FIFO-evict this
@@ -3574,6 +3648,95 @@ impl DelegationBroker {
         });
     }
 
+    /// What a parent-turn cancel on this connection would terminate RIGHT NOW —
+    /// read-only, no side effects (spec R4.1 / R4.2).
+    ///
+    /// Backed by the same [`PendingInner::parent_cancel_scope`] the bounded
+    /// execution uses, so the number shown to the user cannot drift from the set
+    /// that gets destroyed. Safe to call concurrently and repeatedly.
+    pub async fn parent_cancel_scope(&self, parent_connection_id: &str) -> ParentCancelScope {
+        self.pending
+            .inner
+            .lock()
+            .await
+            .parent_cancel_scope(parent_connection_id)
+    }
+
+    /// Cascade-cancel a parent turn, but only within `authorized` — the scope a
+    /// preview showed the user (spec R4.3 / design §4).
+    ///
+    /// The difference from [`Self::cancel_by_parent_turn`] is the bound, and the
+    /// bound is the whole point: the user approved "kill these N", not "kill
+    /// whatever exists when I click OK".
+    ///
+    ///   * scope SHRANK (a delegation finished on its own) → execute, and report
+    ///     the ids ACTUALLY terminated. Callers must report this, not the
+    ///     token's original count, or they would claim kills that never
+    ///     happened;
+    ///   * scope GREW (a new delegation appeared) → the newcomer is outside what
+    ///     the user authorized, so it is left running.
+    ///
+    /// Returns the `task_id`s actually drained. The `starting` half is
+    /// intentionally absent from the return value: an in-flight setup has no
+    /// `task_id` to report, and it is flagged rather than drained here (its own
+    /// `start_delegation` tears the child down at its next checkpoint — see
+    /// `mark_inflight_canceled_for_parent`).
+    ///
+    /// Everything else — tracker tombstoning, `consumed` retention, inline fast
+    /// drain with backgrounded child teardown — matches the unbounded path
+    /// exactly, so this adds an authorization bound without forking cancel
+    /// semantics.
+    pub async fn cancel_by_parent_turn_within(
+        &self,
+        parent_connection_id: &str,
+        authorized: &ParentCancelScope,
+    ) -> Vec<String> {
+        // Same tombstoning as the unbounded turn cancel: retain `consumed` so a
+        // late re-emit can't mis-bind the next same-key delegation.
+        self.drop_tool_calls_for_parent(parent_connection_id, true)
+            .await;
+        let (terminated, drained) = {
+            let mut inner = self.pending.inner.lock().await;
+            // Flag only the authorized in-flight setups, in the SAME lock
+            // acquisition that drains the authorized running ones — preserving
+            // the "caught by exactly one of the two" invariant the unbounded
+            // path relies on, just restricted to the authorized ids.
+            let stamp = inner.tick();
+            for id in &authorized.starting {
+                if let Some(setup) = inner.inflight.get_mut(id) {
+                    if setup.parent_connection_id == parent_connection_id
+                        && setup.canceled_at.is_none()
+                    {
+                        setup.canceled_at = Some(stamp);
+                    }
+                }
+            }
+            // Intersect the authorized set with what is still running AND still
+            // owned by this parent. The intersection is what makes a shrunken
+            // scope succeed (vanished ids are simply skipped) and a grown scope
+            // safe (unauthorized ids were never in `authorized`).
+            let keys: Vec<String> = authorized
+                .running
+                .iter()
+                .filter(|k| {
+                    inner
+                        .running
+                        .get(*k)
+                        .is_some_and(|v| v.parent_connection_id == parent_connection_id)
+                })
+                .cloned()
+                .collect();
+            let terminated = keys.clone();
+            let drained = drain_and_record_canceled(&mut inner, keys, "parent canceled");
+            (terminated, drained)
+        };
+        let broker = self.clone();
+        tokio::spawn(async move {
+            broker.finalize_parent_cancel(drained).await;
+        });
+        terminated
+    }
+
     /// Fast, lock-guarded part of a parent cancel: drop/tombstone this parent's
     /// tool_call tracker (per `keep_consumed`, see `drop_tool_calls_for_parent`)
     /// and remove every running task it owns, returning them for the (slow)
@@ -5179,6 +5342,19 @@ mod tests {
     fn request_with_handle(parent_conv: i32, tool_use: &str, handle: &str) -> DelegationRequest {
         let mut r = request(parent_conv, tool_use);
         r.external_handle = Some(handle.to_string());
+        r
+    }
+
+    /// Like [`request`], but for a DIFFERENT parent connection — lets a test
+    /// prove that a parent-scoped operation ignores another parent's
+    /// delegations (global set larger than the scoped set).
+    fn request_for_parent(
+        parent_conn: &str,
+        parent_conv: i32,
+        tool_use: &str,
+    ) -> DelegationRequest {
+        let mut r = request(parent_conv, tool_use);
+        r.parent_connection_id = parent_conn.to_string();
         r
     }
 
@@ -9247,6 +9423,224 @@ mod tests {
         }
         assert_eq!(mock.cancels.lock().await.as_slice(), &["child-1"]);
         assert_eq!(mock.disconnects.lock().await.as_slice(), &["child-1"]);
+    }
+
+    // -- R4 cancel-scope preview + bounded execution ------------------------
+    //
+    // These pin the property the whole feature rests on: the number shown to
+    // the user and the set actually destroyed come from ONE computation
+    // (`PendingInner::parent_cancel_scope`), so they cannot drift.
+
+    /// Park `count` running delegations on `parent`, returning their task ids.
+    /// Each needs its own queued spawn/send pair.
+    async fn park_running(
+        broker: &DelegationBroker,
+        mock: &Arc<MockSpawner>,
+        parent: &str,
+        count: usize,
+    ) -> Vec<String> {
+        let mut ids = Vec::new();
+        for i in 0..count {
+            mock.queue_spawn(Ok(format!("{parent}-child-{i}"))).await;
+            mock.queue_send(Ok(7)).await;
+            let ack = broker
+                .start_delegation(request_for_parent(parent, 1, &format!("pt-{parent}-{i}")))
+                .await;
+            assert_eq!(ack.status, TaskStatus::Running, "delegation must park");
+            ids.push(ack.task_id.expect("running ack carries a task id"));
+        }
+        ids
+    }
+
+    /// 5 running globally, 3 of them in the stopping parent's scope → the
+    /// preview reports 3, and the bounded cancel kills exactly those 3 while
+    /// the other parent's 2 keep running (spec AC4).
+    #[tokio::test]
+    async fn scope_preview_counts_only_this_parent_and_cancel_kills_exactly_those() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let mine = park_running(&broker, &mock, "parent-a", 3).await;
+        let theirs = park_running(&broker, &mock, "parent-b", 2).await;
+        assert_eq!(broker.pending_count().await, 5, "5 running globally");
+
+        let scope = broker.parent_cancel_scope("parent-a").await;
+        assert_eq!(
+            scope.count(),
+            3,
+            "preview must report the SCOPED count, not 5"
+        );
+        assert_eq!(scope.running, {
+            let mut s = mine.clone();
+            s.sort();
+            s
+        });
+
+        let terminated = broker
+            .cancel_by_parent_turn_within("parent-a", &scope)
+            .await;
+        assert_eq!(
+            terminated.len(),
+            3,
+            "the cancel must terminate exactly the previewed set"
+        );
+        for id in &mine {
+            assert!(terminated.contains(id));
+        }
+        // The other parent's delegations are untouched.
+        assert_eq!(broker.pending_count().await, 2);
+        for id in &theirs {
+            let report = broker
+                .get_task_status("parent-b", Some(1), id, StatusWait::Immediate)
+                .await;
+            assert_eq!(
+                report.status,
+                TaskStatus::Running,
+                "another parent's delegation must survive"
+            );
+        }
+    }
+
+    /// THE start-up window case. A delegation pinned inside `spawn` is not yet
+    /// in `running` and is absent from the `active_delegations` snapshot the UI
+    /// sees — but `mark_inflight_canceled_for_parent` DOES kill it. So the scope
+    /// must count it; counting `running` alone makes "displayed == terminated"
+    /// false for the few hundred ms of every delegation's start-up.
+    #[tokio::test]
+    async fn scope_counts_delegation_dispatched_but_not_yet_running() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        // One fully-parked delegation...
+        let parked = park_running(&broker, &mock, "parent-conn", 1).await;
+
+        // ...plus one pinned mid-`spawn`: registered in `inflight`, absent from
+        // `running`.
+        let release = mock.install_spawn_gate().await;
+        mock.queue_spawn(Ok("child-starting".into())).await;
+        mock.queue_send(Ok(7)).await;
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.start_delegation(request(1, "pt-starting")).await })
+        };
+        while broker.inflight_count().await == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            broker.pending_count().await,
+            1,
+            "the starting delegation is NOT in `running` yet — the whole point"
+        );
+
+        let scope = broker.parent_cancel_scope("parent-conn").await;
+        assert_eq!(
+            scope.count(),
+            2,
+            "scope must cover running + starting; got running={:?} starting={:?}",
+            scope.running,
+            scope.starting
+        );
+        assert_eq!(scope.running, parked);
+        assert_eq!(scope.starting.len(), 1);
+
+        // And the cancel really does reach the starting one: it is flagged, so
+        // `start_delegation` tears its child down instead of returning Running.
+        broker
+            .cancel_by_parent_turn_within("parent-conn", &scope)
+            .await;
+        let _ = release.send(());
+        let report = driver.await.unwrap();
+        assert_eq!(
+            report.error_code.as_deref(),
+            Some("canceled"),
+            "the starting delegation the scope counted must actually be canceled"
+        );
+    }
+
+    /// A scope that SHRANK between preview and execution: the vanished id is
+    /// skipped, the cancel still succeeds, and the reported set is the smaller
+    /// actual one — never the token's original count (R4.3 / AC4).
+    #[tokio::test]
+    async fn bounded_cancel_reports_actuals_when_scope_shrank() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let ids = park_running(&broker, &mock, "parent-conn", 2).await;
+        let scope = broker.parent_cancel_scope("parent-conn").await;
+        assert_eq!(scope.count(), 2);
+
+        // One finishes on its own while the dialog is open.
+        broker
+            .complete_call(
+                &ids[0],
+                DelegationOutcome::Ok(DelegationSuccess {
+                    text: "done".into(),
+                    child_conversation_id: 7,
+                    child_agent_type: AgentType::ClaudeCode,
+                    turn_count: 1,
+                    duration_ms: 1,
+                    token_usage: None,
+                }),
+            )
+            .await;
+
+        let terminated = broker
+            .cancel_by_parent_turn_within("parent-conn", &scope)
+            .await;
+        assert_eq!(
+            terminated,
+            vec![ids[1].clone()],
+            "must report the ACTUAL (smaller) set, not the previewed 2"
+        );
+    }
+
+    /// A scope that GREW: the newcomer is outside the authorization, so the
+    /// bounded cancel leaves it alone (R4.3 — never silently widen).
+    #[tokio::test]
+    async fn bounded_cancel_leaves_delegations_added_after_the_preview() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let first = park_running(&broker, &mock, "parent-conn", 1).await;
+        let authorized = broker.parent_cancel_scope("parent-conn").await;
+        assert_eq!(authorized.count(), 1);
+
+        // A new delegation appears AFTER the user saw "1".
+        let second = park_running(&broker, &mock, "parent-conn", 1).await;
+
+        let terminated = broker
+            .cancel_by_parent_turn_within("parent-conn", &authorized)
+            .await;
+        assert_eq!(terminated, first, "only the authorized id may be killed");
+        let report = broker
+            .get_task_status("parent-conn", Some(1), &second[0], StatusWait::Immediate)
+            .await;
+        assert_eq!(
+            report.status,
+            TaskStatus::Running,
+            "a delegation the user never authorized must survive the cancel"
+        );
+    }
+
+    /// An empty scope on an idle parent — the signal for "cancel directly, no
+    /// confirmation dialog" (R4.4).
+    #[tokio::test]
+    async fn scope_is_empty_when_parent_has_no_delegations() {
+        let broker = DelegationBroker::new(
+            Arc::new(MockSpawner::new()) as Arc<dyn ConnectionSpawner>,
+            shallow_lookup(),
+        );
+        let scope = broker.parent_cancel_scope("parent-conn").await;
+        assert!(scope.is_empty());
+        assert_eq!(scope.count(), 0);
     }
 
     #[tokio::test]

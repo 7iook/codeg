@@ -322,6 +322,13 @@ pub struct SessionState {
     pub grok_effort_specs: Option<std::collections::HashMap<String, GrokEffortSpec>>,
     pub prompt_capabilities: Option<PromptCapabilitiesInfo>,
     pub fork_supported: bool,
+    /// Frontend-facing mirror of `agent_supports_steering` (R2.2 wire contract).
+    /// Carried on `to_snapshot()` AND latched by `AcpEvent::SteeringSupported`,
+    /// exactly like `fork_supported`: `spawn_agent` returns before `initialize`
+    /// completes for a FRESH session, so the connect-time snapshot can predate
+    /// the probe — the event covers that window, and the snapshot covers a
+    /// client attaching later (refresh / new window) that missed the event.
+    pub steering_supported: bool,
     pub available_commands: Vec<AvailableCommandInfo>,
     pub usage: Option<UsageInfo>,
     /// True once the agent's initial selectors handshake (modes +
@@ -399,6 +406,19 @@ pub struct SessionState {
     pub agent_supports_resume: bool,
     pub agent_supports_fork: bool,
 
+    /// Whether the agent advertised mid-turn steering (`_session/steering`) in
+    /// its `initialize` response (R2.1). ⚠️ Unlike the three capabilities above,
+    /// this one is read from the response's TOP-LEVEL `_meta` — a SIBLING of
+    /// `agentCapabilities`, not a field inside it (see
+    /// `connection::parse_steering_supported`). `false` until the agent
+    /// self-reports it, so an agent that never advertises steering is never
+    /// steered. Fixed for the connection's lifetime.
+    ///
+    /// This is the backend-internal copy (the command path reads it to decide
+    /// whether steering is legal). The frontend-facing mirror is
+    /// `steering_supported`, which rides the snapshot + a latch event.
+    pub agent_supports_steering: bool,
+
     /// Concatenated text content of the just-completed turn's assistant
     /// message. Captured at TurnComplete (just before live_message is
     /// cleared) so the lifecycle subscriber can surface it as the
@@ -432,6 +452,40 @@ pub struct SessionState {
     /// seeing success. Not serialized: it is a connection-loop liveness flag,
     /// not part of the client-visible snapshot.
     pub turn_in_flight: bool,
+
+    /// A turn exists on the AGENT side that codeg did not initiate and whose
+    /// terminal state it can never observe (design §2.4, review R2-A3).
+    ///
+    /// Set only when `_session/steering` answers `startedNewTurn`: the turn we
+    /// meant to steer had already settled, so the agent started a fresh turn with
+    /// the message and detached it. That turn's `PromptResponse` flows through the
+    /// agent's own `prompt()` path, never back to the steer caller (upstream issue
+    /// #903; fix PR #919 unmerged).
+    ///
+    /// ⚠️ **Deliberately NOT `turn_in_flight`, and it must never be merged into
+    /// it.** `turn_in_flight` asserts a narrower, load-bearing fact — "a turn
+    /// *codeg* initiated is running" — and three separate mechanisms trust that
+    /// exact meaning: the `TurnInProgress` prompt gate, cancel/timeout cleanup,
+    /// and the queue flush gate. Setting `turn_in_flight` for a turn codeg has no
+    /// request for would wedge all three: nothing can ever clear it (no
+    /// `TurnComplete` is owed to us), so the connection would reject every future
+    /// prompt forever. Overloading it trades a cosmetic UI hint for a permanently
+    /// stuck connection.
+    ///
+    /// Consequently this flag drives UI hinting ONLY and participates in NO
+    /// `turn_in_flight`-driven decision.
+    ///
+    /// **Clearing requires a correlatable fact**, i.e. evidence that ties to that
+    /// specific turn — or session teardown, which ends every turn on the session
+    /// by construction (`SessionStarted` on reconnect, `StatusChanged`
+    /// →`Disconnected`). A bare timeout, or "any terminal event", does NOT prove
+    /// the detached turn ended and must not clear it: a slow detached turn plus an
+    /// unrelated `TurnComplete` would clear a flag that is still true. Preferring
+    /// a stale hint over a false one is the explicit §2.4 trade-off.
+    ///
+    /// Not serialized directly; surfaced to clients via `to_snapshot()` as
+    /// `detached_turn_pending`.
+    pub detached_turn_pending: bool,
 
     /// Whether the most recently completed turn ended via a stop reason other
     /// than `"end_turn"` (cancelled, refusal, max_tokens, max_turn_requests,
@@ -494,6 +548,7 @@ impl SessionState {
             grok_effort_specs: None,
             prompt_capabilities: None,
             fork_supported: false,
+            steering_supported: false,
             available_commands: Vec::new(),
             usage: None,
             selectors_ready: false,
@@ -508,10 +563,12 @@ impl SessionState {
             agent_supports_load_session: false,
             agent_supports_resume: false,
             agent_supports_fork: false,
+            agent_supports_steering: false,
             last_assistant_text: None,
             pending_user_message: None,
             pending_user_message_started_at: None,
             turn_in_flight: false,
+            detached_turn_pending: false,
             last_turn_ended_abnormally: false,
             config_stale: false,
             config_stale_kind: None,
@@ -566,6 +623,13 @@ impl SessionState {
                 }
                 self.external_id = Some(session_id.clone());
                 self.status = ConnectionStatus::Connected;
+                // A detached agent-initiated turn (§2.4) belongs to the session
+                // that was live when it started. Establishing / re-establishing a
+                // session ends every turn on the previous one by construction, so
+                // this IS the correlatable fact that retires the flag — unlike a
+                // timeout or an unrelated `TurnComplete`, which prove nothing
+                // about that turn and must never clear it.
+                self.detached_turn_pending = false;
                 // Fire the dedup waiter (if any). Take()-and-send is
                 // single-shot: a duplicate SessionStarted (replay, agent
                 // re-init) finds None here and is a no-op, which is
@@ -594,6 +658,15 @@ impl SessionState {
                     // new error scope, so stale recoverable errors must not be
                     // resurrected by a later snapshot attach.
                     self.last_error = None;
+                }
+                if matches!(
+                    status,
+                    ConnectionStatus::Disconnected | ConnectionStatus::Error
+                ) {
+                    // Session teardown: the agent process / transport carrying the
+                    // detached turn is gone, which ends it by construction — the
+                    // second correlatable fact permitted to clear this (§2.4).
+                    self.detached_turn_pending = false;
                 }
                 self.status = status.clone();
             }
@@ -628,6 +701,12 @@ impl SessionState {
             }
             AcpEvent::ForkSupported { supported } => {
                 self.fork_supported = *supported;
+            }
+            AcpEvent::SteeringSupported { supported } => {
+                self.steering_supported = *supported;
+            }
+            AcpEvent::DetachedTurnPending { pending } => {
+                self.detached_turn_pending = *pending;
             }
             AcpEvent::AvailableCommands { commands } => {
                 self.available_commands = commands.clone();
@@ -1354,6 +1433,8 @@ impl SessionState {
             prompt_capabilities: self.prompt_capabilities.clone(),
             usage: self.usage.clone(),
             fork_supported: self.fork_supported,
+            steering_supported: self.steering_supported,
+            detached_turn_pending: self.detached_turn_pending,
             available_commands: self.available_commands.clone(),
             selectors_ready: self.selectors_ready,
             config_stale: self.config_stale,
@@ -1444,6 +1525,22 @@ pub struct LiveSessionSnapshot {
     pub prompt_capabilities: Option<PromptCapabilitiesInfo>,
     pub usage: Option<UsageInfo>,
     pub fork_supported: bool,
+    /// Whether the agent supports mid-turn steering (`_session/steering`), i.e.
+    /// whether a queued message may be injected into the RUNNING turn (R2.2).
+    /// `#[serde(default)]` so older server payloads without the field
+    /// deserialize to `false`; always serialized (a plain bool, mirroring
+    /// `fork_supported`) so the frontend can rely on it from the snapshot path.
+    /// The frontend treats absent as `undefined` → `unknown` → conservatively
+    /// the same as unsupported (no "send now" action offered).
+    #[serde(default)]
+    pub steering_supported: bool,
+    /// Whether an agent-initiated turn codeg cannot observe the end of is
+    /// outstanding (see `SessionState.detached_turn_pending`). Drives a weak UI
+    /// hint ONLY — it is deliberately not `turn_in_flight` and must not gate any
+    /// action (design §2.4). `#[serde(default)]` so older payloads deserialize to
+    /// `false`.
+    #[serde(default)]
+    pub detached_turn_pending: bool,
     pub available_commands: Vec<AvailableCommandInfo>,
     pub selectors_ready: bool,
     /// Whether the running session is on stale (launch-time) config after a
@@ -1587,6 +1684,136 @@ mod tests {
         assert!(s.agent_supports_load_session);
         assert!(s.agent_supports_resume);
         assert!(s.agent_supports_fork);
+    }
+
+    /// T1 (R2.1 / R2.2): the steering capability defaults to unsupported, is
+    /// latched by `SteeringSupported`, and rides `to_snapshot()` so a client
+    /// that attaches after the one-shot event still learns the capability.
+    #[test]
+    fn steering_capability_defaults_off_latches_and_rides_the_snapshot() {
+        let mut s = fresh_state();
+        assert!(
+            !s.agent_supports_steering && !s.steering_supported,
+            "steering defaults to unsupported until the agent self-reports it"
+        );
+        assert!(
+            !s.to_snapshot().steering_supported,
+            "a fresh snapshot must report unsupported, never unknown-as-true"
+        );
+
+        s.apply_event(&AcpEvent::SteeringSupported { supported: true });
+        assert!(s.steering_supported);
+        assert!(
+            s.to_snapshot().steering_supported,
+            "the snapshot must carry the latched capability (the frontend's \
+             only recovery path after a refresh that missed the event)"
+        );
+
+        // The wire field survives a serialize → deserialize round trip, so the
+        // WS `snapshot` frame and the HTTP snapshot agree.
+        let json = serde_json::to_string(&s.to_snapshot()).expect("serialize");
+        let back: LiveSessionSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.steering_supported);
+        assert!(
+            json.contains("steering_supported"),
+            "always serialized (a plain bool) so the frontend can rely on it"
+        );
+
+        // An agent that reports unsupported latches back to false.
+        s.apply_event(&AcpEvent::SteeringSupported { supported: false });
+        assert!(!s.steering_supported);
+        assert!(!s.to_snapshot().steering_supported);
+    }
+
+    /// T2/T3 (design §2.4 · review R2-A3): the detached-turn flag is SEPARATE from
+    /// `turn_in_flight` and may only be cleared by a **correlatable fact**.
+    ///
+    /// The two rules under test:
+    ///   1. Setting it never touches `turn_in_flight` (which asserts a turn *we*
+    ///      started is running; no `TurnComplete` is ever owed for a detached turn,
+    ///      so conflating them would wedge the prompt gate permanently).
+    ///   2. An unrelated `TurnComplete` — the tempting "any terminal event" —
+    ///      must NOT clear it. It proves nothing about the agent-initiated turn.
+    #[test]
+    fn detached_turn_pending_is_independent_of_turn_in_flight_and_survives_unrelated_turn_end() {
+        let mut s = fresh_state();
+        assert!(!s.detached_turn_pending);
+        assert!(!s.to_snapshot().detached_turn_pending);
+
+        // Our own turn is running, and a steer answers `startedNewTurn`.
+        s.turn_in_flight = true;
+        s.apply_event(&AcpEvent::DetachedTurnPending { pending: true });
+        assert!(s.detached_turn_pending);
+        assert!(
+            s.turn_in_flight,
+            "recording a detached turn must not disturb our own turn's flag"
+        );
+        assert!(s.to_snapshot().detached_turn_pending);
+
+        // OUR turn ends. That clears `turn_in_flight` (it is ours to clear) but
+        // says nothing about the agent-initiated turn, which may still be running.
+        s.apply_event(&AcpEvent::TurnComplete {
+            session_id: "s1".into(),
+            stop_reason: "end_turn".into(),
+            agent_type: "claude_code".into(),
+        });
+        assert!(!s.turn_in_flight, "our own turn's gate is released");
+        assert!(
+            s.detached_turn_pending,
+            "an unrelated TurnComplete is NOT a correlatable fact — clearing on \
+             'any terminal event' would retire a flag that is still true (§2.4)"
+        );
+    }
+
+    /// The two facts that DO retire the flag, because each ends every turn on the
+    /// session by construction: session (re)establishment and teardown.
+    #[test]
+    fn detached_turn_pending_cleared_only_by_session_reconnect_or_teardown() {
+        for clearing_event in [
+            AcpEvent::SessionStarted {
+                session_id: "s2".into(),
+            },
+            AcpEvent::StatusChanged {
+                status: ConnectionStatus::Disconnected,
+            },
+            AcpEvent::StatusChanged {
+                status: ConnectionStatus::Error,
+            },
+        ] {
+            let mut s = fresh_state();
+            s.apply_event(&AcpEvent::DetachedTurnPending { pending: true });
+            assert!(s.detached_turn_pending);
+            s.apply_event(&clearing_event);
+            assert!(
+                !s.detached_turn_pending,
+                "{clearing_event:?} ends every turn on the session, so it retires \
+                 the detached-turn hint"
+            );
+        }
+
+        // Counter-check: a status change that is NOT teardown must leave it set.
+        let mut s = fresh_state();
+        s.apply_event(&AcpEvent::DetachedTurnPending { pending: true });
+        s.apply_event(&AcpEvent::StatusChanged {
+            status: ConnectionStatus::Prompting,
+        });
+        assert!(
+            s.detached_turn_pending,
+            "starting another turn does not prove the detached one ended"
+        );
+    }
+
+    /// Older server payloads that predate the field must deserialize to
+    /// `false` (unsupported) rather than failing — `#[serde(default)]`.
+    #[test]
+    fn snapshot_without_steering_field_deserializes_to_unsupported() {
+        let mut json = serde_json::to_value(fresh_state().to_snapshot()).expect("serialize");
+        json.as_object_mut()
+            .expect("snapshot is an object")
+            .remove("steering_supported");
+        let back: LiveSessionSnapshot =
+            serde_json::from_value(json).expect("older payload must still deserialize");
+        assert!(!back.steering_supported);
     }
 
     #[test]

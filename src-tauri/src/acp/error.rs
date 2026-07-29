@@ -36,6 +36,28 @@ pub enum AcpError {
     /// a sanity bound keeps a single pathological note from bloating them.
     #[error("invalid feedback: {0}")]
     InvalidFeedback(String),
+    /// A steering injection (`_session/steering`) was requested for a connection
+    /// whose agent never advertised the capability at `initialize`. Static and
+    /// knowable, so it is refused locally: sending anyway would draw a
+    /// `MethodNotFound`, which lands in the ambiguous "delivery result unknown"
+    /// bucket and would tell the user we don't know what happened when in fact we
+    /// do. The frontend does not offer the action for such agents; this is the
+    /// backend's defense-in-depth for a stale / direct call.
+    #[error("this agent does not support mid-turn steering")]
+    SteeringUnsupported,
+    /// The submitted cancel-scope preview token was refused (unknown / already
+    /// used / expired / issued for another connection). **No cancel was
+    /// executed**; the caller must re-run the preview to obtain a fresh
+    /// authorization. Never downgraded into "cancel whatever exists now" — that
+    /// unbounded destruction is what the token exists to prevent.
+    #[error("cancel scope token rejected: {0}")]
+    CancelScopeTokenRejected(String),
+    /// New delegations appeared between the preview and the commit, so the
+    /// cancel would destroy more than the user authorized. **No cancel was
+    /// executed**; the caller must re-preview and re-confirm the larger scope
+    /// (a shrinking scope, by contrast, commits normally and reports actuals).
+    #[error("delegation scope changed since the preview; re-confirm before cancelling")]
+    CancelScopeChanged,
     #[error("binary download failed: {0}")]
     DownloadFailed(String),
     #[error("platform not supported: {0}")]
@@ -80,6 +102,9 @@ impl AcpError {
             Self::NoActiveTurn => Some("no_active_turn"),
             Self::FeedbackDisabled => Some("feedback_disabled"),
             Self::InvalidFeedback(_) => Some("invalid_feedback"),
+            Self::SteeringUnsupported => Some("steering_unsupported"),
+            Self::CancelScopeTokenRejected(_) => Some("cancel_scope_token_rejected"),
+            Self::CancelScopeChanged => Some("cancel_scope_changed"),
             Self::SpawnFailed(_) => Some("spawn_failed"),
             Self::DownloadFailed(_) => Some("download_failed"),
             Self::ConnectionNotFound(_) => Some("connection_not_found"),

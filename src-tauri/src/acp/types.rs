@@ -205,6 +205,22 @@ pub enum AcpEvent {
     },
     /// Whether the agent supports session/fork
     ForkSupported { supported: bool },
+    /// Whether the agent supports mid-turn steering (`_session/steering`), i.e.
+    /// injecting a queued message into the RUNNING turn (R2.2). Emitted once
+    /// after `initialize`; latched on the session state and mirrored on the
+    /// snapshot as `steering_supported`.
+    SteeringSupported { supported: bool },
+    /// An agent-initiated turn whose terminal state codeg cannot observe became
+    /// outstanding (`true`) or was proven over (`false`) — see
+    /// `SessionState::detached_turn_pending` (design §2.4).
+    ///
+    /// Emitted `true` only on a `startedNewTurn` steer outcome. `false` is emitted
+    /// only from a **correlatable fact** (session teardown / reconnect, which ends
+    /// every turn on the session by construction). A bare timeout or an unrelated
+    /// `TurnComplete` is NOT such a fact and must never produce it.
+    ///
+    /// Drives a weak UI hint only; it gates nothing.
+    DetachedTurnPending { pending: bool },
     /// Current session mode changed
     ModeChanged { mode_id: String },
     /// Agent reported plan update for current turn
@@ -1183,6 +1199,72 @@ pub struct ForkResultInfo {
     /// the pre-fork (S1) history. The current connection's conversation row
     /// (still bound in `SessionState`) gets re-pointed to S2 in the same call.
     pub sibling_conversation_id: i32,
+}
+
+/// Outcome of a mid-turn steering injection (`_session/steering`, R1.1).
+///
+/// FOUR variants, not three: the agent's own union is
+/// `injected | startedNewTurn | failed`, and codeg adds `Unknown` for "we never
+/// got an answer". That fourth one is the whole point of this type — see the
+/// `Failed` / `Unknown` docs below. Collapsing them into one error is the defect
+/// design §2.5.1 exists to prevent.
+///
+/// Ordering of the caller's decision table (design §2.5):
+/// - `Injected` / `StartedNewTurn` → **delivered**. Both mean the agent accepted
+///   the message; neither may be re-sent.
+/// - `Failed` → definitively NOT accepted → safe to re-queue and retry.
+/// - `Unknown` → indeterminate → **never** auto-retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SteerOutcome {
+    /// The agent pushed the message into the RUNNING turn
+    /// (`priority = now`, pre-empting the current generation). The turn the user
+    /// was watching continues, now carrying their message. Nothing else to do.
+    Injected,
+    /// The turn we meant to steer had already settled, so the agent started a
+    /// FRESH turn with the message and detached it
+    /// (`claude-agent-acp/dist/acp-agent.js:936-943`).
+    ///
+    /// ⚠️ This is a SUCCESS: the message is already executing. Re-sending it
+    /// through the normal prompt path would run the same user instruction twice
+    /// (design §2.4, review A2). The caller must treat it as delivered.
+    ///
+    /// codeg cannot observe that turn's terminal state (upstream issue #903, fix
+    /// PR #919 unmerged), so it is tracked by the separate, honestly-named
+    /// `SessionState::detached_turn_pending` — NOT by faking `turn_in_flight`.
+    StartedNewTurn,
+    /// The agent answered and EXPLICITLY REFUSED the injection — e.g. codex-acp's
+    /// `NonSteerableTurnKind` (a review / compact turn cannot be steered).
+    ///
+    /// The distinguishing fact: a response came back. The message was therefore
+    /// definitively NOT accepted, so re-queueing it is safe and cannot duplicate
+    /// execution.
+    Failed,
+    /// NO response came back: transport broken, request timed out, or the agent
+    /// process died. Whether the message was accepted is **unknowable**.
+    ///
+    /// `_session/steering` takes only `{sessionId, prompt}` — the agent accepts
+    /// no idempotency key (`parseSteerRequest`), so codeg cannot ask "did you
+    /// already get this?" and end-to-end exactly-once is impossible. This spec
+    /// explicitly does not promise it (design §2.5.1 contract narrowing).
+    ///
+    /// Therefore: **never auto-retry an `Unknown`.** A retry here is a real
+    /// duplicate-execution risk, not a theoretical one. The caller surfaces it as
+    /// "delivery result unknown" and lets the user decide.
+    Unknown,
+}
+
+impl SteerOutcome {
+    /// Whether the agent took ownership of the message. `true` for both
+    /// `Injected` and `StartedNewTurn` — the latter is the trap: it *looks* like
+    /// a fallback but the message is already running (design §2.4).
+    ///
+    /// Deliberately NOT a "should I retry?" helper: `Failed` (retry safe) and
+    /// `Unknown` (retry forbidden) are both non-delivered, and one predicate
+    /// covering both would re-merge exactly the distinction this type draws.
+    pub fn is_delivered(self) -> bool {
+        matches!(self, Self::Injected | Self::StartedNewTurn)
+    }
 }
 
 #[cfg(test)]

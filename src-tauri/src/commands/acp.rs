@@ -8386,6 +8386,27 @@ pub async fn acp_goal_control(
     manager.goal_control(&connection_id, action).await
 }
 
+/// Inject `blocks` into the connection's RUNNING turn (`_session/steering`, R1.1)
+/// and hand the caller the outcome.
+///
+/// Thin by design: every precondition (reachability → `ConnectionNotFound`,
+/// non-empty blocks, agent capability) lives in `ConnectionManager::steer` so this
+/// command and the Web handler cannot drift apart (design §2.2.1).
+///
+/// Returns [`SteerOutcome`] rather than `()` because the four values are not
+/// interchangeable: `injected`/`startedNewTurn` are delivered, `failed` is safely
+/// retryable, and `unknown` must NEVER be auto-retried.
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn acp_steer(
+    connection_id: String,
+    blocks: Vec<crate::acp::types::PromptInputBlock>,
+    message_id: String,
+    manager: State<'_, ConnectionManager>,
+) -> Result<crate::acp::types::SteerOutcome, AcpError> {
+    manager.steer(&connection_id, blocks, message_id).await
+}
+
 /// Spawn a transient ACP connection for `agent_type` with a silent emitter,
 /// read whatever `SessionConfigOptions` / `SessionModes` the agent advertises,
 /// and tear it down. The returned snapshot drives the delegation-settings UI
@@ -8439,6 +8460,40 @@ pub async fn acp_cancel(
     manager: State<'_, ConnectionManager>,
 ) -> Result<(), AcpError> {
     manager.cancel(&db.conn, &connection_id).await
+}
+
+/// Read-only: what would a stop on this connection destroy? (spec R4.1/R4.2)
+///
+/// Returns the count the confirmation dialog must display plus the token that
+/// authorizes destroying exactly that set. `count == 0` → no token, cancel
+/// directly with no confirmation (R4.4). Both the reachability check and the
+/// scope computation live in `ConnectionManager`, shared with the web handler.
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn acp_preview_cancel_scope(
+    connection_id: String,
+    manager: State<'_, ConnectionManager>,
+) -> Result<crate::acp::delegation::cancel_scope::CancelScopePreview, AcpError> {
+    manager.preview_cancel_scope(&connection_id).await
+}
+
+/// Confirmed cancel under a preview token (spec R4.3).
+///
+/// Returns the `task_id`s ACTUALLY terminated — report these, not the token's
+/// original count, since delegations may have finished on their own while the
+/// dialog was open. A rejected token (used / expired / wrong connection) or a
+/// grown scope cancels NOTHING.
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn acp_cancel_with_scope_token(
+    connection_id: String,
+    scope_token: String,
+    db: State<'_, AppDatabase>,
+    manager: State<'_, ConnectionManager>,
+) -> Result<Vec<String>, AcpError> {
+    manager
+        .cancel_with_scope_token(&db.conn, &connection_id, &scope_token)
+        .await
 }
 
 #[cfg(feature = "tauri-runtime")]

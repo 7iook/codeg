@@ -180,6 +180,9 @@ pub fn build_delegation_stack(
         plan_approvals: Arc::new(crate::acp::manager::ConnectionManagerPlanApprovalLookup {
             manager: Arc::new(connection_manager.clone_ref()),
         }) as Arc<dyn crate::acp::plan_approval::SessionPlanApprovalAccess>,
+        // Cancel-scope preview tokens (R4): one registry per process, shared by
+        // both transports so a preview and its confirmed cancel agree.
+        cancel_scope_tokens: crate::acp::delegation::cancel_scope::CancelScopeTokens::new(),
     });
 
     (broker, tokens, socket_path, feedback, ask, sessions)

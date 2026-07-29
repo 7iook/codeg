@@ -635,11 +635,23 @@ pub fn build_router(
             post(handlers::acp::acp_set_config_option),
         )
         .route("/acp_goal_control", post(handlers::acp::acp_goal_control))
+        .route("/acp_steer", post(handlers::acp::acp_steer))
         .route(
             "/acp_describe_agent_options",
             post(handlers::acp::acp_describe_agent_options),
         )
         .route("/acp_cancel", post(handlers::acp::acp_cancel))
+        // Cancel-scope preview + confirmed cancel (spec R4). Both sit inside
+        // this router, i.e. BEHIND the `auth::require_token` layer applied at
+        // its end — deliberately not in `public_api`.
+        .route(
+            "/acp_preview_cancel_scope",
+            post(handlers::acp::acp_preview_cancel_scope),
+        )
+        .route(
+            "/acp_cancel_with_scope_token",
+            post(handlers::acp::acp_cancel_with_scope_token),
+        )
         .route("/acp_fork", post(handlers::acp::acp_fork))
         .route(
             "/acp_respond_permission",

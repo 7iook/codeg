@@ -36,6 +36,7 @@
 //! still exists.
 
 pub mod broker;
+pub mod cancel_scope;
 pub mod companion;
 pub mod depth;
 pub mod event_emitter;

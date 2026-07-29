@@ -61,6 +61,11 @@ export interface SnapshotPatch {
   promptCapabilities: PromptCapabilitiesInfo | null
   selectorsReady: boolean
   supportsFork: boolean
+  /** Whether the agent supports mid-turn steering (`_session/steering`).
+   *  `undefined` = unknown (older server that omits the field, or a snapshot
+   *  taken before the `initialize` probe landed) — callers must treat unknown
+   *  conservatively, i.e. the same as unsupported. */
+  supportsSteering: boolean | undefined
   /** Whether the running session is on stale (launch-time) config — recovered
    *  from the snapshot so a reconnect/refresh/new tile sees the banner state
    *  that the one-shot `session_config_stale` event won't replay. */
@@ -130,6 +135,9 @@ export function denormalizeSnapshot(wire: LiveSessionSnapshot): SnapshotPatch {
     promptCapabilities: wire.prompt_capabilities ?? DEFAULT_PROMPT_CAPS,
     selectorsReady: wire.selectors_ready,
     supportsFork: wire.fork_supported,
+    // Deliberately NOT defaulted to `false`: an absent field means "unknown",
+    // which the UI must distinguish from a confirmed "unsupported".
+    supportsSteering: wire.steering_supported,
     configStale: wire.config_stale ?? false,
     configStaleKind: wire.config_stale_kind ?? null,
     backgroundOutstanding: wire.background_outstanding ?? 0,

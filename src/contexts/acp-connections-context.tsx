@@ -171,6 +171,13 @@ export interface ConnectionState {
   status: ConnectionStatus
   promptCapabilities: PromptCapabilitiesInfo
   supportsFork: boolean
+  /** Whether the agent supports mid-turn steering (`_session/steering`), i.e.
+   *  injecting a queued message into the RUNNING turn. `undefined` = unknown
+   *  (the `initialize` probe hasn't landed yet, or an older server omitted the
+   *  field). Consumers MUST treat unknown conservatively — the same as
+   *  unsupported — so no "send now" affordance is offered before the
+   *  capability is confirmed. */
+  supportsSteering: boolean | undefined
   selectorsReady: boolean
   sessionId: string | null
   modes: SessionModeStateInfo | null
@@ -504,6 +511,11 @@ type Action =
     }
   | {
       type: "FORK_SUPPORTED"
+      contextKey: string
+      supported: boolean
+    }
+  | {
+      type: "STEERING_SUPPORTED"
       contextKey: string
       supported: boolean
     }
@@ -1214,6 +1226,8 @@ function connectionsReducer(
           embedded_context: false,
         },
         supportsFork: false,
+        // Unknown until the backend reports it (see ConnectionState docs).
+        supportsSteering: undefined,
         selectorsReady: false,
         sessionId: null,
         modes: null,
@@ -1271,6 +1285,8 @@ function connectionsReducer(
           embedded_context: false,
         },
         supportsFork: false,
+        // Unknown until the backend reports it (see ConnectionState docs).
+        supportsSteering: undefined,
         selectorsReady: true,
         sessionId: null,
         modes: null,
@@ -1334,6 +1350,12 @@ function connectionsReducer(
         action.patch.selectorsReady || current.selectorsReady
       const mergedSupportsFork =
         action.patch.supportsFork || current.supportsFork
+      // Latched-once, but three-state: `undefined` (unknown) must not clobber a
+      // capability the event path already confirmed, and a confirmed `false`
+      // (agent explicitly does not support steering) must not be lost either.
+      // Prefer whichever side is known; the snapshot wins when both are.
+      const mergedSupportsSteering =
+        action.patch.supportsSteering ?? current.supportsSteering
       const mergedModes = current.modes ?? action.patch.modes
       const mergedConfigOptions =
         current.configOptions ?? action.patch.configOptions
@@ -1356,6 +1378,7 @@ function connectionsReducer(
         if (
           mergedSelectorsReady === current.selectorsReady &&
           mergedSupportsFork === current.supportsFork &&
+          mergedSupportsSteering === current.supportsSteering &&
           mergedModes === current.modes &&
           mergedConfigOptions === current.configOptions &&
           mergedAvailableCommands === current.availableCommands &&
@@ -1372,6 +1395,7 @@ function connectionsReducer(
           promptCapabilities: mergedPromptCapabilities,
           selectorsReady: mergedSelectorsReady,
           supportsFork: mergedSupportsFork,
+          supportsSteering: mergedSupportsSteering,
         })
         return next
       }
@@ -1398,6 +1422,7 @@ function connectionsReducer(
         promptCapabilities: mergedPromptCapabilities,
         selectorsReady: mergedSelectorsReady,
         supportsFork: mergedSupportsFork,
+        supportsSteering: mergedSupportsSteering,
         // Staleness is a current-state field (like status): apply the snapshot's
         // value on the fresh path. `configStaleDismissed` is client-local and
         // preserved via `...current`.
@@ -2135,6 +2160,18 @@ function connectionsReducer(
       next.set(action.contextKey, {
         ...conn,
         supportsFork: action.supported,
+      })
+      return next
+    }
+
+    case "STEERING_SUPPORTED": {
+      const conn = state.get(action.contextKey)
+      if (!conn) return state
+      if (conn.supportsSteering === action.supported) return state
+      const next = new Map(state)
+      next.set(action.contextKey, {
+        ...conn,
+        supportsSteering: action.supported,
       })
       return next
     }
@@ -3392,6 +3429,14 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           flushStreamingQueue()
           dispatch({
             type: "FORK_SUPPORTED",
+            contextKey,
+            supported: e.supported,
+          })
+          break
+        case "steering_supported":
+          flushStreamingQueue()
+          dispatch({
+            type: "STEERING_SUPPORTED",
             contextKey,
             supported: e.supported,
           })

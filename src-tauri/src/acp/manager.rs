@@ -13,6 +13,7 @@ use sea_orm::{
 use crate::acp::connection::{
     spawn_agent_connection, AgentConnection, ConnectionCommand, GoalControlAction,
 };
+use crate::acp::delegation::cancel_scope::CancelScopePreview;
 use crate::acp::error::AcpError;
 use crate::acp::feedback::{
     bounded_feedback_batch, FeedbackItem, FeedbackStatus, PendingFeedback, SessionFeedbackAccess,
@@ -27,7 +28,7 @@ use crate::acp::question::{
 };
 use crate::acp::types::{
     AcpEvent, AgentOptionsSnapshot, ConfigStaleKind, ConnectionInfo, ConnectionStatus,
-    ForkResultInfo, PromptInputBlock,
+    ForkResultInfo, PromptInputBlock, SteerOutcome,
 };
 use crate::db::entities::conversation::{self, ConversationKind, ConversationStatus};
 use crate::db::service::conversation_service;
@@ -1231,6 +1232,109 @@ impl ConnectionManager {
             .map_err(|_| AcpError::ProcessExited)
     }
 
+    /// Inject a message into this connection's RUNNING turn via
+    /// `_session/steering` (R1.1) and return what the agent did with it.
+    ///
+    /// Why this exists: once the agent delegates to sub-agents, a turn can run for
+    /// minutes. Today the user's only way to say anything is to cancel — which
+    /// cascade-kills every running sub-agent. This injects into the live turn
+    /// instead, so the sub-agents keep working.
+    ///
+    /// **The return value is the point.** Unlike [`Self::goal_control`], which
+    /// discards its response, all four outcomes here mean different things to the
+    /// caller (design §2.5.1):
+    ///
+    /// | outcome | message accepted? | caller may retry? |
+    /// |---|---|---|
+    /// | `Injected` | yes, into the running turn | no — delivered |
+    /// | `StartedNewTurn` | **yes**, in a fresh detached turn | **no — already executing** |
+    /// | `Failed` | no, explicitly refused | yes, safe |
+    /// | `Unknown` | **unknowable** | **NO — never automatically** |
+    ///
+    /// `StartedNewTurn` is the trap: it reads like a fallback but the agent is
+    /// already executing the message, so re-sending it would run the user's
+    /// instruction twice (review A2). It is reported as a success and additionally
+    /// sets `detached_turn_pending` — never `turn_in_flight`, which asserts
+    /// something untrue (that a turn *we* started is running) and would wedge the
+    /// prompt gate permanently since no `TurnComplete` is ever owed to us.
+    ///
+    /// Preconditions, in order:
+    /// 1. Connection must exist / still be connected → `ConnectionNotFound`
+    ///    (`get_state_and_emitter`, the shared reachability gate — placed here at
+    ///    the `_core` layer so the Tauri command and the Web handler cannot
+    ///    diverge).
+    /// 2. Non-empty `blocks` → the agent's own `parseSteerRequest` rejects an empty
+    ///    prompt array, so reject locally instead of burning a round trip.
+    /// 3. Agent must have advertised steering at `initialize` → `SteeringUnsupported`.
+    ///    Refusing here (rather than letting the caller decide) keeps ONE authority
+    ///    for the capability: the flag is fixed for the connection's lifetime, the
+    ///    frontend's copy of it can be stale across a reconnect or agent switch, and
+    ///    an un-probed agent answers `MethodNotFound` — which would land in the
+    ///    ambiguous bucket and cost the user a "delivery unknown" for what is really
+    ///    a static, knowable "this agent can't do that".
+    ///
+    /// Deliberately does NOT touch `turn_in_flight` or the `TurnInProgress` gate:
+    /// injection is a separate channel, not a relaxation of the serial prompt rule
+    /// (design §2.7 / C1).
+    pub async fn steer(
+        &self,
+        conn_id: &str,
+        blocks: Vec<PromptInputBlock>,
+        message_id: String,
+    ) -> Result<SteerOutcome, AcpError> {
+        if blocks.is_empty() {
+            return Err(AcpError::protocol(
+                "steering message must contain at least one content block".to_string(),
+            ));
+        }
+        // Reachability gate FIRST (design §2.2.1): an unknown / disconnected
+        // `conn_id` must fail here, before any side effect. Web callers reach this
+        // only behind the existing `require_token` middleware; there is no user
+        // identity layer to bind to (`web/auth.rs` is one shared `CODEG_TOKEN`),
+        // so `conn_id` scoping is the real boundary.
+        let (state_arc, _emitter) = self
+            .get_state_and_emitter(conn_id)
+            .await
+            .ok_or_else(|| AcpError::ConnectionNotFound(conn_id.to_string()))?;
+        let cmd_tx = {
+            let connections = self.connections.lock().await;
+            let conn = connections
+                .get(conn_id)
+                .ok_or_else(|| AcpError::ConnectionNotFound(conn_id.into()))?;
+            conn.cmd_tx.clone()
+        };
+        // Per-connection capability gate. Fixed at the handshake, so a plain read
+        // is race-free (same reasoning as `feedback_tool_available`).
+        if !state_arc.read().await.agent_supports_steering {
+            return Err(AcpError::SteeringUnsupported);
+        }
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        cmd_tx
+            .send(ConnectionCommand::Steer {
+                blocks,
+                message_id,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| AcpError::ProcessExited)?;
+        // A dropped reply channel means the loop took the command and then died
+        // (or exited) without answering — the message may or may not have reached
+        // the agent. That is exactly `Unknown`, NOT an error: reporting an error
+        // invites the caller to retry, and a retry here can execute the user's
+        // instruction a second time (§2.5.1 — no idempotency key exists on the
+        // wire to make that safe).
+        match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!(
+                    "[ACP] steering reply channel closed before an outcome arrived \
+                     (conn={conn_id}); reporting Unknown \u{2014} must not auto-retry"
+                );
+                Ok(SteerOutcome::Unknown)
+            }
+        }
+    }
+
     pub async fn cancel(&self, db: &DatabaseConnection, conn_id: &str) -> Result<(), AcpError> {
         let (cmd_tx, state_arc, emitter) = {
             let connections = self.connections.lock().await;
@@ -1287,6 +1391,132 @@ impl ConnectionManager {
         }
 
         Ok(())
+    }
+
+    /// Preview what a stop on `conn_id` would destroy, and mint the token that
+    /// authorizes destroying exactly that (spec R4.1 / R4.2 · design §4).
+    ///
+    /// Read-only: nothing is cancelled here, so the UI may call it freely and
+    /// concurrent previews are fine (each gets its own token; the first commit
+    /// wins). Reachability is checked FIRST via the shared
+    /// `get_state_and_emitter` → [`AcpError::ConnectionNotFound`] path, so an
+    /// unknown / disconnected id has no side effects — and because this lives on
+    /// the manager, the Tauri command and the Web handler share the one check.
+    ///
+    /// `count == 0` means the caller should cancel directly without a
+    /// confirmation dialog (R4.4 — no noise on the common path).
+    pub async fn preview_cancel_scope(
+        &self,
+        conn_id: &str,
+    ) -> Result<CancelScopePreview, AcpError> {
+        self.get_state_and_emitter(conn_id)
+            .await
+            .ok_or_else(|| AcpError::ConnectionNotFound(conn_id.to_string()))?;
+        // No delegation stack installed (server bootstrap without a broker, or
+        // a unit-test manager) → nothing can be cascade-cancelled, so the honest
+        // preview is an empty scope, not an error.
+        let Some(inj) = self.delegation_snapshot() else {
+            return Ok(CancelScopePreview {
+                token: None,
+                count: 0,
+                task_ids: Vec::new(),
+                expires_in_ms: 0,
+            });
+        };
+        let scope = inj.broker.parent_cancel_scope(conn_id).await;
+        if scope.is_empty() {
+            // Nothing to authorize: issuing a token here would only invite a
+            // pointless confirmation round-trip.
+            return Ok(CancelScopePreview {
+                token: None,
+                count: 0,
+                task_ids: Vec::new(),
+                expires_in_ms: 0,
+            });
+        }
+        let count = scope.count();
+        let task_ids = scope.running.clone();
+        let (token, ttl) = inj.cancel_scope_tokens.issue(conn_id, scope).await;
+        Ok(CancelScopePreview {
+            token: Some(token),
+            count,
+            task_ids,
+            expires_in_ms: ttl.as_millis() as u64,
+        })
+    }
+
+    /// Cancel `conn_id`'s turn under a preview token — the confirmed half of
+    /// [`Self::preview_cancel_scope`] (spec R4.3 · design §4 token contract).
+    ///
+    /// Token validation, consumption, and the cancel all happen inside ONE
+    /// critical section (`CancelScopeTokens::commit`), so two concurrent commits
+    /// cannot both pass: exactly one takes effect, the other is rejected as
+    /// already-used. A rejected commit performs NO cancel.
+    ///
+    /// The scope may legitimately have shrunk while the dialog was open — those
+    /// delegations finished on their own — and then the returned
+    /// `terminated_task_ids` is a subset of the token's set. Callers must report
+    /// THAT, never the token's original count, or they would claim kills that
+    /// did not happen.
+    ///
+    /// If the scope GREW, the commit is refused with
+    /// [`AcpError::CancelScopeChanged`] and nothing is cancelled. This is the
+    /// authorization bound: the user approved a specific set, and
+    /// `ConnectionCommand::Cancel` unavoidably cascades over the WHOLE parent
+    /// scope (connection.rs — the cascade is deliberately unchanged, its
+    /// semantics are correct), so proceeding would destroy delegations the user
+    /// never saw. Re-previewing and re-confirming is the only safe path;
+    /// silently widening is exactly what design §4 forbids.
+    pub async fn cancel_with_scope_token(
+        &self,
+        db: &DatabaseConnection,
+        conn_id: &str,
+        token: &str,
+    ) -> Result<Vec<String>, AcpError> {
+        // Reachability first (shared `_core` check — same path as the preview).
+        self.get_state_and_emitter(conn_id)
+            .await
+            .ok_or_else(|| AcpError::ConnectionNotFound(conn_id.to_string()))?;
+        let inj = self.delegation_snapshot().ok_or_else(|| {
+            // A token can only have been issued by a preview that saw a broker;
+            // without one there is nothing this token could authorize.
+            AcpError::CancelScopeTokenRejected("no delegation broker installed".to_string())
+        })?;
+        let broker = inj.broker.clone();
+        let manager = self.clone_ref();
+        let db = db.clone();
+        let conn_owned = conn_id.to_string();
+        inj.cancel_scope_tokens
+            .commit(conn_id, token, move |authorized| async move {
+                // Re-read the scope under the token lock: the growth check and
+                // the cancel are therefore atomic with respect to token
+                // consumption (no second commit can interleave).
+                let current = broker.parent_cancel_scope(&conn_owned).await;
+                let grew = current
+                    .running
+                    .iter()
+                    .any(|id| !authorized.running.contains(id))
+                    || current
+                        .starting
+                        .iter()
+                        .any(|id| !authorized.starting.contains(id));
+                if grew {
+                    return Err(AcpError::CancelScopeChanged);
+                }
+                // Bounded cascade: drains exactly the authorized ids that are
+                // still alive, reporting actuals.
+                let terminated = broker
+                    .cancel_by_parent_turn_within(&conn_owned, &authorized)
+                    .await;
+                // Then stop the turn itself through the unchanged path (which
+                // also runs the idempotent unbounded cascade — a no-op now that
+                // the authorized set is already drained and no unauthorized
+                // delegation exists, as the growth check above just proved).
+                manager.cancel(&db, &conn_owned).await?;
+                Ok(terminated)
+            })
+            .await
+            .map_err(|e| AcpError::CancelScopeTokenRejected(e.reason().to_string()))?
     }
 
     pub async fn respond_permission(
@@ -5715,6 +5945,356 @@ mod tests {
         assert!(matches!(err, AcpError::ConnectionNotFound(_)));
     }
 
+    // -- R4 cancel-scope preview + token contract (manager `_core` layer) ----
+    //
+    // The reachability check and the token contract live here precisely so both
+    // transports share them; these tests drive the manager directly, which is
+    // the seam the Tauri command and the Web handler both call.
+
+    /// Install a delegation stack over a `MockSpawner` so preview/commit reach a
+    /// real broker without spawning processes. Returns the broker + mock so a
+    /// test can park delegations on it.
+    async fn install_mock_delegation(
+        mgr: &ConnectionManager,
+    ) -> (
+        Arc<crate::acp::delegation::broker::DelegationBroker>,
+        Arc<crate::acp::delegation::spawner::mock::MockSpawner>,
+    ) {
+        use crate::acp::delegation::broker::{
+            ConversationDepthLookup, DelegationBroker, DelegationConfig,
+        };
+        use crate::acp::delegation::spawner::{mock::MockSpawner, ConnectionSpawner};
+        use crate::acp::delegation::types::DelegationError;
+
+        struct RootDepth;
+        #[async_trait::async_trait]
+        impl ConversationDepthLookup for RootDepth {
+            async fn parent_of(&self, _id: i32) -> Result<Option<i32>, DelegationError> {
+                Ok(None)
+            }
+        }
+        struct AllEnabled;
+        #[async_trait::async_trait]
+        impl crate::acp::connection::AgentAvailabilityLookup for AllEnabled {
+            async fn disabled_agent_wire_slugs(&self) -> Vec<String> {
+                Vec::new()
+            }
+        }
+
+        let mock = Arc::new(MockSpawner::new());
+        let broker = Arc::new(DelegationBroker::new(
+            mock.clone() as Arc<dyn ConnectionSpawner>,
+            Arc::new(RootDepth) as Arc<dyn ConversationDepthLookup>,
+        ));
+        broker
+            .set_config(DelegationConfig {
+                enabled: true,
+                ..DelegationConfig::default()
+            })
+            .await;
+        mgr.install_delegation(crate::acp::connection::DelegationInjection {
+            broker: broker.clone(),
+            tokens: Arc::new(crate::acp::delegation::listener::TokenRegistry::default()),
+            socket_path: PathBuf::from("/tmp/codeg-mcp-test.sock"),
+            agent_availability: Arc::new(AllEnabled)
+                as Arc<dyn crate::acp::connection::AgentAvailabilityLookup>,
+            feedback: crate::acp::feedback::FeedbackRuntimeConfig::new(),
+            ask: crate::acp::question::QuestionRuntimeConfig::new(),
+            sessions: crate::acp::session_info::SessionInfoRuntimeConfig::new(),
+            questions: Arc::new(ConnectionManagerQuestionLookup {
+                manager: Arc::new(mgr.clone_ref()),
+            }) as Arc<dyn SessionQuestionAccess>,
+            plan_approvals: Arc::new(ConnectionManagerPlanApprovalLookup {
+                manager: Arc::new(mgr.clone_ref()),
+            }) as Arc<dyn SessionPlanApprovalAccess>,
+            cancel_scope_tokens: crate::acp::delegation::cancel_scope::CancelScopeTokens::new(),
+        });
+        (broker, mock)
+    }
+
+    /// Park one running delegation owned by `conn_id`, returning its task id.
+    async fn park_one_delegation(
+        broker: &crate::acp::delegation::broker::DelegationBroker,
+        mock: &crate::acp::delegation::spawner::mock::MockSpawner,
+        conn_id: &str,
+        tag: &str,
+    ) -> String {
+        mock.queue_spawn(Ok(format!("child-{tag}"))).await;
+        mock.queue_send(Ok(7)).await;
+        let ack = broker
+            .start_delegation(crate::acp::delegation::types::DelegationRequest {
+                parent_connection_id: conn_id.to_string(),
+                parent_conversation_id: 1,
+                parent_tool_use_id: format!("pt-{tag}"),
+                agent_type: AgentType::ClaudeCode,
+                task: "do x".into(),
+                working_dir: None,
+                requested_working_dir: None,
+                external_handle: None,
+            })
+            .await;
+        ack.task_id.expect("running ack carries a task id")
+    }
+
+    /// Preview reports the scoped count and mints a token; commit then reports
+    /// the ids actually terminated.
+    #[tokio::test]
+    async fn preview_then_commit_terminates_the_previewed_set() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mgr = ConnectionManager::new();
+        let (broker, mock) = install_mock_delegation(&mgr).await;
+        let _rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        let t1 = park_one_delegation(&broker, &mock, "c1", "a").await;
+
+        let preview = mgr.preview_cancel_scope("c1").await.expect("preview");
+        assert_eq!(preview.count, 1);
+        assert_eq!(preview.task_ids, vec![t1.clone()]);
+        let token = preview.token.clone().expect("count > 0 must carry a token");
+
+        let terminated = mgr
+            .cancel_with_scope_token(&db.conn, "c1", &token)
+            .await
+            .expect("commit under a fresh token must succeed");
+        assert_eq!(terminated, vec![t1]);
+    }
+
+    /// One-shot: the second submit is refused AND performs no second cancel.
+    /// Proven on state, not just the error — a second cancel would have to find
+    /// something to drain, so we park a NEW delegation before re-submitting and
+    /// assert it survives.
+    #[tokio::test]
+    async fn same_token_twice_is_rejected_and_cancels_nothing_further() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mgr = ConnectionManager::new();
+        let (broker, mock) = install_mock_delegation(&mgr).await;
+        let _rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        park_one_delegation(&broker, &mock, "c1", "a").await;
+
+        let token = mgr
+            .preview_cancel_scope("c1")
+            .await
+            .expect("preview")
+            .token
+            .expect("token");
+        mgr.cancel_with_scope_token(&db.conn, "c1", &token)
+            .await
+            .expect("first commit succeeds");
+
+        // A fresh delegation appears; re-submitting the dead token must not
+        // touch it.
+        let survivor = park_one_delegation(&broker, &mock, "c1", "b").await;
+        let err = mgr
+            .cancel_with_scope_token(&db.conn, "c1", &token)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AcpError::CancelScopeTokenRejected(_)),
+            "expected a token rejection, got {err:?}"
+        );
+        let report = broker
+            .get_task_status(
+                "c1",
+                Some(1),
+                &survivor,
+                crate::acp::delegation::broker::StatusWait::Immediate,
+            )
+            .await;
+        assert_eq!(
+            report.status,
+            crate::acp::delegation::types::TaskStatus::Running,
+            "a re-submitted token must not produce a second cancel"
+        );
+    }
+
+    /// A token issued for connection A is refused against connection B, and B's
+    /// delegation survives.
+    #[tokio::test]
+    async fn token_from_one_connection_is_refused_on_another() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mgr = ConnectionManager::new();
+        let (broker, mock) = install_mock_delegation(&mgr).await;
+        let _rx1 = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        let _rx2 = mgr
+            .insert_test_connection_live("c2", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        park_one_delegation(&broker, &mock, "c1", "a").await;
+        let victim = park_one_delegation(&broker, &mock, "c2", "b").await;
+
+        let token = mgr
+            .preview_cancel_scope("c1")
+            .await
+            .expect("preview")
+            .token
+            .expect("token");
+        let err = mgr
+            .cancel_with_scope_token(&db.conn, "c2", &token)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AcpError::CancelScopeTokenRejected(_)));
+        let report = broker
+            .get_task_status(
+                "c2",
+                Some(1),
+                &victim,
+                crate::acp::delegation::broker::StatusWait::Immediate,
+            )
+            .await;
+        assert_eq!(
+            report.status,
+            crate::acp::delegation::types::TaskStatus::Running,
+            "a cross-connection token must not kill the other connection's work"
+        );
+    }
+
+    /// An expired token is REJECTED, not downgraded to "cancel the current set".
+    #[tokio::test]
+    async fn expired_token_is_rejected_and_cancels_nothing() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mgr = ConnectionManager::new();
+        let (broker, mock) = install_mock_delegation(&mgr).await;
+        let _rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        let survivor = park_one_delegation(&broker, &mock, "c1", "a").await;
+
+        let token = mgr
+            .preview_cancel_scope("c1")
+            .await
+            .expect("preview")
+            .token
+            .expect("token");
+        let tokens = mgr
+            .delegation_snapshot()
+            .expect("injection installed")
+            .cancel_scope_tokens;
+        tokens.expire_now_for_test(&token).await;
+
+        let err = mgr
+            .cancel_with_scope_token(&db.conn, "c1", &token)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AcpError::CancelScopeTokenRejected(_)));
+        let report = broker
+            .get_task_status(
+                "c1",
+                Some(1),
+                &survivor,
+                crate::acp::delegation::broker::StatusWait::Immediate,
+            )
+            .await;
+        assert_eq!(
+            report.status,
+            crate::acp::delegation::types::TaskStatus::Running,
+            "an expired token must not fall back to cancelling the current set"
+        );
+    }
+
+    /// Two concurrent commits with DIFFERENT tokens: exactly one takes effect.
+    /// The loser is refused (its token is fine, but the scope it authorized was
+    /// already drained), and in no case is the delegation cancelled twice.
+    #[tokio::test]
+    async fn two_concurrent_commits_only_one_takes_effect() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mgr = ConnectionManager::new();
+        let (broker, mock) = install_mock_delegation(&mgr).await;
+        let _rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        park_one_delegation(&broker, &mock, "c1", "a").await;
+
+        // Concurrent previews are read-only and each mints its own token.
+        let t1 = mgr
+            .preview_cancel_scope("c1")
+            .await
+            .expect("preview")
+            .token
+            .expect("token");
+        let t2 = mgr
+            .preview_cancel_scope("c1")
+            .await
+            .expect("preview")
+            .token
+            .expect("token");
+        assert_ne!(t1, t2, "each preview mints its own token");
+
+        let (r1, r2) = tokio::join!(
+            mgr.cancel_with_scope_token(&db.conn, "c1", &t1),
+            mgr.cancel_with_scope_token(&db.conn, "c1", &t2)
+        );
+        let effective = [&r1, &r2]
+            .iter()
+            .filter(|r| r.as_ref().is_ok_and(|ids| !ids.is_empty()))
+            .count();
+        assert_eq!(
+            effective, 1,
+            "exactly one commit may terminate the delegation; got {r1:?} / {r2:?}"
+        );
+        // Nothing is left running either way.
+        assert_eq!(broker.pending_count().await, 0);
+    }
+
+    /// Both entry points reject an unknown / disconnected `conn_id` through the
+    /// shared `get_state_and_emitter` path, with no side effects.
+    #[tokio::test]
+    async fn unknown_connection_is_rejected_on_preview_and_commit() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mgr = ConnectionManager::new();
+        let (broker, mock) = install_mock_delegation(&mgr).await;
+        // A live connection with a delegation, so a leaked cancel would be
+        // observable.
+        let _rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        let untouched = park_one_delegation(&broker, &mock, "c1", "a").await;
+
+        let err = mgr.preview_cancel_scope("ghost").await.unwrap_err();
+        assert!(
+            matches!(err, AcpError::ConnectionNotFound(_)),
+            "preview on an unknown conn_id must be ConnectionNotFound, got {err:?}"
+        );
+        let err = mgr
+            .cancel_with_scope_token(&db.conn, "ghost", "any-token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AcpError::ConnectionNotFound(_)),
+            "commit on an unknown conn_id must be ConnectionNotFound, got {err:?}"
+        );
+
+        let report = broker
+            .get_task_status(
+                "c1",
+                Some(1),
+                &untouched,
+                crate::acp::delegation::broker::StatusWait::Immediate,
+            )
+            .await;
+        assert_eq!(
+            report.status,
+            crate::acp::delegation::types::TaskStatus::Running,
+            "an unreachable-connection rejection must have no side effects"
+        );
+    }
+
+    /// No delegations → no token and `count == 0`, the signal to cancel directly
+    /// without a confirmation step (R4.4).
+    #[tokio::test]
+    async fn preview_on_idle_connection_needs_no_confirmation() {
+        let mgr = ConnectionManager::new();
+        install_mock_delegation(&mgr).await;
+        mgr.insert_test_connection("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        let preview = mgr.preview_cancel_scope("c1").await.expect("preview");
+        assert_eq!(preview.count, 0);
+        assert!(preview.token.is_none());
+    }
+
     #[tokio::test]
     async fn submit_feedback_appends_when_turn_in_flight() {
         let mgr = ConnectionManager::new();
@@ -6143,5 +6723,321 @@ mod tests {
         // Commit on a missing connection is a safe no-op.
         mgr.commit_feedback_delivered("nope", vec!["x".into()])
             .await;
+    }
+
+    // =====================================================================
+    // T2 — Steer command path (R1.1 · design §2.2 / §2.4 / §2.5.1)
+    // =====================================================================
+
+    fn steer_blocks(text: &str) -> Vec<PromptInputBlock> {
+        vec![PromptInputBlock::Text {
+            text: text.to_string(),
+        }]
+    }
+
+    /// Register a steering-capable connection and return its command receiver.
+    /// Mirrors what the `initialize` probe does on a real connection: the
+    /// capability flag is what `steer` gates on.
+    async fn steerable_conn(
+        mgr: &ConnectionManager,
+        id: &str,
+    ) -> tokio::sync::mpsc::Receiver<ConnectionCommand> {
+        let rx = mgr
+            .insert_test_connection_live(id, AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        mgr.get_state(id)
+            .await
+            .unwrap()
+            .write()
+            .await
+            .agent_supports_steering = true;
+        rx
+    }
+
+    /// Stand in for the connection loop's Steer arm: answer with `outcome` and
+    /// report back the `message_id` and blocks it actually received.
+    fn fake_steer_loop(
+        mut rx: tokio::sync::mpsc::Receiver<ConnectionCommand>,
+        outcome: SteerOutcome,
+    ) -> tokio::task::JoinHandle<(usize, Option<String>)> {
+        tokio::spawn(async move {
+            let mut deliveries = 0usize;
+            let mut seen_id = None;
+            while let Some(cmd) = rx.recv().await {
+                if let ConnectionCommand::Steer {
+                    message_id, reply, ..
+                } = cmd
+                {
+                    deliveries += 1;
+                    seen_id = Some(message_id);
+                    let _ = reply.send(Ok(outcome));
+                    break;
+                }
+            }
+            (deliveries, seen_id)
+        })
+    }
+
+    /// Each of the agent's three outcomes must reach the caller AS ITSELF. The
+    /// caller's queue transition differs per value (delivered / retry-safe /
+    /// ask-the-user), so any flattening here destroys the feature's semantics.
+    #[tokio::test]
+    async fn steer_returns_each_agent_outcome_distinctly_to_the_caller() {
+        for expected in [
+            SteerOutcome::Injected,
+            SteerOutcome::StartedNewTurn,
+            SteerOutcome::Failed,
+        ] {
+            let mgr = ConnectionManager::new();
+            let rx = steerable_conn(&mgr, "c-steer").await;
+            let loop_handle = fake_steer_loop(rx, expected);
+
+            let got = mgr
+                .steer("c-steer", steer_blocks("hi"), "m-1".into())
+                .await
+                .expect("a reached verdict is Ok, never Err");
+            assert_eq!(
+                got, expected,
+                "outcome must pass through unmodified; {expected:?} drives a \
+                 different queue transition than the others"
+            );
+
+            let (deliveries, seen_id) = loop_handle.await.unwrap();
+            assert_eq!(deliveries, 1, "the message must be sent exactly once");
+            assert_eq!(seen_id.as_deref(), Some("m-1"));
+        }
+    }
+
+    /// `startedNewTurn` (design §2.4 / review A2 — the single most important
+    /// correctness constraint in T2). The agent has ALREADY started executing the
+    /// message, so:
+    ///   - it must be reported as delivered (never re-sent), and
+    ///   - `turn_in_flight` must be untouched — that flag means "a turn WE
+    ///     initiated is running", nothing would ever clear it for a detached turn,
+    ///     and the prompt gate / cancel / flush paths all depend on its truth.
+    #[tokio::test]
+    async fn started_new_turn_is_delivered_once_and_never_touches_turn_in_flight() {
+        let mgr = ConnectionManager::new();
+        let mut rx = steerable_conn(&mgr, "c-detach").await;
+
+        // Baseline: no turn of ours is in flight.
+        let state_before = mgr.get_state("c-detach").await.unwrap();
+        assert!(!state_before.read().await.turn_in_flight);
+
+        let state_for_loop = mgr.get_state("c-detach").await.unwrap();
+        let loop_handle = tokio::spawn(async move {
+            let mut steers = 0usize;
+            let mut prompts = 0usize;
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    ConnectionCommand::Steer { reply, .. } => {
+                        steers += 1;
+                        // What the real arm does on this outcome: record the
+                        // DETACHED turn, deliberately NOT `turn_in_flight`.
+                        state_for_loop
+                            .write()
+                            .await
+                            .apply_event(&AcpEvent::DetachedTurnPending { pending: true });
+                        let _ = reply.send(Ok(SteerOutcome::StartedNewTurn));
+                        break;
+                    }
+                    // A re-send would arrive here — the exact double-execution
+                    // this test exists to forbid.
+                    ConnectionCommand::Prompt { .. } => prompts += 1,
+                    _ => {}
+                }
+            }
+            (steers, prompts)
+        });
+
+        let got = mgr
+            .steer("c-detach", steer_blocks("status?"), "m-detach".into())
+            .await
+            .unwrap();
+        assert_eq!(got, SteerOutcome::StartedNewTurn);
+        assert!(
+            got.is_delivered(),
+            "startedNewTurn is a SUCCESS — the message is already executing, so \
+             the caller must not re-send it"
+        );
+
+        let (steers, prompts) = loop_handle.await.unwrap();
+        assert_eq!(steers, 1, "delivered exactly once");
+        assert_eq!(
+            prompts, 0,
+            "the message must NOT be re-sent through the normal prompt path — \
+             that would execute the same user instruction twice (review A2)"
+        );
+
+        let snap = mgr.get_state("c-detach").await.unwrap();
+        let s = snap.read().await;
+        assert!(
+            !s.turn_in_flight,
+            "`turn_in_flight` must stay false: the detached turn is \
+             agent-initiated, no TurnComplete is owed to us, so setting it would \
+             wedge the prompt gate forever (review R2-A3)"
+        );
+        assert!(
+            s.detached_turn_pending,
+            "the detached turn must be recorded in its own honestly-named state"
+        );
+    }
+
+    /// No response at all (the loop takes the command, then the process dies
+    /// without answering) → `Unknown`, and NOT an `Err`. An `Err` here would read
+    /// as "it failed, resend" to the caller, and a resend can execute a message
+    /// the agent may already have accepted (no wire idempotency key exists).
+    #[tokio::test]
+    async fn steer_with_no_response_reports_unknown_and_does_not_retry() {
+        let mgr = ConnectionManager::new();
+        let mut rx = steerable_conn(&mgr, "c-dead").await;
+
+        let loop_handle = tokio::spawn(async move {
+            let mut steers = 0usize;
+            let mut prompts = 0usize;
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    // Drop the reply sender without answering: the agent process
+                    // died mid-request. Whether it got the message is unknowable.
+                    ConnectionCommand::Steer { reply, .. } => {
+                        steers += 1;
+                        drop(reply);
+                    }
+                    ConnectionCommand::Prompt { .. } => prompts += 1,
+                    _ => {}
+                }
+            }
+            (steers, prompts)
+        });
+
+        let got = mgr
+            .steer("c-dead", steer_blocks("are you there"), "m-dead".into())
+            .await
+            .expect("an unknown result is an outcome, not an error");
+        assert_eq!(
+            got,
+            SteerOutcome::Unknown,
+            "no response ⇒ Unknown: we cannot claim it was delivered NOR that it \
+             failed (design §2.5.1)"
+        );
+        assert!(!got.is_delivered());
+
+        // Nothing may auto-retry: the manager must not resend on its own, on
+        // either channel.
+        drop(mgr);
+        let (steers, prompts) = loop_handle.await.unwrap();
+        assert_eq!(
+            steers, 1,
+            "exactly ONE steering attempt — an automatic retry risks executing \
+             the user's instruction twice"
+        );
+        assert_eq!(prompts, 0, "and no fallback prompt either");
+    }
+
+    /// Reachability gate (design §2.2.1), enforced at the `_core` layer so the
+    /// Tauri command and the Web handler share it. Unknown / disconnected
+    /// `conn_id` → `ConnectionNotFound`, with no side effects.
+    #[tokio::test]
+    async fn steer_unknown_connection_is_rejected_with_connection_not_found() {
+        let mgr = ConnectionManager::new();
+        let err = mgr
+            .steer("no-such-conn", steer_blocks("hi"), "m".into())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AcpError::ConnectionNotFound(ref id) if id == "no-such-conn"),
+            "expected ConnectionNotFound, got {err:?}"
+        );
+        assert_eq!(err.code(), Some("connection_not_found"));
+
+        // A disconnected connection (its loop gone, receiver dropped) must also be
+        // refused rather than silently accepted.
+        let rx = steerable_conn(&mgr, "c-gone").await;
+        drop(rx);
+        let err = mgr
+            .steer("c-gone", steer_blocks("hi"), "m".into())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AcpError::ProcessExited),
+            "a dead connection loop must surface as ProcessExited, got {err:?}"
+        );
+    }
+
+    /// Capability gate: an agent that never advertised steering is refused
+    /// locally. Deliberately a distinct error from the four outcomes — this is a
+    /// static, knowable "can't", not an ambiguous delivery result, so the user
+    /// must not be told "delivery unknown".
+    #[tokio::test]
+    async fn steer_is_refused_when_the_agent_never_advertised_the_capability() {
+        let mgr = ConnectionManager::new();
+        // Note: NOT `steerable_conn` — capability left at its default `false`.
+        let mut rx = mgr
+            .insert_test_connection_live("c-plain", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+
+        let err = mgr
+            .steer("c-plain", steer_blocks("hi"), "m".into())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AcpError::SteeringUnsupported),
+            "expected SteeringUnsupported, got {err:?}"
+        );
+        assert_eq!(err.code(), Some("steering_unsupported"));
+        assert!(
+            rx.try_recv().is_err(),
+            "an unsupported agent must receive NO command at all"
+        );
+    }
+
+    /// Empty prompt is rejected before the round trip: the agent's own
+    /// `parseSteerRequest` requires a non-empty `prompt` array, so sending would
+    /// draw an `InvalidParams` and burn a request to learn what we already know.
+    #[tokio::test]
+    async fn steer_rejects_an_empty_prompt_without_reaching_the_agent() {
+        let mgr = ConnectionManager::new();
+        let mut rx = steerable_conn(&mgr, "c-empty").await;
+        let err = mgr.steer("c-empty", vec![], "m".into()).await.unwrap_err();
+        assert!(
+            matches!(err, AcpError::Protocol(_)),
+            "expected a protocol rejection, got {err:?}"
+        );
+        assert!(rx.try_recv().is_err(), "nothing may be enqueued");
+    }
+
+    /// The `TurnInProgress` serial-prompt gate is NOT relaxed by steering (C1 /
+    /// design §2.7): injection is a separate channel, so a steer succeeds while a
+    /// turn is in flight AND leaves the gate exactly as it was.
+    #[tokio::test]
+    async fn steer_neither_bypasses_nor_disturbs_the_turn_in_progress_gate() {
+        let mgr = ConnectionManager::new();
+        let rx = steerable_conn(&mgr, "c-busy").await;
+        // A turn of ours IS running — the normal case for steering.
+        mgr.get_state("c-busy")
+            .await
+            .unwrap()
+            .write()
+            .await
+            .turn_in_flight = true;
+        let loop_handle = fake_steer_loop(rx, SteerOutcome::Injected);
+
+        let got = mgr
+            .steer("c-busy", steer_blocks("also check X"), "m-busy".into())
+            .await
+            .expect("steering mid-turn is exactly the supported case");
+        assert_eq!(got, SteerOutcome::Injected);
+        loop_handle.await.unwrap();
+
+        assert!(
+            mgr.get_state("c-busy")
+                .await
+                .unwrap()
+                .read()
+                .await
+                .turn_in_flight,
+            "the in-flight turn's gate must be left untouched — steering neither \
+             clears it nor pretends to own it"
+        );
     }
 }
