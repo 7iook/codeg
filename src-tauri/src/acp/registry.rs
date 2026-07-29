@@ -168,7 +168,7 @@ pub fn builtin_acp_agents() -> Vec<AgentType> {
     ]
 }
 
-/// Every agent codeg can currently drive: the twelve built-ins followed by the
+/// Every agent codeg can currently drive: the built-ins followed by the
 /// user's registered custom ACP agents (sorted by id).
 pub fn all_acp_agents() -> Vec<AgentType> {
     let mut agents = builtin_acp_agents();

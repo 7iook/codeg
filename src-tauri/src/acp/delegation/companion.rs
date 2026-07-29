@@ -1417,7 +1417,7 @@ mod tests {
         let desc = close["description"].as_str().unwrap();
         assert!(desc.contains("Release"), "close description: {desc}");
         assert!(!desc.to_lowercase().contains("permanently"));
-        // delegate_to_agent schema still enumerates all 12 agent types.
+        // delegate_to_agent schema still enumerates every built-in agent type.
         let delegate = tools
             .iter()
             .find(|t| t["name"] == "delegate_to_agent")
@@ -1425,7 +1425,10 @@ mod tests {
         let agents = delegate["inputSchema"]["properties"]["agent_type"]["enum"]
             .as_array()
             .unwrap();
-        assert_eq!(agents.len(), 12);
+        assert_eq!(
+            agents.len(),
+            crate::acp::registry::builtin_acp_agents().len()
+        );
         assert!(agents.iter().any(|a| a == "hermes"));
         assert!(agents.iter().any(|a| a == "code_buddy"));
         assert!(agents.iter().any(|a| a == "kimi_code"));
@@ -1471,11 +1474,21 @@ mod tests {
             .as_array()
             .unwrap()
             .clone();
-        assert_eq!(agents.len(), 14, "12 builtins + 2 distinct customs");
+        assert_eq!(
+            agents.len(),
+            crate::acp::registry::builtin_acp_agents().len() + 2,
+            "all builtins + 2 distinct customs"
+        );
         // Builtins keep the embedded order and come first.
         assert_eq!(agents[0], "claude_code");
-        assert_eq!(agents[12], "custom:goose");
-        assert_eq!(agents[13], "custom:amp");
+        assert_eq!(
+            agents[crate::acp::registry::builtin_acp_agents().len()],
+            "custom:goose"
+        );
+        assert_eq!(
+            agents[crate::acp::registry::builtin_acp_agents().len() + 1],
+            "custom:amp"
+        );
         // The other delegation tools carry no agent_type and are untouched.
         let status = tools
             .as_array()
@@ -1510,13 +1523,20 @@ mod tests {
             .as_array()
             .unwrap()
             .clone();
-        assert_eq!(agents.len(), 11, "12 builtins - 2 disabled + 1 custom");
+        assert_eq!(
+            agents.len(),
+            crate::acp::registry::builtin_acp_agents().len() - 2 + 1,
+            "all builtins - 2 disabled + 1 custom"
+        );
         assert!(!agents.contains(&serde_json::json!("codex")));
         assert!(!agents.contains(&serde_json::json!("grok")));
         // Survivors keep the embedded order, customs still come last.
         assert_eq!(agents[0], "claude_code");
         assert_eq!(agents[1], "open_code");
-        assert_eq!(agents[10], "custom:goose");
+        assert_eq!(
+            agents[crate::acp::registry::builtin_acp_agents().len() - 2],
+            "custom:goose"
+        );
     }
 
     // An empty disabled list (the parent omitted `--disabled-agents`) leaves
@@ -1538,9 +1558,35 @@ mod tests {
             .as_array()
             .unwrap()
             .clone();
-        assert_eq!(agents.len(), 12);
-        assert_eq!(agents[0], "claude_code");
-        assert_eq!(agents[11], "cursor");
+        // GATE: the embedded enum must cover EXACTLY the built-in registry —
+        // derived from `builtin_acp_agents()`, never a hand-written count or
+        // slug list. Two independently-maintained copies of the same roster is
+        // what let Kiro (13th built-in) ship missing from this enum: the panel
+        // offered per-agent delegation defaults for an agent the parent LLM
+        // could never name, so every Kiro override was dead config.
+        //
+        // Compared as SETS, not sequences: the embedded order is deliberate
+        // (it steers which agent the parent LLM reaches for first, and the
+        // order assertions above depend on it), so it intentionally differs
+        // from the registry's declaration order. Membership is the contract;
+        // ordering is a separate editorial choice.
+        let expected: std::collections::BTreeSet<String> =
+            crate::acp::registry::builtin_acp_agents()
+                .iter()
+                .map(|a| a.as_wire().to_string())
+                .collect();
+        let actual: std::collections::BTreeSet<String> = agents
+            .iter()
+            .map(|a| a.as_str().unwrap().to_string())
+            .collect();
+        let missing: Vec<&String> = expected.difference(&actual).collect();
+        let extra: Vec<&String> = actual.difference(&expected).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "delegate_to_agent enum drifted from builtin_acp_agents(): \
+             missing {missing:?}, unexpected {extra:?} — add the new agent to \
+             tool_schema.json (a built-in absent here can never be delegated to)"
+        );
     }
 
     #[tokio::test]
