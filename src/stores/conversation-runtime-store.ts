@@ -2850,13 +2850,33 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
             (prev.transcript_watermark ?? null) !==
               (detail.transcript_watermark ?? null) ||
             prev.turns.length !== detail.turns.length
+          // REGRESSION GUARD. Both sides measure byte offsets of the same
+          // transcript, so a read whose watermark is strictly BEHIND what we
+          // already show is a stale snapshot — never new truth. Committing it
+          // rewinds the rendered turn to an earlier step (the user sees the
+          // last step vanish), and because `replyPending` is derived from the
+          // same stale read it can also report "settled" and stop the poll, so
+          // the rewind is permanent until a manual refresh. This happens on the
+          // narrow window where the backend has already cleared
+          // `in_flight_user_turn_id` (TurnComplete) but the transcript's final
+          // bytes have not been flushed yet: the read then looks settled AND
+          // short. Treat it as still pending so the next tick picks up the
+          // flushed bytes. Only meaningful when both watermarks exist — a
+          // no-watermark agent (OpenCode/Gemini grows its turn in place) has no
+          // byte ordering to compare and keeps its existing settle path.
+          const prevWatermark = prev?.transcript_watermark ?? null
+          const nextWatermark = detail.transcript_watermark ?? null
+          const isStaleRewind =
+            prevWatermark !== null &&
+            nextWatermark !== null &&
+            nextWatermark < prevWatermark
           // Commit when the transcript advanced (`changed`) OR when the reply
           // just settled (`!replyPending`). The settle case lands the FINAL
           // content for a no-watermark agent that grows its partial assistant
           // turn IN PLACE (OpenCode/Gemini): its final read shares the partial's
           // null watermark and turn count, so `changed` alone would suppress it
           // and the poll would then stop, freezing the viewer on the partial.
-          if (isLatest && (changed || !replyPending)) {
+          if (isLatest && !isStaleRewind && (changed || !replyPending)) {
             dispatch({
               type: "FETCH_DETAIL_SUCCESS",
               conversationId,
@@ -2864,7 +2884,12 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
               preserveLive: false,
             })
           }
-          if (replyPending && n + 1 < VIEWER_DETAIL_SYNC_DELAYS_MS.length) {
+          // A stale rewind keeps polling even though the read claimed to be
+          // settled — the flushed bytes are what we are waiting for.
+          if (
+            (replyPending || isStaleRewind) &&
+            n + 1 < VIEWER_DETAIL_SYNC_DELAYS_MS.length
+          ) {
             timer = setTimeout(
               () => attempt(n + 1),
               VIEWER_DETAIL_SYNC_DELAYS_MS[n + 1]

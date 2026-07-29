@@ -475,6 +475,51 @@ describe("syncViewerDetail — pure viewer refetch", () => {
     await vi.advanceTimersByTimeAsync(5000)
     expect(mockGet).toHaveBeenCalledTimes(2)
   })
+
+  it("never rewinds to a settled-looking read whose transcript is BEHIND what is shown", async () => {
+    vi.useFakeTimers()
+    // The reported bug: the backend clears `in_flight_user_turn_id` at
+    // TurnComplete, but the transcript's final bytes flush a moment later. A read
+    // landing in that window looks SETTLED (no in-flight stamp, assistant tail)
+    // yet is SHORT — it is missing the last step. Committing it rewound the
+    // rendered turn (the final step vanished) and, because the same read reported
+    // "settled", the poll stopped: the rewind persisted until a manual refresh.
+    seed({
+      // Already showing the full three-step reply at byte 300.
+      detail: detail(
+        [userTurn("u", "go"), assistantTurn("a", "step1 step2 step3")],
+        300
+      ),
+    })
+    mockGet
+      // Attempt 0: stale snapshot — settled-looking, but only 200 bytes in.
+      .mockResolvedValueOnce(
+        detail([userTurn("u", "go"), assistantTurn("a", "step1 step2")], 200)
+      )
+      // Attempt 1: the flushed transcript, at/after what we already had.
+      .mockResolvedValueOnce(
+        detail(
+          [userTurn("u", "go"), assistantTurn("a", "step1 step2 step3")],
+          300
+        )
+      )
+
+    sync()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    // The stale read must NOT have been committed.
+    expect(session()?.detail?.transcript_watermark).toBe(300)
+    const afterStale = session()?.detail?.turns ?? []
+    const staleText = afterStale[afterStale.length - 1]?.blocks?.[0]
+    expect(staleText?.type === "text" ? staleText.text : null).toBe(
+      "step1 step2 step3"
+    )
+
+    // ...and the poll must keep going despite the read claiming to be settled.
+    await vi.advanceTimersByTimeAsync(300)
+    expect(mockGet).toHaveBeenCalledTimes(2)
+    expect(session()?.detail?.transcript_watermark).toBe(300)
+  })
 })
 
 describe("syncViewerDetail — cancellation", () => {
