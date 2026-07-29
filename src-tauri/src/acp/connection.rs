@@ -334,6 +334,14 @@ pub struct AgentConnection {
     /// (and their own child processes, e.g. MCP servers) never leak as orphans
     /// when the host process exits before `ChildGuard::drop` can run on the
     /// connection driver thread.
+    ///
+    /// Reset to `0` by the paired `on_exit` callback the moment the process is
+    /// *reaped* — the only moment its pid stops naming our child and becomes
+    /// reassignable. That reset is what keeps the backstop from ever aiming at
+    /// a pid the OS has since handed to an unrelated process. Notably it does
+    /// NOT fire merely because the connection ended: `ChildGuard::drop` signals
+    /// the tree without waiting, so the agent may still be alive and still
+    /// needs the backstop.
     pub child_pid: Arc<std::sync::atomic::AtomicU32>,
 }
 
@@ -976,6 +984,16 @@ pub async fn spawn_agent_connection(
         .on_spawn({
             let child_pid = Arc::clone(&child_pid);
             move |pid| child_pid.store(pid, std::sync::atomic::Ordering::SeqCst)
+        })
+        // Paired with `on_spawn`: publish 0 again once the process has been
+        // reaped, so the shutdown backstop can never `kill_tree` a pid the OS
+        // has already handed to someone else. Fires ONLY on a real reap — a
+        // connection that merely ended keeps its pid published, because the
+        // vendored `ChildGuard` signals the tree without waiting and the agent
+        // may still be running.
+        .on_exit({
+            let child_pid = Arc::clone(&child_pid);
+            move || child_pid.store(0, std::sync::atomic::Ordering::SeqCst)
         });
 
     // Path policy for the ACP `fs/*` channel. Built HERE rather than inside
