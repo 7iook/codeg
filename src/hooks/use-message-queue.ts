@@ -2,12 +2,28 @@
 
 import { useCallback, useRef, useState } from "react"
 import type { PromptDraft } from "@/lib/types"
+import type { QueueItemStatus } from "@/lib/steering-queue"
 import { randomUUID } from "@/lib/utils"
 
 export interface QueuedMessage {
   id: string
   draft: PromptDraft
   modeId: string | null
+  /**
+   * Stable delivery identity, distinct from `id`.
+   *
+   * `id` is the React list key and is REASSIGNED whenever a bounced draft is
+   * re-queued (`requeueFront` mints a fresh item), so it cannot answer "have I
+   * already delivered this message?". `messageId` is minted once per user
+   * message and threaded to the backend as the steer request's `messageId`.
+   *
+   * Local bookkeeping only: `_session/steering` accepts no idempotency key, so
+   * this prevents THIS client from double-sending but does not make delivery
+   * exactly-once end to end (design §2.5.1).
+   */
+  messageId: string
+  /** Delivery state. See `QueueItemStatus`. */
+  status: QueueItemStatus
 }
 
 export interface UseMessageQueueReturn {
@@ -19,7 +35,27 @@ export interface UseMessageQueueReturn {
    * so it retries before items that were already behind it (FIFO preserved).
    */
   requeueFront: (draft: PromptDraft, modeId: string | null) => void
+  /**
+   * Take the first CLAIMABLE (`queued`) item and remove it from the queue, for
+   * the auto-flush's ordinary-prompt path.
+   *
+   * Skips past a head that is `in_flight` / `delivered` / `unknown` rather than
+   * shifting it out: a "send now" injection leaves its item in place while the
+   * request is out, and shifting it would hand the same message to the flush for
+   * a second delivery (design §2.3.1).
+   */
   dequeue: () => QueuedMessage | undefined
+  /**
+   * Atomically claim `id` for delivery: flips `queued` → `in_flight` and returns
+   * true. Returns false if the item is gone or is not `queued` — i.e. the caller
+   * LOST the race and must not send.
+   *
+   * This is the single gate both dequeue paths ("send now" and auto-flush) pass
+   * through, so one queue item can never produce two deliveries.
+   */
+  markInFlight: (id: string) => boolean
+  /** Move an item to `status`, leaving its queue position untouched. */
+  setStatus: (id: string, status: QueueItemStatus) => void
   remove: (id: string) => void
   reorder: (items: QueuedMessage[]) => void
   updateItem: (id: string, draft: PromptDraft) => void
@@ -34,6 +70,22 @@ export interface UseMessageQueueReturn {
   editingItemId: string | null
   startEditing: (id: string) => void
   cancelEditing: () => void
+}
+
+/**
+ * A fresh queue item. Every entry starts `queued` — the only claimable state —
+ * and gets its own `messageId`, including a `requeueFront` retry of a bounced
+ * draft (a bounce means the send was rejected, so that draft has no prior
+ * delivery to be confused with).
+ */
+function newItem(draft: PromptDraft, modeId: string | null): QueuedMessage {
+  return {
+    id: randomUUID(),
+    draft,
+    modeId,
+    messageId: randomUUID(),
+    status: "queued",
+  }
 }
 
 export function useMessageQueue(): UseMessageQueueReturn {
@@ -58,24 +110,57 @@ export function useMessageQueue(): UseMessageQueueReturn {
 
   const enqueue = useCallback(
     (draft: PromptDraft, modeId: string | null) => {
-      commit([...queueRef.current, { id: randomUUID(), draft, modeId }])
+      commit([...queueRef.current, newItem(draft, modeId)])
     },
     [commit]
   )
 
   const requeueFront = useCallback(
     (draft: PromptDraft, modeId: string | null) => {
-      commit([{ id: randomUUID(), draft, modeId }, ...queueRef.current])
+      commit([newItem(draft, modeId), ...queueRef.current])
     },
     [commit]
   )
 
   const dequeue = useCallback((): QueuedMessage | undefined => {
     const current = queueRef.current
-    if (current.length === 0) return undefined
-    commit(current.slice(1))
-    return current[0]
+    // First CLAIMABLE item, not blindly the head: an item mid-injection stays in
+    // the queue while its request is out, and shifting it out here would hand the
+    // same message to the flush for a second delivery.
+    const index = current.findIndex((item) => item.status === "queued")
+    if (index === -1) return undefined
+    commit(current.filter((_, i) => i !== index))
+    return current[index]
   }, [commit])
+
+  const markInFlight = useCallback(
+    (id: string): boolean => {
+      const current = queueRef.current
+      const item = current.find((entry) => entry.id === id)
+      // Lost the race (already claimed / delivered / gone): the caller must NOT
+      // send. Returning a boolean rather than throwing keeps the loser silent —
+      // this is an expected outcome of two paths sharing one queue.
+      if (!item || item.status !== "queued") return false
+      commit(
+        current.map((entry) =>
+          entry.id === id ? { ...entry, status: "in_flight" } : entry
+        )
+      )
+      return true
+    },
+    [commit]
+  )
+
+  const setStatus = useCallback(
+    (id: string, status: QueueItemStatus) => {
+      const current = queueRef.current
+      if (!current.some((item) => item.id === id)) return
+      commit(
+        current.map((item) => (item.id === id ? { ...item, status } : item))
+      )
+    },
+    [commit]
+  )
 
   const remove = useCallback(
     (id: string) => {
@@ -140,6 +225,8 @@ export function useMessageQueue(): UseMessageQueueReturn {
     enqueue,
     requeueFront,
     dequeue,
+    markInFlight,
+    setStatus,
     remove,
     reorder,
     updateItem,

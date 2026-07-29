@@ -2472,7 +2472,16 @@
         "saveEdit": "저장",
         "cancelEdit": "편집 취소",
         "editItem": "편집",
-        "deleteItem": "삭제"
+        "deleteItem": "삭제",
+        "willSendAfterTurn": "이번 턴이 끝난 뒤 전송됩니다",
+        "sendNow": "지금 전송",
+        "sendNowTooltip": "지금 전송 — 현재 출력을 중단합니다",
+        "statusSending": "전송 중…",
+        "statusUnknown": "전송 결과 알 수 없음",
+        "statusUnknownTooltip": "응답이 오지 않아 에이전트가 받았는지 알 수 없습니다. 꼭 필요할 때만 다시 보내세요.",
+        "resend": "다시 전송",
+        "sendNowRefused": "현재 단계에서는 메시지를 넣을 수 없습니다. 메시지는 대기열에 남아 있습니다.",
+        "sendNowUnknown": "응답이 오지 않아 메시지가 전달됐는지 알 수 없습니다. 대기열에 남아 있으니 다시 보낼지 직접 결정하세요."
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "설정 > 에이전트",

@@ -55,10 +55,46 @@ const DEFAULT_COMMAND_COLOR_ENV: [(&str, &str); 1] = [("CLICOLOR_FORCE", "1")];
 /// `UntypedMessage`, and hence gated on the `initialize`-time capability probe
 /// (`parse_steering_supported`) rather than assumed present.
 ///
-/// Two agents implement this same name with different outcome unions; see
-/// [`classify_steer_outcome`]. Named as a constant so the wiring gate can anchor
-/// on one definition rather than a scattered string literal.
+/// Only `claude-agent-acp` is known to implement this today (verified against
+/// its installed dist). `codex-acp` v1.1.2 has ZERO hits for `steer` /
+/// `_session/steering`, so the `failed` outcome in [`classify_steer_outcome`] is
+/// a dormant forward-compat branch with no production producer — do not treat it
+/// as observed behavior. Named as a constant so the wiring gate can anchor on
+/// one definition rather than a scattered string literal.
 const STEERING_METHOD: &str = "_session/steering";
+
+/// How long to wait for the agent's answer to `_session/steering` before giving
+/// up and reporting [`SteerOutcome::Unknown`].
+///
+/// WHY A TIMEOUT IS REQUIRED AT ALL: `block_task()` folds "no response" into an
+/// `InternalError` only when the response CHANNEL CLOSES
+/// (`sacp-11.0.0/src/jsonrpc.rs:2972-2975` — "response to `{}` never received").
+/// A peer that stays connected and simply never answers closes nothing, so that
+/// await has no upper bound and yields neither value nor error. Without this cap
+/// the request outlives the user's interest in it forever.
+///
+/// WHY 10s: steering is a FOREGROUND, user-initiated action — the user pressed
+/// "send now" and is watching for their message to land in the turn currently on
+/// screen. The budget is therefore an interaction budget, not a work budget, and
+/// is deliberately an order of magnitude tighter than this file's other waits:
+/// `INIT_TIMEOUT` 60s and `SPAWN_HANDSHAKE_TIMEOUT_SECS` 60s cover process
+/// startup, `FS_IO_TIMEOUT` 30s covers disk. The nearest analogue is
+/// `DIAG_PROBE_TIMEOUT` (5s), for a probe with no user waiting on a live turn.
+/// 10s sits just above that: enough headroom for a busy agent mid-generation to
+/// service one small ext request (the handler only pushes onto the session's
+/// input stream), short enough that the user is told "unknown" while the turn
+/// they aimed at is plausibly still running. Checked for a reusable
+/// control-plane constant first — this crate has none; every timeout above is
+/// scoped to a different concern, so reusing one would have imported an
+/// unrelated budget rather than shared a real convention.
+///
+/// WHY THE TIMEOUT MAPS TO `Unknown`, NEVER `Failed`: an elapsed request proves
+/// nothing about delivery. The agent may have accepted the message and lost only
+/// the response. `Failed` asserts "definitively not accepted", which would both
+/// state a fact we do not have and make a retry look safe — and the wire carries
+/// no idempotency key (see [`build_steering_request`]), so that retry is a real
+/// double-execution risk. `Unknown` never auto-retries (design §2.5.1).
+const STEERING_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn merge_agent_env(
     env: &[(&'static str, &'static str)],
@@ -4665,37 +4701,92 @@ fn steer_error_proves_rejection(e: &sacp::Error) -> bool {
     )
 }
 
-/// Send the `_session/steering` extension request: inject `blocks` into the
-/// session's RUNNING turn so a user whose agent has delegated to sub-agents can
-/// still talk to it without cancelling the turn (R1.1).
+/// The outgoing half of steering, behind a trait so tests can observe the exact
+/// request that would go on the wire and choose the agent's answer.
 ///
-/// Sent via `UntypedMessage` because `_session/…` is an agent private extension
-/// with no sacp typed variant — the same escape hatch `send_goal_control` and
-/// `set_session_config_option_inner` use.
+/// Exists because the real send is only reachable through `ConnectionTo<Agent>`,
+/// which needs a live agent handshake — so the wire contract (method name, params
+/// shape) and the outcome mapping used to be guarded only by source-text
+/// assertions. Those could not fail when the production call site was broken
+/// (E-085: a gate that reads source shape is not a behavior gate), which is why
+/// this seam replaced them.
+#[async_trait::async_trait]
+trait SteerTransport {
+    /// Send the extension request and yield the agent's raw JSON answer.
+    async fn send_ext_request(&self, req: UntypedMessage)
+        -> Result<serde_json::Value, sacp::Error>;
+}
+
+/// Production [`SteerTransport`]: the real ACP peer.
 ///
-/// Wire params are exactly `{sessionId, prompt}` (anchored on the agent's own
-/// `parseSteerRequest`, `claude-agent-acp/dist/acp-agent.js:67-81`, which requires
-/// a non-empty `sessionId` and a non-empty `prompt` array). Note what is NOT
-/// there: any idempotency key. That absence is why [`SteerOutcome::Unknown`]
-/// exists and why it must never be auto-retried.
-///
-/// NEVER returns `Err` for a steer that reached a verdict — the four-way outcome
-/// IS the result, and an `Err` here would collapse the refusal/unknown
-/// distinction the caller depends on. `Err` is reserved for the local, pre-send
-/// failure of building the request.
-async fn send_steering(
-    cx: &ConnectionTo<Agent>,
+/// Owns its `ConnectionTo<Agent>` (rather than borrowing) because the send is
+/// driven from a detached task — see [`spawn_steering_request`] for why it must
+/// not run on the connection command loop. The handle is `Clone`, so this costs
+/// one cheap copy per steer on a control-plane path.
+struct AgentSteerTransport {
+    cx: ConnectionTo<Agent>,
+}
+
+#[async_trait::async_trait]
+impl SteerTransport for AgentSteerTransport {
+    async fn send_ext_request(
+        &self,
+        req: UntypedMessage,
+    ) -> Result<serde_json::Value, sacp::Error> {
+        self.cx.send_request_to(Agent, req).block_task().await
+    }
+}
+
+/// Build the steering request. Split out so the wire contract — the method name
+/// and the `{sessionId, prompt}` params shape — is assertable without a live peer.
+fn build_steering_request(
     session_id: &SessionId,
     blocks: Vec<PromptInputBlock>,
-) -> Result<SteerOutcome, sacp::Error> {
+) -> Result<UntypedMessage, sacp::Error> {
     let params = serde_json::json!({
         "sessionId": session_id,
         "prompt": map_prompt_blocks(blocks),
     });
-    let untyped_req = UntypedMessage::new(STEERING_METHOD, params).map_err(|e| {
-        sacp::util::internal_error(format!("Failed to build steering request: {e}"))
-    })?;
-    match cx.send_request_to(Agent, untyped_req).block_task().await {
+    UntypedMessage::new(STEERING_METHOD, params)
+        .map_err(|e| sacp::util::internal_error(format!("Failed to build steering request: {e}")))
+}
+
+/// Transport-agnostic core of [`send_steering`]: build → send → classify. Carries
+/// the whole outcome contract, so a fake transport can exercise all four results
+/// (see the `steer_wire_*` / `steer_outcome_*` tests).
+///
+/// The send is capped at [`STEERING_REQUEST_TIMEOUT`]: a peer that stays
+/// connected and never answers makes the inner await unbounded (see that
+/// constant for the `block_task` dependency fact). Elapsing is the THIRD path
+/// into [`SteerOutcome::Unknown`], alongside a non-proving transport error and an
+/// unreadable answer — it is NOT a change to
+/// [`steer_error_proves_rejection`]'s classification, which stays exactly as
+/// reviewed.
+async fn send_steering_via<T: SteerTransport + ?Sized>(
+    transport: &T,
+    session_id: &SessionId,
+    blocks: Vec<PromptInputBlock>,
+) -> Result<SteerOutcome, sacp::Error> {
+    let untyped_req = build_steering_request(session_id, blocks)?;
+    let sent = match tokio::time::timeout(
+        STEERING_REQUEST_TIMEOUT,
+        transport.send_ext_request(untyped_req),
+    )
+    .await
+    {
+        Ok(sent) => sent,
+        Err(_elapsed) => {
+            // The peer is still connected but never answered. Whether it took
+            // the message is unknowable — report `Unknown`, never `Failed`.
+            tracing::warn!(
+                "[ACP] steering delivery result UNKNOWN: no response within {:?} \
+                 \u{2014} must not auto-retry",
+                STEERING_REQUEST_TIMEOUT
+            );
+            return Ok(SteerOutcome::Unknown);
+        }
+    };
+    match sent {
         Ok(raw) => Ok(classify_steer_outcome(&raw)),
         Err(e) => {
             if steer_error_proves_rejection(&e) {
@@ -4712,6 +4803,100 @@ async fn send_steering(
             }
         }
     }
+}
+
+/// The side effect a steer outcome owes the session state, extracted so it is
+/// testable against the real production code path rather than a fake loop.
+///
+/// Only `StartedNewTurn` records anything: the turn settled agent-side between
+/// the manager's path choice and this send, so the message is ALREADY running in
+/// a turn whose end we can never observe (§2.4). It is recorded as
+/// `detached_turn_pending` and deliberately NOT as `turn_in_flight` — that flag
+/// means "a turn WE started is running", nothing would ever clear it for an
+/// agent-initiated turn, and setting it would wedge the prompt gate forever
+/// (review R2-A3).
+async fn record_steer_side_effects(
+    state: &Arc<RwLock<SessionState>>,
+    emitter: &EventEmitter,
+    outcome: SteerOutcome,
+) {
+    if outcome == SteerOutcome::StartedNewTurn {
+        emit_with_state(
+            state,
+            emitter,
+            AcpEvent::DetachedTurnPending { pending: true },
+        )
+        .await;
+    }
+}
+
+/// Drive one steering request to completion OFF the connection command loop, and
+/// answer the caller's oneshot from there.
+///
+/// WHY THIS IS SPAWNED RATHER THAN AWAITED IN THE ARM: while the loop is parked
+/// on an `.await` inside a match arm, it dequeues nothing else — including
+/// [`ConnectionCommand::Cancel`] and [`ConnectionCommand::Disconnect`]. A hung
+/// `_session/steering` would therefore take away the stop button, which is the
+/// one control the user must never lose (and the feature exists to GIVE them
+/// control mid-turn, so blocking it is self-defeating). Capping the duration
+/// alone is not sufficient: a bounded block is still a block, and 10s without a
+/// working Cancel is 10s of a frozen connection. Off-loop, the loop's next
+/// `recv()` happens immediately.
+///
+/// Safe to run detached: `ConnectionTo<Agent>` is `Clone` and `block_task` is
+/// documented for use from a spawned task (`sacp-11.0.0/src/jsonrpc.rs:2939`);
+/// the state handle and emitter are already `Arc`/`Clone`, so the side effect a
+/// `startedNewTurn` owes the session ([`record_steer_side_effects`]) still lands
+/// on the real session state.
+///
+/// The caller's oneshot is the existing reply channel, so the outcome reaches
+/// `ConnectionManager::steer` by exactly the same route as before — nothing
+/// downstream can tell whether the arm or this task answered. If the task is
+/// dropped before answering (connection torn down), the sender drops and the
+/// manager already reads a closed channel as `Unknown`, which is the correct
+/// reading of "we never learned the result".
+///
+/// Generic over the transport so the loop-responsiveness test can drive THIS
+/// function — the real dispatch — with a peer that never answers, instead of
+/// re-implementing the dispatch shape in the test (which would leave the
+/// production path unguarded).
+// Eight parameters because this is the loop arm's whole context, moved verbatim
+// into a detached task: transport + session + state + emitter + payload + reply +
+// a log tag. Bundling them into a struct would add a type whose only purpose is
+// to satisfy the lint, and would obscure that every field is already owned by the
+// caller (the same reason `set_session_config_option` above carries the allow).
+#[allow(clippy::too_many_arguments)]
+fn spawn_steering_request<T>(
+    transport: T,
+    sid: SessionId,
+    state: Arc<RwLock<SessionState>>,
+    emitter: EventEmitter,
+    blocks: Vec<PromptInputBlock>,
+    message_id: String,
+    reply: tokio::sync::oneshot::Sender<Result<SteerOutcome, AcpError>>,
+    origin: &'static str,
+) where
+    T: SteerTransport + Send + Sync + 'static,
+{
+    tokio::spawn(async move {
+        match send_steering_via(&transport, &sid, blocks).await {
+            Ok(o) => {
+                tracing::info!(
+                    "[ACP] steering delivered {origin}: outcome={o:?} message_id={message_id}"
+                );
+                record_steer_side_effects(&state, &emitter, o).await;
+                let _ = reply.send(Ok(o));
+            }
+            Err(e) => {
+                // Local pre-send failure only (building the request); every
+                // outcome that reached the agent, including a refusal and a
+                // timeout, comes back as `Ok`.
+                let _ = reply.send(Err(AcpError::protocol(format!(
+                    "Failed to send steering: {e}"
+                ))));
+            }
+        }
+    });
 }
 
 /// Apply user-saved mode and config-option preferences to a freshly-attached
@@ -6248,43 +6433,25 @@ async fn run_conversation_loop<'a>(
                                     message_id,
                                     reply,
                                 }) => {
-                                    let outcome = send_steering(&cx, &sid, blocks).await;
-                                    match outcome {
-                                        Ok(o) => {
-                                            tracing::info!(
-                                                "[ACP] steering delivered mid-turn: outcome={o:?} \
-                                                 message_id={message_id}"
-                                            );
-                                            // `startedNewTurn` here means the turn
-                                            // settled agent-side between the
-                                            // manager's atomic path choice and this
-                                            // send. The message is ALREADY running
-                                            // in a turn we can never see the end of
-                                            // (§2.4) — record that honestly instead
-                                            // of touching `turn_in_flight`, which
-                                            // still describes only OUR turn.
-                                            if o == SteerOutcome::StartedNewTurn {
-                                                emit_with_state(
-                                                    state,
-                                                    emitter,
-                                                    AcpEvent::DetachedTurnPending {
-                                                        pending: true,
-                                                    },
-                                                )
-                                                .await;
-                                            }
-                                            let _ = reply.send(Ok(o));
-                                        }
-                                        Err(e) => {
-                                            // Local pre-send failure only (building
-                                            // the request); every outcome that
-                                            // reached the agent, including a
-                                            // refusal, comes back as `Ok`.
-                                            let _ = reply.send(Err(AcpError::protocol(
-                                                format!("Failed to send steering: {e}"),
-                                            )));
-                                        }
-                                    }
+                                    // Dispatched OFF this loop on purpose: awaiting
+                                    // the ext request here would stop dequeuing
+                                    // commands, so a hung `_session/steering` would
+                                    // block Cancel and Disconnect — taking away the
+                                    // stop button mid-turn. See
+                                    // `spawn_steering_request`. The reply channel is
+                                    // unchanged, so the outcome (including the
+                                    // `startedNewTurn` → `detached_turn_pending`
+                                    // side effect) reaches the manager identically.
+                                    spawn_steering_request(
+                                        AgentSteerTransport { cx: cx.clone() },
+                                        sid.clone(),
+                                        Arc::clone(state),
+                                        emitter.clone(),
+                                        blocks,
+                                        message_id,
+                                        reply,
+                                        "mid-turn",
+                                    );
                                 }
                                 Some(ConnectionCommand::Cancel) => {
                                     // Send CancelNotification to agent to stop the current turn
@@ -6507,35 +6674,21 @@ async fn run_conversation_loop<'a>(
                 message_id,
                 reply,
             }) => {
-                let cx = session.connection();
-                let sid = session.session_id().clone();
-                match send_steering(&cx, &sid, blocks).await {
-                    Ok(o) => {
-                        tracing::info!(
-                            "[ACP] steering delivered while idle: outcome={o:?} \
-                             message_id={message_id}"
-                        );
-                        if o == SteerOutcome::StartedNewTurn {
-                            // Expected on this path. Track it as what it is: an
-                            // agent-initiated turn we cannot observe the end of.
-                            // NOT `turn_in_flight` — no `TurnComplete` is owed to
-                            // us, so setting that flag would wedge the connection
-                            // into rejecting every later prompt forever.
-                            emit_with_state(
-                                state,
-                                emitter,
-                                AcpEvent::DetachedTurnPending { pending: true },
-                            )
-                            .await;
-                        }
-                        let _ = reply.send(Ok(o));
-                    }
-                    Err(e) => {
-                        let _ = reply.send(Err(AcpError::protocol(format!(
-                            "Failed to send steering: {e}"
-                        ))));
-                    }
-                }
+                // Off-loop for the same reason as the in-turn arm: a hung
+                // `_session/steering` must not stop this loop from dequeuing the
+                // next Cancel / Prompt / Disconnect. See `spawn_steering_request`.
+                spawn_steering_request(
+                    AgentSteerTransport {
+                        cx: session.connection().clone(),
+                    },
+                    session.session_id().clone(),
+                    Arc::clone(state),
+                    emitter.clone(),
+                    blocks,
+                    message_id,
+                    reply,
+                    "while idle",
+                );
             }
             Some(ConnectionCommand::Cancel) => {
                 let cx = session.connection();
@@ -10096,25 +10249,628 @@ mod tests {
         )));
     }
 
-    /// WIRING GATE (E-091 / E-052 · design §8 negative-mutation criterion).
+    // ------------------------------------------------------------------
+    // Steering WIRE + OUTCOME behavior tests (replacing the former
+    // source-needle wiring gate).
+    //
+    // Why these exist: the previous gate (`steer_arm_reachable_in_prompting_state`)
+    // read its own source with `include_str!` and counted `concat!`-split
+    // needles. An independent reviewer mutated the production send from
+    // `UntypedMessage::new(STEERING_METHOD, ..)` to
+    // `UntypedMessage::new("_session/broken", ..)` and EVERY predicate still
+    // passed (Arms=2 InTurnArms=1 SendCalls=2 MethodConsts=1 → PASS with a
+    // broken production wire). The reason is structural: the gate asserted the
+    // constant's DEFINITION line still existed, while the call site passes that
+    // constant by name — so breaking the call site left the needle untouched.
+    // Adding more needles cannot fix that class; only asserting observable
+    // behavior can. `SteerTransport` is the seam that makes it observable.
+    // ------------------------------------------------------------------
+
+    /// Fake ACP peer: records the request that would go on the wire and answers
+    /// with a caller-chosen response. Follows the established `Mock*` +
+    /// `#[async_trait]` test-double pattern (cf. `MockSpawner` /
+    /// `MockEventEmitter` in `acp/delegation/`).
+    struct FakeSteerPeer {
+        /// Every request handed to the transport, in call order.
+        seen: std::sync::Mutex<Vec<UntypedMessage>>,
+        /// What the "agent" answers.
+        response: Result<serde_json::Value, sacp::Error>,
+    }
+
+    impl FakeSteerPeer {
+        fn answering(outcome: &str) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+                response: Ok(serde_json::json!({ "outcome": outcome })),
+            }
+        }
+
+        fn failing(e: sacp::Error) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+                response: Err(e),
+            }
+        }
+
+        fn only_request(&self) -> UntypedMessage {
+            let seen = self.seen.lock().unwrap();
+            assert_eq!(seen.len(), 1, "expected exactly one steering request");
+            seen[0].clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SteerTransport for FakeSteerPeer {
+        async fn send_ext_request(
+            &self,
+            req: UntypedMessage,
+        ) -> Result<serde_json::Value, sacp::Error> {
+            self.seen.lock().unwrap().push(req);
+            self.response.clone()
+        }
+    }
+
+    /// So a test can hand the peer to `spawn_steering_request` (which takes the
+    /// transport by value, `'static`) and still inspect what it recorded.
+    #[async_trait::async_trait]
+    impl SteerTransport for Arc<FakeSteerPeer> {
+        async fn send_ext_request(
+            &self,
+            req: UntypedMessage,
+        ) -> Result<serde_json::Value, sacp::Error> {
+            (**self).send_ext_request(req).await
+        }
+    }
+
+    fn steer_text_blocks(text: &str) -> Vec<PromptInputBlock> {
+        vec![PromptInputBlock::Text {
+            text: text.to_string(),
+        }]
+    }
+
+    /// THE mutation the old gate could not catch: the method string that actually
+    /// goes on the wire. `_session/broken` (or any other value) must fail here.
+    #[tokio::test]
+    async fn steer_wire_method_is_session_steering() {
+        let peer = FakeSteerPeer::answering("injected");
+        let sid = SessionId::new("s-1");
+        send_steering_via(&peer, &sid, steer_text_blocks("hi"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            peer.only_request().method(),
+            "_session/steering",
+            "the wire method is the contract both claude-agent-acp and codex-acp \
+             implement; any other value means the request reaches no handler and \
+             the feature is dead"
+        );
+    }
+
+    /// The params shape the agent's own `parseSteerRequest` requires: exactly
+    /// `{sessionId, prompt}`, with the caller's blocks passed through.
+    #[tokio::test]
+    async fn steer_wire_params_carry_session_id_and_prompt_blocks() {
+        let peer = FakeSteerPeer::answering("injected");
+        let sid = SessionId::new("sess-42");
+        send_steering_via(&peer, &sid, steer_text_blocks("please stop"))
+            .await
+            .unwrap();
+
+        let params = peer.only_request().params().clone();
+        assert_eq!(
+            params["sessionId"], "sess-42",
+            "the agent rejects a request whose sessionId is absent or wrong"
+        );
+        let prompt = params["prompt"]
+            .as_array()
+            .expect("`prompt` must be an array — the agent requires a non-empty one");
+        assert_eq!(prompt.len(), 1, "the caller's blocks must pass through");
+        assert_eq!(
+            prompt[0]["text"], "please stop",
+            "the user's actual text must reach the agent, not a placeholder"
+        );
+        // Exactly these two keys: an extra key would mean we invented a wire
+        // field the agent never parses (e.g. a fake idempotency key, whose
+        // absence is precisely why `SteerOutcome::Unknown` exists).
+        let obj = params.as_object().expect("params is an object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["prompt", "sessionId"]);
+    }
+
+    /// Multi-block passthrough: nothing may be dropped or reordered on the way
+    /// to the agent.
+    #[tokio::test]
+    async fn steer_wire_preserves_every_block_in_order() {
+        let peer = FakeSteerPeer::answering("injected");
+        let sid = SessionId::new("s-multi");
+        let blocks = vec![
+            PromptInputBlock::Text {
+                text: "first".into(),
+            },
+            PromptInputBlock::Text {
+                text: "second".into(),
+            },
+        ];
+        send_steering_via(&peer, &sid, blocks).await.unwrap();
+
+        let params = peer.only_request().params().clone();
+        let prompt = params["prompt"].as_array().unwrap();
+        assert_eq!(prompt.len(), 2, "no block may be dropped");
+        assert_eq!(prompt[0]["text"], "first");
+        assert_eq!(prompt[1]["text"], "second");
+    }
+
+    /// Outcome passthrough, the second mutation the old gate missed: forcing the
+    /// reply to always report `Injected` must fail here. Each agent answer maps
+    /// to its own caller-visible outcome, because each drives a DIFFERENT queue
+    /// transition (delivered / retry-safe / ask-the-user).
+    #[tokio::test]
+    async fn steer_outcome_passthrough_is_faithful_per_agent_answer() {
+        for (answer, expected) in [
+            ("injected", SteerOutcome::Injected),
+            ("startedNewTurn", SteerOutcome::StartedNewTurn),
+            ("failed", SteerOutcome::Failed),
+        ] {
+            let peer = FakeSteerPeer::answering(answer);
+            let sid = SessionId::new("s-out");
+            let got = send_steering_via(&peer, &sid, steer_text_blocks("x"))
+                .await
+                .expect("a reached verdict is Ok, never Err");
+            assert_eq!(
+                got, expected,
+                "agent answered `{answer}`; collapsing it into any other outcome \
+                 destroys the caller's retry decision"
+            );
+        }
+    }
+
+    /// An explicit refusal FROM the agent (a response came back) is `Failed` —
+    /// definitively not accepted, so a retry is safe.
+    #[tokio::test]
+    async fn steer_explicit_refusal_error_is_failed_not_unknown() {
+        for code in [
+            sacp::ErrorCode::MethodNotFound,
+            sacp::ErrorCode::InvalidParams,
+            sacp::ErrorCode::ResourceNotFound,
+        ] {
+            let peer = FakeSteerPeer::failing(sacp::Error::from(code));
+            let sid = SessionId::new("s-refuse");
+            let got = send_steering_via(&peer, &sid, steer_text_blocks("x"))
+                .await
+                .expect("a refusal is an outcome, not an Err");
+            assert_eq!(
+                got,
+                SteerOutcome::Failed,
+                "{code:?} is an answer from the agent, so the message is \
+                 definitively not in its input"
+            );
+            assert!(!got.is_delivered());
+        }
+    }
+
+    /// No response ever arrived → `Unknown`, never `Failed`. Reporting this as a
+    /// proven rejection would invite a retry that can execute the user's
+    /// instruction twice (no wire idempotency key exists).
+    #[tokio::test]
+    async fn steer_no_response_is_unknown_and_never_a_proven_rejection() {
+        let never_received =
+            sacp::util::internal_error("response to `_session/steering` never received: closed");
+        let peer = FakeSteerPeer::failing(never_received);
+        let sid = SessionId::new("s-dead");
+        let got = send_steering_via(&peer, &sid, steer_text_blocks("are you there"))
+            .await
+            .expect("an unknown result is an outcome, not an error");
+        assert_eq!(got, SteerOutcome::Unknown);
+        assert!(
+            !got.is_delivered(),
+            "an unknown delivery must not be reported as delivered"
+        );
+    }
+
+    /// An unreadable / unknown answer body is `Unknown`, not a silent success.
+    #[tokio::test]
+    async fn steer_unreadable_answer_is_unknown() {
+        let peer = FakeSteerPeer {
+            seen: std::sync::Mutex::new(Vec::new()),
+            response: Ok(serde_json::json!({ "outcome": "something-new" })),
+        };
+        let sid = SessionId::new("s-weird");
+        let got = send_steering_via(&peer, &sid, steer_text_blocks("x"))
+            .await
+            .unwrap();
+        assert_eq!(got, SteerOutcome::Unknown);
+    }
+
+    /// The third mutation: inverting the `StartedNewTurn` branch. Only that
+    /// outcome may record the detached turn, and it must NEVER be recorded as
+    /// `turn_in_flight` (nothing would ever clear that flag for an
+    /// agent-initiated turn, wedging the prompt gate forever — review R2-A3).
+    #[tokio::test]
+    async fn steer_side_effects_record_detached_turn_only_for_started_new_turn() {
+        use crate::web::event_bridge::WebEventBroadcaster;
+
+        for outcome in [
+            SteerOutcome::Injected,
+            SteerOutcome::StartedNewTurn,
+            SteerOutcome::Failed,
+            SteerOutcome::Unknown,
+        ] {
+            let state = Arc::new(RwLock::new(SessionState::new(
+                "c-steer".to_string(),
+                AgentType::ClaudeCode,
+                None,
+                "main".to_string(),
+                None,
+            )));
+            let emitter = EventEmitter::test_web_only(Arc::new(WebEventBroadcaster::new()));
+
+            record_steer_side_effects(&state, &emitter, outcome).await;
+
+            let s = state.read().await;
+            let should_be_pending = outcome == SteerOutcome::StartedNewTurn;
+            assert_eq!(
+                s.detached_turn_pending, should_be_pending,
+                "{outcome:?}: the detached turn must be recorded for \
+                 startedNewTurn and ONLY for it — recording it elsewhere \
+                 reports a turn that is not running, omitting it here loses the \
+                 only trace of a turn already executing the user's message"
+            );
+            assert!(
+                !s.turn_in_flight,
+                "{outcome:?}: `turn_in_flight` means \"a turn WE started is \
+                 running\"; the steer path must never write it (no TurnComplete \
+                 is ever owed to us for a detached turn)"
+            );
+        }
+    }
+
+    /// A peer that stays CONNECTED and simply never answers must not hang the
+    /// caller forever: the request is capped and the caller is told `Unknown`.
     ///
-    /// The behavioral tests above all pass while `ConnectionCommand::Steer` is
-    /// unreachable in production: they exercise the classifier, not the assembly
-    /// point. Steering is only meaningful DURING a turn, and the prompting-state
-    /// command handler lives inside `run_conversation_loop`'s in-turn `select!`,
-    /// which needs a live agent handshake — there is no unit-reachable seam, so the
-    /// assertion is on the source layout instead.
+    /// This is the exact shape `block_task` cannot detect on its own — it folds
+    /// "never received" into an `InternalError` only when the response channel
+    /// CLOSES (`sacp-11.0.0/src/jsonrpc.rs:2972-2975`), and a silent-but-live peer
+    /// closes nothing. Uses tokio's paused clock so the assertion is on the
+    /// BUDGET, not on wall-clock luck.
+    #[tokio::test(start_paused = true)]
+    async fn steer_silent_peer_times_out_as_unknown_within_the_budget() {
+        /// Never answers, never closes anything — a live but unresponsive agent.
+        struct SilentPeer;
+
+        #[async_trait::async_trait]
+        impl SteerTransport for SilentPeer {
+            async fn send_ext_request(
+                &self,
+                _req: UntypedMessage,
+            ) -> Result<serde_json::Value, sacp::Error> {
+                std::future::pending().await
+            }
+        }
+
+        let started = tokio::time::Instant::now();
+        let got = send_steering_via(
+            &SilentPeer,
+            &SessionId::new("s-silent"),
+            steer_text_blocks("are you there"),
+        )
+        .await
+        .expect("a timeout is a verdict (Unknown), never a transport Err");
+
+        assert_eq!(
+            got,
+            SteerOutcome::Unknown,
+            "no response is genuinely unclassifiable — the agent may have \
+             accepted the message and lost only the reply"
+        );
+        // The cap must actually bound the wait. Without a timeout this future
+        // never resolves and the test hangs instead of reaching this line.
+        assert!(
+            started.elapsed() <= STEERING_REQUEST_TIMEOUT,
+            "the wait must be bounded by STEERING_REQUEST_TIMEOUT, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A timeout must NOT be reported as `Failed`, and must not present itself as
+    /// retry-safe.
     ///
-    /// Without this gate the feature can be "complete" and 100% dead: the in-turn
-    /// match ends in a catch-all `_ => {}`, so a missing `Steer` arm silently
-    /// discards the command (and its oneshot) rather than failing to compile.
+    /// `Failed` means "the agent answered and definitively did not take the
+    /// message", which makes a re-send safe. A timeout proves no such thing, and
+    /// the wire has no idempotency key, so labelling it `Failed` would invite a
+    /// duplicate execution of the user's instruction. Distinct from the previous
+    /// test: that one asserts the budget, this one pins the CLASSIFICATION.
+    #[tokio::test(start_paused = true)]
+    async fn steer_timeout_is_never_failed_and_never_retry_safe() {
+        struct SilentPeer;
+
+        #[async_trait::async_trait]
+        impl SteerTransport for SilentPeer {
+            async fn send_ext_request(
+                &self,
+                _req: UntypedMessage,
+            ) -> Result<serde_json::Value, sacp::Error> {
+                std::future::pending().await
+            }
+        }
+
+        let got = send_steering_via(
+            &SilentPeer,
+            &SessionId::new("s-silent"),
+            steer_text_blocks("hello"),
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(
+            got,
+            SteerOutcome::Failed,
+            "a timeout must never claim the message was rejected — `Failed` \
+             states a fact we do not have and makes a retry look safe"
+        );
+        assert!(
+            !got.is_delivered(),
+            "nor may a timeout claim delivery — that would drop the user's \
+             message while telling them it landed"
+        );
+        assert_eq!(got, SteerOutcome::Unknown);
+    }
+
+    /// A silent peer must be attempted EXACTLY ONCE. The timeout is a give-up, not
+    /// a trigger for an internal retry: the agent may already hold the message.
+    #[tokio::test(start_paused = true)]
+    async fn steer_timeout_does_not_resend_the_request() {
+        struct CountingSilentPeer {
+            sends: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl SteerTransport for CountingSilentPeer {
+            async fn send_ext_request(
+                &self,
+                _req: UntypedMessage,
+            ) -> Result<serde_json::Value, sacp::Error> {
+                self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending().await
+            }
+        }
+
+        let peer = CountingSilentPeer {
+            sends: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let got = send_steering_via(
+            &peer,
+            &SessionId::new("s-once"),
+            steer_text_blocks("only once"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(got, SteerOutcome::Unknown);
+        assert_eq!(
+            peer.sends.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the request must be sent once and only once — an automatic re-send \
+             after a timeout can execute the user's instruction twice"
+        );
+    }
+
+    /// THE load-bearing test for the P1: while a steering request is outstanding
+    /// and unanswered, the connection's command loop must still process `Cancel`.
     ///
-    /// ⚠️ Needles are assembled with `concat!` for a reason: `include_str!` reads
-    /// THIS file, so a whole-literal needle would match the test's own source and
-    /// the gate would stay green even with the production arm deleted (E-085: a
-    /// self-satisfying assertion is a fake gate). Split pieces appear verbatim only
-    /// in production code, so the counts below mean something. Verified by deleting
-    /// the production arm and watching this test fail.
+    /// The defect was structural, not merely slow: the arm awaited the ext request
+    /// INSIDE the loop's match, so a hung `_session/steering` stopped the loop from
+    /// dequeuing anything — including the Cancel that is the user's last resort.
+    /// A test that only checks "the timeout fires" would not have caught it, since
+    /// a bounded block is still a block.
+    ///
+    /// This drives the REAL production dispatch (`spawn_steering_request`, the
+    /// exact function both arms call) against a peer that never answers, then
+    /// asserts the loop reached the NEXT command. Replacing the dispatch with an
+    /// inline `send_steering_via(...).await` in the loop below makes this fail:
+    /// `Cancel` is never dequeued within the window.
+    #[tokio::test]
+    async fn steering_request_does_not_block_the_command_loop() {
+        use crate::web::event_bridge::WebEventBroadcaster;
+        use std::time::Duration;
+
+        /// Stands in for a live-but-unresponsive agent: the send parks forever.
+        struct SilentPeer;
+
+        #[async_trait::async_trait]
+        impl SteerTransport for SilentPeer {
+            async fn send_ext_request(
+                &self,
+                _req: UntypedMessage,
+            ) -> Result<serde_json::Value, sacp::Error> {
+                std::future::pending().await
+            }
+        }
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConnectionCommand>(4);
+        let state = Arc::new(RwLock::new(SessionState::new(
+            "c-live".to_string(),
+            AgentType::ClaudeCode,
+            None,
+            "main".to_string(),
+            None,
+        )));
+        let emitter = EventEmitter::test_web_only(Arc::new(WebEventBroadcaster::new()));
+        let cancels_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // Mirrors the command loop's STRUCTURE (one task, sequential `recv()`,
+        // commands handled in match arms) while calling the production dispatch
+        // helper verbatim. The live `ConnectionTo<Agent>` the real arms pass needs
+        // an agent handshake no unit test can perform, so the transport — and only
+        // the transport — is substituted.
+        let loop_state = Arc::clone(&state);
+        let loop_emitter = emitter.clone();
+        let loop_cancels = Arc::clone(&cancels_seen);
+        let loop_handle = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    ConnectionCommand::Steer {
+                        blocks,
+                        message_id,
+                        reply,
+                    } => {
+                        spawn_steering_request(
+                            SilentPeer,
+                            SessionId::new("s-live"),
+                            Arc::clone(&loop_state),
+                            loop_emitter.clone(),
+                            blocks,
+                            message_id,
+                            reply,
+                            "test",
+                        );
+                    }
+                    ConnectionCommand::Cancel => {
+                        loop_cancels.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        cmd_tx
+            .send(ConnectionCommand::Steer {
+                blocks: steer_text_blocks("wait for me"),
+                message_id: "m-block".into(),
+                reply: reply_tx,
+            })
+            .await
+            .expect("loop accepts the steer command");
+
+        // Let the loop dequeue the steer and dispatch it. The request is now
+        // OUTSTANDING: the peer will never answer it.
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                reply_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "precondition: the steering request must still be unanswered, \
+             otherwise this test is not exercising the blocking window at all"
+        );
+
+        // THE ASSERTION: Cancel is processed while that request is still
+        // outstanding. The window is far below STEERING_REQUEST_TIMEOUT (10s), so
+        // an inline await cannot pass this by simply timing out first.
+        cmd_tx
+            .send(ConnectionCommand::Cancel)
+            .await
+            .expect("the loop must still be dequeuing commands");
+        tokio::time::timeout(Duration::from_millis(500), loop_handle)
+            .await
+            .expect(
+                "the command loop must remain responsive while a steering request \
+                 is outstanding — the user's stop button cannot depend on an \
+                 unresponsive agent answering first",
+            )
+            .expect("loop task did not panic");
+
+        assert_eq!(
+            cancels_seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Cancel must have been processed, not merely enqueued behind the \
+             stuck steering request"
+        );
+    }
+
+    /// The original gate's REAL INTENT, as behavior: steering must be reachable
+    /// while the connection is in the PROMPTING state (a turn is running). That is
+    /// the entire feature — an idle-only path is a dead feature, because the user
+    /// steers precisely when a long turn has delegated to sub-agents and cancelling
+    /// would kill them all.
+    ///
+    /// The old gate could only assert this positionally (the `Steer` arm's byte
+    /// offset falls inside the in-turn `select!` window), which says nothing about
+    /// whether a steer dispatched in that state actually reaches the agent and
+    /// answers the caller. This drives the production dispatch helper with the
+    /// session state set to `Prompting` and asserts the round trip completes.
+    #[tokio::test]
+    async fn steering_is_reachable_while_the_connection_is_prompting() {
+        use crate::web::event_bridge::WebEventBroadcaster;
+
+        let state = Arc::new(RwLock::new(SessionState::new(
+            "c-prompting".to_string(),
+            AgentType::ClaudeCode,
+            None,
+            "main".to_string(),
+            None,
+        )));
+        // The state the feature exists for: a turn of OURS is running.
+        {
+            let mut s = state.write().await;
+            s.status = ConnectionStatus::Prompting;
+            s.turn_in_flight = true;
+        }
+        let emitter = EventEmitter::test_web_only(Arc::new(WebEventBroadcaster::new()));
+
+        let peer = Arc::new(FakeSteerPeer::answering("injected"));
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        spawn_steering_request(
+            Arc::clone(&peer),
+            SessionId::new("s-prompting"),
+            Arc::clone(&state),
+            emitter,
+            steer_text_blocks("stop editing that file"),
+            "m-prompting".into(),
+            reply_tx,
+            "test",
+        );
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), reply_rx)
+            .await
+            .expect("the steer must answer while the connection is prompting")
+            .expect("the reply channel must not be dropped")
+            .expect("a reached verdict is Ok, never Err");
+        assert_eq!(
+            outcome,
+            SteerOutcome::Injected,
+            "a steer issued DURING a turn must reach the agent and report its \
+             answer — this is the whole feature; an idle-only path is dead code"
+        );
+        // ...and it really went on the wire from the prompting state.
+        assert_eq!(peer.only_request().method(), "_session/steering");
+
+        // The steer path must not disturb the running turn's own bookkeeping.
+        let s = state.read().await;
+        assert!(
+            s.turn_in_flight,
+            "steering is a separate channel, not a relaxation of the serial \
+             prompt rule: OUR turn is still in flight"
+        );
+        assert!(
+            !s.detached_turn_pending,
+            "`injected` joined the RUNNING turn; no detached turn exists"
+        );
+    }
+
+    /// REACHABILITY GATE (narrowed).
+    ///
+    /// What the behavior tests above CANNOT reach: whether the `Steer` arm is
+    /// wired into `run_conversation_loop`'s in-turn `select!` at all. Steering is
+    /// only meaningful DURING a turn, and that handler needs a live agent
+    /// handshake, so there is no unit-reachable seam for the dispatch itself. The
+    /// in-turn match ends in a catch-all `_ => {}`, so a missing arm silently
+    /// discards the command instead of failing to compile — hence a source-layout
+    /// assertion is still the only available check for THIS one fact.
+    ///
+    /// Deliberately narrow: it asserts only arm PRESENCE and POSITION. Everything
+    /// it used to also "guard" — the wire method, the params shape, the outcome
+    /// mapping, the `turn_in_flight` abstention — is now covered by the behavior
+    /// tests above, which fail when the production code is mutated. Do NOT add
+    /// needles here; if a new fact needs guarding, make it observable through
+    /// `SteerTransport` instead.
+    ///
+    /// ⚠️ Needles are `concat!`-split because `include_str!` reads THIS file: a
+    /// whole-literal needle would match the test's own source and stay green with
+    /// the production arm deleted (E-085).
     #[test]
     fn steer_arm_reachable_in_prompting_state() {
         let src = include_str!("connection.rs");
@@ -10158,41 +10914,46 @@ mod tests {
              is the entire feature."
         );
 
-        // The arm must actually send the ext request and return the outcome — an
-        // arm that merely logs would satisfy the checks above.
-        let send_call = concat!("send_steering(", "&cx, &sid, blocks)");
+        // The arm must actually dispatch the ext request rather than merely log —
+        // an arm that only logged would satisfy the presence/position checks
+        // above. (What the request CONTAINS and what its answer MAPS TO are
+        // behavior-tested via `SteerTransport`; that the loop stays RESPONSIVE
+        // while it is outstanding is behavior-tested by
+        // `steering_request_does_not_block_the_command_loop`. This only asserts
+        // the dispatch call exists.)
+        //
+        // Dispatch is `spawn_steering_request`, NOT an inline `send_steering`
+        // await: awaiting in the arm would park the loop and block Cancel.
+        //
+        // Counted over the PRODUCTION region only. `include_str!` reads this whole
+        // file, tests included, and the loop-responsiveness test legitimately calls
+        // the same dispatch helper — counting file-wide would fold that call into
+        // the total and make the gate report a phantom third arm (the same
+        // self-matching trap E-085 names, arrived at from the other direction).
+        let test_mod = concat!("#[cfg(", "test)]");
+        let prod_end = src
+            .find(test_mod)
+            .expect("test module attribute not found; re-derive the production window");
+        let prod = &src[..prod_end];
+        let dispatch_call = concat!("spawn_steering_request(", "\n");
         assert_eq!(
-            src.matches(send_call).count(),
+            prod.matches(dispatch_call).count(),
             2,
-            "each Steer arm must call `send_steering`"
+            "each Steer arm must dispatch via `spawn_steering_request` — an arm \
+             that awaits the request inline stops the loop from dequeuing \
+             Cancel/Disconnect while the agent is unresponsive"
         );
-        // The method name must be the agent's, sourced from the shared constant.
-        let method_const = concat!("const STEERING_METHOD: &str = ", "\"_session/steering\";");
+        // And no arm may revert to awaiting the send inline. The command handlers
+        // all live after the in-turn dispatch anchor, so scanning from there to the
+        // end of production covers both arms; an awaited `send_steering_via` in
+        // that window means someone put the blocking await back.
         assert_eq!(
-            src.matches(method_const).count(),
-            1,
-            "the wire method must stay `_session/steering` (the name both \
-             claude-agent-acp and codex-acp implement)"
-        );
-
-        // ANTI-REGRESSION for review R2-A3: the detached turn must never be
-        // recorded by faking `turn_in_flight`. Nothing can ever clear that flag for
-        // an agent-initiated turn (no `TurnComplete` is owed to us), so writing it
-        // here would wedge the prompt gate permanently.
-        let fake_flag = concat!("s.turn_in_flight = true", ";");
-        assert_eq!(
-            src.matches(fake_flag).count(),
+            prod[start..]
+                .matches(concat!("send_steering_via", "("))
+                .count(),
             0,
-            "connection.rs must not set `turn_in_flight` — only the manager's \
-             prompt path owns that flag, and a detached (agent-initiated) turn \
-             must use `detached_turn_pending` instead"
-        );
-        let detached_event = concat!("AcpEvent::DetachedTurnPending ", "{");
-        assert_eq!(
-            src.matches(detached_event).count(),
-            2,
-            "each Steer arm must record a `startedNewTurn` as a DETACHED turn \
-             (the honest, separate state), not as `turn_in_flight`"
+            "no command-loop arm may await the steering send inline — that is the \
+             exact shape that wedged the loop and blocked Cancel"
         );
     }
 

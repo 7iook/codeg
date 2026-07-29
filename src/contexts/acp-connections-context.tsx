@@ -25,6 +25,7 @@ import {
   acpSetConfigOption,
   acpGoalControl,
   acpCancel,
+  acpSteer,
   acpRespondPermission,
   acpAnswerQuestion,
   acpAnswerPlanApproval,
@@ -34,6 +35,7 @@ import {
   acpFindConnectionForConversation,
 } from "@/lib/api"
 import { denormalizeSnapshot } from "@/lib/snapshot-denormalize"
+import type { SteerOutcome } from "@/lib/steering-queue"
 import { buildDelegationSeedEnvelopes } from "@/lib/delegation-seed"
 import {
   getConversationIdByExternalIdFromStore,
@@ -2425,6 +2427,16 @@ export interface AcpActionsValue {
     valueId: string
   ): Promise<void>
   cancel(contextKey: string): Promise<void>
+  /**
+   * Inject `blocks` into the connection's RUNNING turn (`_session/steering`) and
+   * resolve with the outcome. Does NOT throw on a refusal — the caller must be
+   * able to tell `failed` (safe to retry) from `unknown` (must not retry).
+   */
+  steer(
+    contextKey: string,
+    blocks: PromptInputBlock[],
+    messageId: string
+  ): Promise<SteerOutcome>
   respondPermission(
     contextKey: string,
     requestId: string,
@@ -4699,6 +4711,36 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     await acpCancel(conn.connectionId)
   }, [])
 
+  /**
+   * Inject `blocks` into the RUNNING turn (`_session/steering`).
+   *
+   * Resolves with the outcome instead of swallowing it: the caller's queue state
+   * machine needs `failed` (definitively refused → safe to retry) kept apart from
+   * `unknown` (no answer → retrying risks executing the user's instruction
+   * twice). A transport-level throw is therefore NOT translated here — it stays a
+   * rejection so the caller can classify it as `unknown` rather than mistake it
+   * for a refusal.
+   *
+   * `unknown` when no connection exists at `contextKey`: the request never left,
+   * but reporting "delivered" or "refused" would both assert something false, and
+   * the conservative reading keeps the message in the queue for the user to
+   * decide on. Cannot arise from the UI (the affordance requires a live
+   * connection).
+   */
+  const steer = useCallback(
+    async (
+      contextKey: string,
+      blocks: PromptInputBlock[],
+      messageId: string
+    ): Promise<SteerOutcome> => {
+      const conn = storeRef.current.connections.get(contextKey)
+      if (!conn) return "unknown"
+      lastActivityRef.current.set(contextKey, Date.now())
+      return acpSteer(conn.connectionId, blocks, messageId)
+    },
+    []
+  )
+
   const goalControl = useCallback(
     async (contextKey: string, action: "pause" | "clear") => {
       const conn = storeRef.current.connections.get(contextKey)
@@ -4873,6 +4915,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       setMode,
       setConfigOption,
       cancel,
+      steer,
       goalControl,
       respondPermission,
       answerQuestion,
@@ -4895,6 +4938,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       setMode,
       setConfigOption,
       cancel,
+      steer,
       goalControl,
       respondPermission,
       answerQuestion,

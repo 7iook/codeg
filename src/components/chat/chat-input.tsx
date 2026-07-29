@@ -49,6 +49,11 @@ interface ChatInputProps {
   onQueueReorder?: (items: QueuedMessage[]) => void
   onQueueEdit?: (id: string) => void
   onQueueDelete?: (id: string) => void
+  /** Agent's mid-turn steering capability; `undefined` = probe hasn't answered
+   *  and is handled like unsupported (no "send now" offered). */
+  supportsSteering?: boolean | undefined
+  /** Inject a queued item into the RUNNING turn. */
+  onQueueSendNow?: (id: string) => void
   editingItemId?: string | null
   editingDraftText?: string | null
   editingDraftBlocks?: PromptInputBlock[] | null
@@ -104,6 +109,8 @@ export const ChatInput = memo(function ChatInput({
   onQueueReorder,
   onQueueEdit,
   onQueueDelete,
+  supportsSteering,
+  onQueueSendNow,
   editingItemId,
   editingDraftText,
   editingDraftBlocks,
@@ -157,6 +164,8 @@ export const ChatInput = memo(function ChatInput({
             onEdit={onQueueEdit}
             onDelete={onQueueDelete}
             editingItemId={editingItemId ?? null}
+            supportsSteering={supportsSteering}
+            onSendNow={onQueueSendNow}
           />
         )}
       <MessageInput

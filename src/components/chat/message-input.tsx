@@ -3023,15 +3023,32 @@ export function MessageInput({
       </Button>
     </div>
   ) : isPrompting && onCancel ? (
-    <Button
-      onClick={onCancel}
-      variant="destructive"
-      size="icon"
-      className="h-8 w-8"
-      title={t("cancel")}
-    >
-      <Square className="size-4" />
-    </Button>
+    // Stop and send COEXIST while the agent is working (R3.1). The stop button
+    // used to REPLACE send here, which locked the user out of the conversation
+    // for the whole turn: the only way to say anything was to cancel — and
+    // cancelling cascades into killing every running sub-agent. Stop keeps its
+    // destructive styling because it genuinely is destructive; send enqueues
+    // exactly as it does when idle (no mode dropdown, no behavior change).
+    <div className="flex items-center gap-1">
+      <Button
+        onClick={onCancel}
+        variant="destructive"
+        size="icon"
+        className="h-8 w-8"
+        title={t("cancel")}
+      >
+        <Square className="size-4" />
+      </Button>
+      <Button
+        onClick={handleSend}
+        disabled={!hasSendableContent}
+        size="icon"
+        className="h-8 w-8"
+        title={tQueue("addToQueue")}
+      >
+        <Send className="size-4" />
+      </Button>
+    </div>
   ) : onForkSend ? (
     <div className="flex items-center">
       <Button

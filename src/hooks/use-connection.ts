@@ -24,6 +24,7 @@ import type {
   SessionModeStateInfo,
   PromptInputBlock,
 } from "@/lib/types"
+import type { SteerOutcome } from "@/lib/steering-queue"
 
 const DEFAULT_PROMPT_CAPABILITIES: PromptCapabilitiesInfo = {
   image: false,
@@ -49,6 +50,13 @@ export interface UseConnectionReturn {
   status: ConnectionStatus | null
   promptCapabilities: PromptCapabilitiesInfo
   supportsFork: boolean
+  /** Whether the agent supports mid-turn steering (`_session/steering`), i.e.
+   *  injecting a queued message into the RUNNING turn. `undefined` = unknown
+   *  (the `initialize` probe hasn't landed, or an older server omitted the
+   *  field); consumers treat it the same as unsupported. Deliberately NOT
+   *  defaulted to `false` here — that would erase the distinction between
+   *  "not answered yet" and "answered no". */
+  supportsSteering: boolean | undefined
   selectorsReady: boolean
   hasCachedSelectors: boolean
   sessionId: string | null
@@ -111,6 +119,12 @@ export interface UseConnectionReturn {
   setMode: (modeId: string) => Promise<void>
   setConfigOption: (configId: string, valueId: string) => Promise<void>
   cancel: () => Promise<void>
+  /**
+   * Inject `blocks` into the RUNNING turn and resolve with the outcome. Never
+   * rejects for a refusal — a `failed` / `unknown` outcome is returned so the
+   * caller can distinguish "safe to retry" from "must not retry".
+   */
+  steer: (blocks: PromptInputBlock[], messageId: string) => Promise<SteerOutcome>
   respondPermission: (requestId: string, optionId: string) => Promise<void>
   answerQuestion: (questionId: string, answer: QuestionAnswer) => Promise<void>
 }
@@ -205,6 +219,9 @@ export function useConnection(contextKey: string): UseConnectionReturn {
   const promptCapabilities =
     connection?.promptCapabilities ?? DEFAULT_PROMPT_CAPABILITIES
   const supportsFork = connection?.supportsFork ?? false
+  // No `?? false`: `undefined` means the capability probe hasn't answered, which
+  // consumers must be able to tell apart from a confirmed "no" (R2.2).
+  const supportsSteering = connection?.supportsSteering
   const selectorsReady = connection?.selectorsReady ?? false
   const sessionId = connection?.sessionId ?? null
   const cached = connection?.agentType
@@ -282,6 +299,12 @@ export function useConnection(contextKey: string): UseConnectionReturn {
     [actions, contextKey]
   )
 
+  const steer = useCallback(
+    (blocks: PromptInputBlock[], messageId: string) =>
+      actions.steer(contextKey, blocks, messageId),
+    [actions, contextKey]
+  )
+
   const respondPermission = useCallback(
     (requestId: string, optionId: string) =>
       actions.respondPermission(contextKey, requestId, optionId),
@@ -312,6 +335,7 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       status,
       promptCapabilities,
       supportsFork,
+      supportsSteering,
       selectorsReady,
       hasCachedSelectors,
       sessionId,
@@ -341,6 +365,7 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       setMode,
       setConfigOption,
       cancel,
+      steer,
       respondPermission,
       answerQuestion,
     }),
@@ -351,6 +376,7 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       status,
       promptCapabilities,
       supportsFork,
+      supportsSteering,
       selectorsReady,
       hasCachedSelectors,
       sessionId,
@@ -380,6 +406,7 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       setMode,
       setConfigOption,
       cancel,
+      steer,
       respondPermission,
       answerQuestion,
     ]

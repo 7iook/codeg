@@ -2472,7 +2472,16 @@
         "saveEdit": "Speichern",
         "cancelEdit": "Bearbeitung abbrechen",
         "editItem": "Bearbeiten",
-        "deleteItem": "Entfernen"
+        "deleteItem": "Entfernen",
+        "willSendAfterTurn": "wird nach diesem Zug gesendet",
+        "sendNow": "Jetzt senden",
+        "sendNowTooltip": "Jetzt senden – unterbricht die aktuelle Ausgabe",
+        "statusSending": "wird gesendet…",
+        "statusUnknown": "Zustellergebnis unbekannt",
+        "statusUnknownTooltip": "Es kam keine Antwort zurück, daher wissen wir nicht, ob der Agent die Nachricht erhalten hat. Nur erneut senden, wenn du sicher bist.",
+        "resend": "Erneut senden",
+        "sendNowRefused": "Der Agent kann in dieser Phase keine Nachricht annehmen. Deine Nachricht bleibt in der Warteschlange.",
+        "sendNowUnknown": "Es kam keine Antwort zurück – wir wissen nicht, ob die Nachricht angekommen ist. Sie bleibt in der Warteschlange, du entscheidest."
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "Einstellungen > Agenten",

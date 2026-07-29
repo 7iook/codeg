@@ -148,7 +148,7 @@ pub fn current_platform() -> &'static str {
     }
 }
 
-/// The twelve built-in agents. Excludes user-registered custom agents — use
+/// The built-in agents. Excludes user-registered custom agents — use
 /// [`all_acp_agents`] for the live set.
 pub fn builtin_acp_agents() -> Vec<AgentType> {
     vec![

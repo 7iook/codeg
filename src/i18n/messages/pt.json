@@ -2472,7 +2472,16 @@
         "saveEdit": "Salvar",
         "cancelEdit": "Cancelar edição",
         "editItem": "Editar",
-        "deleteItem": "Remover"
+        "deleteItem": "Remover",
+        "willSendAfterTurn": "será enviada após este turno",
+        "sendNow": "Enviar agora",
+        "sendNowTooltip": "Enviar agora — interrompe a saída atual",
+        "statusSending": "enviando...",
+        "statusUnknown": "resultado de entrega desconhecido",
+        "statusUnknownTooltip": "Nenhuma resposta voltou, então não sabemos se o agente recebeu. Envie de novo apenas se tiver certeza.",
+        "resend": "Enviar de novo",
+        "sendNowRefused": "O agente não pode aceitar uma mensagem nesta etapa. Sua mensagem continua na fila.",
+        "sendNowUnknown": "Nenhuma resposta voltou — não sabemos se a mensagem chegou. Ela continua na fila para você decidir."
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "Configurações > Agentes",

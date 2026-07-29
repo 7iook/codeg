@@ -2472,7 +2472,16 @@
         "saveEdit": "保存",
         "cancelEdit": "取消编辑",
         "editItem": "编辑",
-        "deleteItem": "删除"
+        "deleteItem": "删除",
+        "willSendAfterTurn": "将在本轮后发送",
+        "sendNow": "立即发送",
+        "sendNowTooltip": "立即发送 · 会打断当前输出",
+        "statusSending": "发送中…",
+        "statusUnknown": "投递结果未知",
+        "statusUnknownTooltip": "没有收到响应，无法判断智能体是否已收到这条消息。确认需要时再重发一次。",
+        "resend": "再次发送",
+        "sendNowRefused": "当前阶段无法插入消息，你的消息仍在队列中。",
+        "sendNowUnknown": "没有收到响应，无法判断消息是否已送达。消息仍在队列中，由你决定是否重发。"
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "设置 > Agents",

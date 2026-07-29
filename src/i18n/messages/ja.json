@@ -2472,7 +2472,16 @@
         "saveEdit": "保存",
         "cancelEdit": "編集をキャンセル",
         "editItem": "編集",
-        "deleteItem": "削除"
+        "deleteItem": "削除",
+        "willSendAfterTurn": "このターンの後に送信されます",
+        "sendNow": "すぐ送信",
+        "sendNowTooltip": "すぐ送信 — 現在の出力を中断します",
+        "statusSending": "送信中…",
+        "statusUnknown": "送信結果は不明",
+        "statusUnknownTooltip": "応答がなかったため、エージェントが受け取ったかどうか判断できません。必要だと確信できる場合のみ再送してください。",
+        "resend": "再送する",
+        "sendNowRefused": "この段階ではメッセージを挿入できません。メッセージはキューに残っています。",
+        "sendNowUnknown": "応答がなかったため、メッセージが届いたか判断できません。キューに残っているので、再送するかどうかはご判断ください。"
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "設定 > エージェント",

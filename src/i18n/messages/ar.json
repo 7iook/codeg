@@ -2472,7 +2472,16 @@
         "saveEdit": "حفظ",
         "cancelEdit": "إلغاء التعديل",
         "editItem": "تعديل",
-        "deleteItem": "حذف"
+        "deleteItem": "حذف",
+        "willSendAfterTurn": "سيُرسل بعد هذه الجولة",
+        "sendNow": "إرسال الآن",
+        "sendNowTooltip": "إرسال الآن — يقطع المخرجات الحالية",
+        "statusSending": "جارٍ الإرسال…",
+        "statusUnknown": "نتيجة التسليم غير معروفة",
+        "statusUnknownTooltip": "لم يصل أي رد، لذا لا نعرف ما إذا كان الوكيل قد استلمها. أعد الإرسال فقط إذا كنت متأكدًا.",
+        "resend": "إرسال مرة أخرى",
+        "sendNowRefused": "لا يمكن للوكيل قبول رسالة في هذه المرحلة. رسالتك لا تزال في القائمة.",
+        "sendNowUnknown": "لم يصل أي رد — لا نعرف ما إذا كانت الرسالة قد وصلت. لا تزال في القائمة لتقرر بنفسك."
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "الإعدادات > الوكلاء",

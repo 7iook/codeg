@@ -84,6 +84,10 @@ import {
 } from "@/lib/queue-flush"
 import { TurnBusyError } from "@/lib/turn-busy"
 import {
+  nextStatusForOutcome,
+  type SteerOutcome,
+} from "@/lib/steering-queue"
+import {
   getConversationIdByExternalIdFromStore,
   getRuntimeSession,
   useConversationRuntimeActions,
@@ -232,6 +236,7 @@ const ConversationTabView = memo(function ConversationTabView({
   const tWelcome = useTranslations("Folder.chat.welcomeInputPanel")
   const tDiag = useTranslations("DiagnosticsSettings")
   const sharedT = useTranslations("Folder.chat.shared")
+  const tQueue = useTranslations("Folder.chat.messageQueue")
   const refreshConversations = useAppWorkspaceStore(
     (s) => s.refreshConversations
   )
@@ -572,6 +577,8 @@ const ConversationTabView = memo(function ConversationTabView({
     requeueFront: mqRequeueFront,
     getQueueLength: mqGetQueueLength,
     dequeue: mqDequeue,
+    markInFlight: mqMarkInFlight,
+    setStatus: mqSetStatus,
     remove: mqRemove,
     reorder: mqReorder,
     updateItem: mqUpdateItem,
@@ -1499,6 +1506,92 @@ const ConversationTabView = memo(function ConversationTabView({
     [mqEditingItemId, mqUpdateItem]
   )
 
+  /**
+   * "Send now" on one queued item: inject it into the RUNNING turn so the main
+   * agent answers within the turn the user is watching, WITHOUT cancelling
+   * (which would cascade into killing every running sub-agent).
+   *
+   * The outcome drives the item's next state (`nextStatusForOutcome`); the three
+   * cases are deliberately not collapsed:
+   *   - delivered → drop the item; the agent owns the message now.
+   *   - `failed` → a response came back refusing it, so it definitively was NOT
+   *     accepted: back to `queued`, in place, clickable again.
+   *   - `unknown` → no response came back. It may or may not have been accepted,
+   *     and the wire carries no idempotency key to ask with, so it is NEVER
+   *     auto-retried; the item is surfaced as "delivery result unknown" and the
+   *     user decides.
+   *
+   * The optimistic turn is appended when the request goes out and rolled back on
+   * every non-delivered outcome, so the user's message can't linger in the
+   * timeline as though it had been sent. Nothing is written to `acp_transcript`:
+   * the injected message enters the agent's own input stream and the agent
+   * persists it in its native transcript, so a second copy here would create two
+   * disagreeing histories (`transcript_dir_for` returns `None` for built-ins).
+   */
+  const handleQueueSendNow = useCallback(
+    (id: string) => {
+      const item = messageQueue.queue.find((entry) => entry.id === id)
+      if (!item) return
+      // The ONE gate both dequeue paths share. Losing it means the auto-flush
+      // already took this item — returning here is what stops a double delivery.
+      if (!mqMarkInFlight(id)) return
+
+      const optimisticTurn = buildOptimisticUserTurnFromDraft(
+        item.draft,
+        sharedT("attachedResources")
+      )
+      // Appended BEFORE the request goes out, which also fixes ordering for
+      // free: it necessarily precedes any agent output the injection causes.
+      appendOptimisticTurn(
+        effectiveConversationId,
+        optimisticTurn,
+        optimisticTurn.id
+      )
+
+      void (async () => {
+        // A thrown transport error is NOT a refusal: we never learned whether the
+        // agent got the message, so it classifies as `unknown` — the one case
+        // that must never be retried automatically.
+        let outcome: SteerOutcome
+        try {
+          outcome = await conn.steer(item.draft.blocks, item.messageId)
+        } catch (e) {
+          console.error("[ConversationTabView] steer:", e)
+          outcome = "unknown"
+        }
+        const next = nextStatusForOutcome(outcome)
+        if (next === "delivered") {
+          // Keep the optimistic turn: the agent accepted the message, so it is a
+          // real part of the conversation now.
+          mqRemove(id)
+          return
+        }
+        // Not delivered → the optimistic turn must not stay on screen as though
+        // it had been sent. REMOVE_OPTIMISTIC_TURN also settles syncState back to
+        // idle when this was the last one, so queue auto-flush isn't wedged.
+        removeOptimisticTurn(effectiveConversationId, optimisticTurn.id)
+        mqSetStatus(id, next)
+        toast.error(
+          next === "queued"
+            ? tQueue("sendNowRefused")
+            : tQueue("sendNowUnknown")
+        )
+      })()
+    },
+    [
+      messageQueue.queue,
+      mqMarkInFlight,
+      mqRemove,
+      mqSetStatus,
+      conn,
+      appendOptimisticTurn,
+      removeOptimisticTurn,
+      effectiveConversationId,
+      sharedT,
+      tQueue,
+    ]
+  )
+
   const showDraftHeader = !hasPersistedConversation && !hasSentMessage
   const isWelcomeMode = showDraftHeader
 
@@ -1656,6 +1749,8 @@ const ConversationTabView = memo(function ConversationTabView({
       onQueueReorder={mqReorder}
       onQueueEdit={handleQueueEdit}
       onQueueDelete={mqRemove}
+      supportsSteering={conn.supportsSteering}
+      onQueueSendNow={handleQueueSendNow}
       editingItemId={mqEditingItemId}
       editingDraftText={editingQueueDraftText}
       editingDraftBlocks={editingQueueDraftBlocks}

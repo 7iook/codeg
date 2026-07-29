@@ -212,3 +212,23 @@ T8、T9、T0-R 完全独立，可并行
   - R2-A3 `turn_in_flight` 被我用来标记 detached turn = **伪造状态**，且"任意终态事件/超时"不能证明其结束 → 改用独立 `detached_turn_pending`，收敛须凭可关联事实。
   - R2-A4 "成功后写记录"不天然保证用户消息先于回复出现 → 时间戳取发出时、可见性取成功后（方案 A），实现前先确认 transcript 排序能力。
   - R2-F1 R6 resume **直接判 D·不实施**（证据已足，无需拖到实现阶段）· R2-F2 tasks 里漏改的 `Steer{blocks, mode}` 与 design 不一致（会让 executor 实现错契约）· R2-F3 补三领域的业务分类与发布边界（避免非核心项阻塞核心项或削弱高风险项验收）。
+
+- 2026-07-30 **异构审查（独立会话）结论 NEEDS_CHANGES：1 P0 + 5 P1 + 4 P2**。报告：`.agent-workspace/.archive/2026-07-29/midturn-steering/REVIEW-backend-stage-findings.md`。四个修复 SUB 并行处理后全部关闭：
+  - **P0 取消授权非原子（TOCTOU）** —— 增长检查读完 scope 就释锁，之后才发 Cancel，窗口期新建的委托被无界级联杀掉。修为 `PendingInner::seal_parent_cancel_scope` 封印（与两条注册路径共一把锁）+ epoch 比较，**并把封印后注册的委托从无界级联中也排除**（仅过滤 bounded drain 不够 —— 级联还有一刀，这是缺陷的完整形状）。另补封印 10s 过期与 teardown 时 epoch 递增。
+  - **P1 双令牌 loser** 从 `Ok([])` + 多发一次 Cancel 改为 `Err(CancelScopeChanged)`。
+  - **P1 starting 漏报** —— `Vec<String>` → `CancelScopeResult { count, terminated_task_ids, terminated_starting }`，"预览 1 / 实杀 1 / 回报 0" 在类型上不可表达。
+  - **P1 steering 无超时堵死命令循环** —— `spawn_steering_request` detached + `STEERING_REQUEST_TIMEOUT` 10s，超时 → `Unknown`。承重测试是"请求悬着时 Cancel 必须 500ms 内被处理"（远低于 10s 上限，inline await 不可能靠超时蒙过去）。
+  - **P1 假门** —— 提取 `trait SteerTransport` + `FakeSteerPeer` 行为测试替代源码 needle；四条 mutation（wire method / 强制 `Injected` / 反转 `StartedNewTurn` / 错 params 键名）全部转红。
+  - **P2 契约漂移已回写** —— 新增事件类型的理由、scope 扩大改为拒绝、**删除"Codex 已实现 steering"这个假事实**（共五处 spec + 一处代码注释；本机 codex-acp v1.1.2 dist 零命中）、清掉 "twelve built-ins" 残留。
+  - 主 AI 亲手复验两条关键 mutation：`seal_protects` → 永假 → P0 两测 FAILED；`STEERING_METHOD` → `"_session/broken"` → 新行为门 FAILED（旧门对此放行）。
+  - 主 AI 诊断错一次并被 SUB 顶回：把 `left:3/right:2` 误读为"少改一处"，实际第三个命中是**测试自身**（`include_str!` 读整文件，E-085 自匹配陷阱的反向形态）。
+
+- 2026-07-30 **前端落地（T4/T5）** —— 用户可见链路接通，补上审查指出的"后端已装配到 boundary 但无最终 sink"缺口：
+  - `src/lib/steering-queue.ts`（新增）承载状态机纯函数；`markInFlight` 为**单一 claim 闸门**，`dequeue()` 改取第一个可 claim 项而非无条件 shift 队头；`unknown` 禁自动重试且 UI 不得说"已发送"或"发送失败"。
+  - `acpSteer`（`src/lib/api.ts`）补上缺失的那一跳；**刻意不调 `stripUploadedImagePayloads`** —— steer 路径无 `hydrate_prompt_blocks`（仅 `manager.rs:907` 普通 prompt 路径有）对应物，剥离后无处还原会静默丢附件，已用测试钉住该不对称。
+  - 键区改为停止键与发送键**并列**；「⚡ 立即发送」在队列项上、仅 `supported` 时渲染、tooltip 明示会打断；回滚复用既有 `REMOVE_OPTIMISTIC_TURN` 而非新增 twin（它已 no-op 未知 id 并在最后一个乐观 turn 移除时复位 `syncState`）。
+  - verify: `pnpm test` 3154 tests / 243 files EXIT=0；`pnpm tsc --noEmit` EXIT=0；`pnpm build` EXIT=0。mutation：`isSteeringSupported` 改 `!== false` → 4 测转红；删掉 prompting 分支新增的发送键 → 共存门转红。
+  - ⚠️ `unverified`：auto-flush 与「立即发送」在**面板层**的真实竞态未测（hook 层已覆盖），需 integration harness。
+
+- 2026-07-30 **合并核验（主 AI 独立跑，非采信 SUB 自述）**：`cargo test --no-default-features --bin codeg-mcp --lib` **1986 passed / 0 failed**；`cargo clippy --all-targets --features test-utils -- -D warnings` EXIT=0；`cargo check --no-default-features --bin codeg-server` 干净；`pnpm tsc --noEmit` EXIT=0；`pnpm test` **3154 passed / 243 files**。
+  - **仍未验证（诚实声明）**：真实 mid-turn 注入**一次都没跑过**。全部证据为静态 —— agent dist 源码、单测、受控 mutation。T10 端到端是它的第一次真实检验；在那之前不得宣称功能对用户可用。

@@ -21,6 +21,15 @@
 //!     "cancel whatever the current set is" — that is precisely the unbounded
 //!     destruction the token exists to prevent.
 //!
+//! What this registry does NOT provide is the authorization boundary itself.
+//! Its lock serializes token commits only; it shares no critical section with
+//! delegation registration, so "the scope has not grown" cannot be decided here
+//! without a TOCTOU window. That decision lives in
+//! `DelegationBroker::cancel_by_parent_turn_within` /
+//! `PendingInner::seal_parent_cancel_scope`, which compares the scope epoch
+//! pinned in [`ParentCancelScope`] under the same lock registration takes. This
+//! registry supplies identity, expiry, and one-shot consumption on top of that.
+//!
 //! There is deliberately no cross-user authorization: this project has no user
 //! identity layer (`web/auth.rs` is a single shared `CODEG_TOKEN`, and
 //! `owner_window_label` is window lifecycle management, not a security
@@ -205,6 +214,7 @@ mod tests {
         ParentCancelScope {
             running: running.iter().map(|s| s.to_string()).collect(),
             starting: Vec::new(),
+            epoch: 0,
         }
     }
 

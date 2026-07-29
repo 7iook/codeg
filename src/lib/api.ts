@@ -10,6 +10,7 @@ import { getCodegToken } from "./transport/web-auth"
 import { notifyWebUnauthorized } from "./transport/web-connection-store"
 import { getCurrentEffectiveAppLocale } from "./i18n"
 import { TurnBusyError, isTurnInProgressRejection } from "./turn-busy"
+import type { SteerOutcome } from "./steering-queue"
 import type { FolderThemeColor } from "./theme-presets"
 import type {
   AgentType,
@@ -284,6 +285,37 @@ export async function acpGoalControl(
 
 export async function acpCancel(connectionId: string): Promise<void> {
   return getTransport().call("acp_cancel", { connectionId })
+}
+
+/**
+ * Inject `blocks` into the connection's RUNNING turn (`_session/steering`) and
+ * return the agent's outcome.
+ *
+ * Returns rather than throws for a refusal: the four outcomes are not
+ * interchangeable, and the caller's state machine needs to tell "definitively
+ * not accepted, safe to retry" (`failed`) from "we never heard back, retrying
+ * could execute the user's instruction twice" (`unknown`). See
+ * `nextStatusForOutcome`.
+ *
+ * `messageId` is client-generated and used for LOCAL bookkeeping only — the
+ * agent's `_session/steering` accepts no idempotency key, so this does not
+ * provide end-to-end exactly-once (design §2.5.1).
+ *
+ * Unlike `acpPrompt`, image payloads are NOT stripped: `ConnectionManager::steer`
+ * has no counterpart to the prompt path's `hydrate_prompt_blocks`
+ * (`manager.rs:907`), so a stripped block would arrive with nothing to rehydrate
+ * from and the attachment would silently vanish.
+ */
+export async function acpSteer(
+  connectionId: string,
+  blocks: PromptInputBlock[],
+  messageId: string
+): Promise<SteerOutcome> {
+  return getTransport().call("acp_steer", {
+    connectionId,
+    blocks,
+    messageId,
+  })
 }
 
 export interface ForkResult {

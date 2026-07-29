@@ -147,7 +147,7 @@ init_resp.meta → { "steering": { "supported": true } }
 |---|---|---|
 | **supported** + turn 在飞 | 呈现 | `_session/steering` → `injected`，本轮内响应 |
 | **supported** + 已空闲（原子选择判定） | 呈现 | 走普通 prompt 新起一轮（不走 steering） |
-| **supported** 但返回 `failed`（Codex review/compact 轮） | 呈现 | 消息**留在队列**、置回 `queued`，提示"当前阶段不可插入" |
+| **supported** 但返回 `failed`（**当前无生产 producer · dormant**） | 呈现 | 消息**留在队列**、置回 `queued`，提示"当前阶段不可插入" |
 | **unsupported** | **不呈现** | 入队，轮末发出（现有行为，不报错） |
 | **unknown**（探测未落定） | **不呈现** | 同 unsupported（保守默认） |
 
@@ -203,7 +203,9 @@ queued ──「立即发送」/自动flush──→ in_flight ──成功(inje
 
 **契约收缩声明**：本 spec **不提供**"注入恰好一次"的端到端保证，只提供"不自动产生重复投递"。真正的 exactly-once 需要 `_session/steering` 接受幂等键（如 `_meta.messageId`）并在 agent 侧去重 —— 那是上游改动，本轮范围外（同 C6 的处理方式）。AC1.1 的"恰好一条记录"因此限定在**正常路径与明确拒绝路径**，不覆盖 `unknown`。
 
-`codex-acp` 用**同名方法**但 outcome 多一个 `failed`（`NonSteerableTurnKind`），必须处理该分支，否则 Codex 用户在 review 轮会静默丢消息。
+**⚠️ `failed` 分支当前无生产 producer（已实测纠正）。** 本文曾写"`codex-acp` 用同名方法、outcome 多一个 `failed`" —— **该事实不成立**：本机 `codex-acp` v1.1.2 的 dist（`D:\Devtool\npm-global\node_modules\@agentclientprotocol\codex-acp\dist\index.js`）对 `steer` / `_session/steering` **零命中**（实现者与主 AI 各自验过，审查员第三方复核）。即：**目前没有任何 agent 会返回 `failed`**。
+
+保留该分支的理由仅是向前兼容（一个 match arm 的成本，而静默丢消息更糟），**不得当作已验证的行为**：它无法用真实 agent 测试，T10 的验收也不得拿它当真实场景。若将来某 agent 实现了同名方法并返回 `failed`，需重新实测其 outcome 枚举后才能声称支持。
 
 前端据能力三态呈现差异（R2.4）：supported 时排队项带「立即发送」；unsupported / unknown 时不呈现该动作 + 明示"将在本轮后发送"。
 
@@ -279,7 +281,11 @@ Claude Code 是内置 agent，其历史来自 **agent 自己写的 `~/.claude/pr
 | 确认期间的变化 | 判定 | 处理 |
 |---|---|---|
 | **集合缩小**（委托自行完成） | 仍在已授权范围内 | 直接执行，按**实际终止集合**反馈（不虚报） |
-| **集合扩大**（新委托产生） | **超出已授权破坏范围** | 执行时**只终止预览令牌内的 id 集合**；新增的不动 |
+| **集合扩大**（新委托产生） | **超出已授权破坏范围** | **拒绝提交**，报 `CancelScopeChanged`，什么都不杀，要求重新预览 |
+
+> ⚠️ **契约修正（用户可见）**：原计划是"扩大时只终止令牌内的 id"。实现时发现**不可实现**：`ConnectionCommand::Cancel` 走无界的 `cancel_by_parent_turn`（`connection.rs` 四处调用点），而本 spec 又明令不改该级联 —— 只要提交停止 turn，新出现的委托照样被杀，令牌里的界是装饰性的。改为拒绝提交 + 重预览。该变更改变了用户可见的失败/重试契约，已回写至此（评审指出仅用实现注释覆盖不够）。broker 层保留真限界的 `cancel_by_parent_turn_within` 备用，若将来级联改成作用域感知，可将拒绝放宽为部分终止。
+>
+> ⚠️ **尚未修复（P0）**：审查证实"扩大即拒绝"本身**不是原子的** —— 检查后释锁、Cancel 落地前新建的委托仍会被无界 Cancel 杀掉（TOCTOU）。修复中：需在 broker 层建单一原子 prepare/commit/stop primitive。
 
 - 取消执行**以预览令牌携带的 id 集合为界**，而非"执行时刻重新计算的集合"。这把用户看到的数字与实际破坏范围钉死在同一份快照上。
 - 若因业务需要必须连带新增的（例如父轮确已结束、留着也无人消费），则**必须重新弹确认框告知新数量**，不得静默扩大。
@@ -315,7 +321,9 @@ Claude Code 是内置 agent，其历史来自 **agent 自己写的 `~/.claude/pr
 
 **能力标志到前端的 wire 契约（补评审 A4 —— 原设计此链路悬空）**：
 
-- **载体**：随既有 `SelectorsReady` / session 能力快照同行发出（与 `agent_supports_resume`/`_fork` 已走的通路一致），**不新开事件类型**。字段名 `supportsSteering: boolean`。
+- **载体**：随既有 session 能力快照下发，**另加一个专用事件** `AcpEvent::SteeringSupported`。字段名 `supportsSteering: boolean`。
+
+  > ⚠️ **契约修正**：本节原写"不新开事件类型"，实现时发现必须新增。理由（实现者发现并经审查员确认）：新会话（`session_id = None`）时 `spawn_agent` 在 initialize 握手**之前**就返回，连接时的快照抓取可能早于探测完成 —— 只靠快照会造出一个永远读不到真值的字段。既有 `fork_supported` 正是因同一原因同时具备事件与快照，本项跟随该先例而非发明第三种形状。
 - **刷新时机**：连接建立（initialize 后）一次即定；重连/换 agent 时随新快照重发。**不轮询**。
 - **默认未知态**：前端字段初值为 `undefined` → 按 `unknown` 处理 → 不呈现「立即发送」（R2.2 保守默认）。收到快照后转 `supported`/`unsupported`。
 - **Web 模式**：经 WS `snapshot` 帧与 HTTP snapshot 同样携带该字段（两种传输不得只改一边）。
@@ -341,7 +349,7 @@ Claude Code 是内置 agent，其历史来自 **agent 自己写的 `~/.claude/pr
 - **能力探测**：`_meta.steering.supported` 存在 / 缺失 / 畸形三输入；**必含负向** —— 把标志挪到 `agent_capabilities` 内（常规但错误的位置）必须探测为不支持。
 - **能力三态 → UI**：`supported`/`unsupported`/`unknown` 各断言「立即发送」的呈现与否（`unknown` 必须不呈现）。
 - **队列状态机（§2.5.1）**：三条合法迁移各一条；断言 `delivered` 不可回退；断言同 `message_id` 二次投递被跳过。
-- **降级矩阵（§2.5）**：5 行各一条，含 Codex `failed` → 置回 `queued` 且保留位次。
+- **降级矩阵（§2.5）**：5 行各一条，含 `failed` → 置回 `queued` 且保留位次（只能用 fake peer 验，无真实 agent 会产生该 outcome）。
 - **`startedNewTurn`**：**断言不补发**（A2 核心）—— 构造 idle 竞态，断言消息只投递一次；断言 **`turn_in_flight` 未被修改**（禁伪造 · R3-A4）而是 `detached_turn_pending` 被置；断言仅**可关联事实**能清除它，纯超时/任意终态事件**不能**清除。
 - **会话记录（§2.6）**：成功→恰好一条记录；失败→无记录且队列项回 `queued`。
 - **R4 作用域同源**：断言"确认框数量"与"实际终止集合"由同一函数得出 —— 构造"全局在跑 5 个、父轮作用域内 3 个"，断言展示 3 且只杀 3。竞态：确认期间 1 个自行完成 → 取消仍成功且报实际数。

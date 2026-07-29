@@ -486,14 +486,16 @@ pub struct AcpCancelWithScopeTokenParams {
     pub scope_token: String,
 }
 
-/// Confirmed cancel under a preview token (spec R4.3). Responds with the
-/// `task_id`s ACTUALLY terminated — a subset of the token's set when some
-/// delegations finished on their own. A refused token or a grown scope cancels
-/// nothing and answers 4xx (a recoverable client condition: re-preview).
+/// Confirmed cancel under a preview token (spec R4.3). Responds with what was
+/// ACTUALLY terminated — `count` (which includes still-starting delegations that
+/// have no `task_id` to list) plus the running ids that do. Report `count`, never
+/// the token's original number: some delegations may have finished on their own.
+/// A refused token or a scope that moved since the preview cancels nothing and
+/// answers 4xx (a recoverable client condition: re-preview).
 pub async fn acp_cancel_with_scope_token(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpCancelWithScopeTokenParams>,
-) -> Result<Json<Vec<String>>, AppCommandError> {
+) -> Result<Json<crate::acp::delegation::broker::CancelScopeResult>, AppCommandError> {
     let terminated = state
         .connection_manager
         .cancel_with_scope_token(&state.db.conn, &params.connection_id, &params.scope_token)
@@ -503,7 +505,7 @@ pub async fn acp_cancel_with_scope_token(
 }
 
 /// Expected, recoverable client conditions → 4xx rather than a 500: a stale
-/// token or a scope that grew both mean "re-run the preview", and an unknown
+/// token or a scope that moved both mean "re-run the preview", and an unknown
 /// connection is a client-side staleness too. Anything else is a real fault.
 fn map_cancel_scope_error(e: AcpError) -> AppCommandError {
     let message = e.to_string();

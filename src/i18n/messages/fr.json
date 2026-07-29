@@ -2472,7 +2472,16 @@
         "saveEdit": "Enregistrer",
         "cancelEdit": "Annuler la modification",
         "editItem": "Modifier",
-        "deleteItem": "Supprimer"
+        "deleteItem": "Supprimer",
+        "willSendAfterTurn": "sera envoyé après ce tour",
+        "sendNow": "Envoyer maintenant",
+        "sendNowTooltip": "Envoyer maintenant — interrompt la sortie en cours",
+        "statusSending": "envoi…",
+        "statusUnknown": "résultat de livraison inconnu",
+        "statusUnknownTooltip": "Aucune réponse n'est revenue, nous ne savons donc pas si l'agent l'a reçu. Renvoyez-le seulement si vous en êtes sûr.",
+        "resend": "Renvoyer",
+        "sendNowRefused": "L'agent ne peut pas accepter de message à ce stade. Votre message reste dans la file.",
+        "sendNowUnknown": "Aucune réponse n'est revenue — nous ne savons pas si le message est arrivé. Il reste dans la file, à vous de décider."
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "Paramètres > Agents",

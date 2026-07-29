@@ -13,6 +13,7 @@ use sea_orm::{
 use crate::acp::connection::{
     spawn_agent_connection, AgentConnection, ConnectionCommand, GoalControlAction,
 };
+use crate::acp::delegation::broker::CancelScopeResult;
 use crate::acp::delegation::cancel_scope::CancelScopePreview;
 use crate::acp::error::AcpError;
 use crate::acp::feedback::{
@@ -1448,31 +1449,35 @@ impl ConnectionManager {
     /// Cancel `conn_id`'s turn under a preview token — the confirmed half of
     /// [`Self::preview_cancel_scope`] (spec R4.3 · design §4 token contract).
     ///
-    /// Token validation, consumption, and the cancel all happen inside ONE
-    /// critical section (`CancelScopeTokens::commit`), so two concurrent commits
-    /// cannot both pass: exactly one takes effect, the other is rejected as
-    /// already-used. A rejected commit performs NO cancel.
+    /// The authorization boundary is ONE broker primitive:
+    /// `DelegationBroker::cancel_by_parent_turn_within`, which compares the
+    /// preview's scope epoch, seals the authorization, and drains the authorized
+    /// set inside a single acquisition of the same lock delegation registration
+    /// takes. The manager no longer stitches a growth check and a cancel together
+    /// across separate locks — that gap was the TOCTOU: a delegation registering
+    /// after the check but before `ConnectionCommand::Cancel` landed was killed by
+    /// the unbounded cascade, violating "we showed N, we must not kill the
+    /// N+1th". The token registry still provides one-shot / TTL / `conn_id`
+    /// binding; it is no longer load-bearing for atomicity.
     ///
-    /// The scope may legitimately have shrunk while the dialog was open — those
-    /// delegations finished on their own — and then the returned
-    /// `terminated_task_ids` is a subset of the token's set. Callers must report
-    /// THAT, never the token's original count, or they would claim kills that
-    /// did not happen.
+    /// Returns what was ACTUALLY terminated (see
+    /// [`CancelScopeResult`] — counts, not just running ids, so a terminated
+    /// still-starting delegation is not reported as zero). The scope may
+    /// legitimately have shrunk while the dialog was open; callers must report
+    /// this result, never the token's original count.
     ///
-    /// If the scope GREW, the commit is refused with
-    /// [`AcpError::CancelScopeChanged`] and nothing is cancelled. This is the
-    /// authorization bound: the user approved a specific set, and
-    /// `ConnectionCommand::Cancel` unavoidably cascades over the WHOLE parent
-    /// scope (connection.rs — the cascade is deliberately unchanged, its
-    /// semantics are correct), so proceeding would destroy delegations the user
-    /// never saw. Re-previewing and re-confirming is the only safe path;
-    /// silently widening is exactly what design §4 forbids.
+    /// Refused with [`AcpError::CancelScopeChanged`] — nothing cancelled — when
+    /// the scope moved at all since the preview: a new delegation appeared, or
+    /// another commit already sealed this scope (so the loser of two concurrent
+    /// commits is an `Err`, not a second cancel). Re-previewing and
+    /// re-confirming is the only safe path; silently widening is exactly what
+    /// design §4 forbids.
     pub async fn cancel_with_scope_token(
         &self,
         db: &DatabaseConnection,
         conn_id: &str,
         token: &str,
-    ) -> Result<Vec<String>, AcpError> {
+    ) -> Result<CancelScopeResult, AcpError> {
         // Reachability first (shared `_core` check — same path as the preview).
         self.get_state_and_emitter(conn_id)
             .await
@@ -1488,32 +1493,20 @@ impl ConnectionManager {
         let conn_owned = conn_id.to_string();
         inj.cancel_scope_tokens
             .commit(conn_id, token, move |authorized| async move {
-                // Re-read the scope under the token lock: the growth check and
-                // the cancel are therefore atomic with respect to token
-                // consumption (no second commit can interleave).
-                let current = broker.parent_cancel_scope(&conn_owned).await;
-                let grew = current
-                    .running
-                    .iter()
-                    .any(|id| !authorized.running.contains(id))
-                    || current
-                        .starting
-                        .iter()
-                        .any(|id| !authorized.starting.contains(id));
-                if grew {
-                    return Err(AcpError::CancelScopeChanged);
-                }
-                // Bounded cascade: drains exactly the authorized ids that are
-                // still alive, reporting actuals.
-                let terminated = broker
+                // ONE atomic broker operation: epoch compare + seal + bounded
+                // drain. `None` ⇒ the scope moved and NOTHING was touched.
+                let Some(result) = broker
                     .cancel_by_parent_turn_within(&conn_owned, &authorized)
-                    .await;
-                // Then stop the turn itself through the unchanged path (which
-                // also runs the idempotent unbounded cascade — a no-op now that
-                // the authorized set is already drained and no unauthorized
-                // delegation exists, as the growth check above just proved).
+                    .await
+                else {
+                    return Err(AcpError::CancelScopeChanged);
+                };
+                // Then stop the turn itself through the unchanged path. Its
+                // cascade is still unbounded by design, but the seal above makes
+                // it skip anything registered after the authorization — so it can
+                // only re-drain the already-drained authorized set (a no-op).
                 manager.cancel(&db, &conn_owned).await?;
-                Ok(terminated)
+                Ok(result)
             })
             .await
             .map_err(|e| AcpError::CancelScopeTokenRejected(e.reason().to_string()))?
@@ -6057,7 +6050,9 @@ mod tests {
             .cancel_with_scope_token(&db.conn, "c1", &token)
             .await
             .expect("commit under a fresh token must succeed");
-        assert_eq!(terminated, vec![t1]);
+        assert_eq!(terminated.terminated_task_ids, vec![t1]);
+        assert_eq!(terminated.count, 1);
+        assert_eq!(terminated.terminated_starting, 0);
     }
 
     /// One-shot: the second submit is refused AND performs no second cancel.
@@ -6195,11 +6190,18 @@ mod tests {
         );
     }
 
-    /// Two concurrent commits with DIFFERENT tokens: exactly one takes effect.
-    /// The loser is refused (its token is fine, but the scope it authorized was
-    /// already drained), and in no case is the delegation cancelled twice.
+    /// Two concurrent commits with DIFFERENT tokens for the SAME scope: exactly
+    /// one is `Ok`, and the loser is an `Err` — design.md:295 "first commit
+    /// wins, the rest are rejected because the set changed or the token is
+    /// stale".
+    ///
+    /// The loser must NOT be `Ok([])`. That was the previous behavior and the
+    /// previous test permitted it by counting non-empty `Ok`s: an `Ok` loser also
+    /// fired a SECOND `ConnectionCommand::Cancel`, which (combined with the
+    /// unbounded cascade) could destroy a delegation registered in the meantime.
+    /// So this asserts on the error itself.
     #[tokio::test]
-    async fn two_concurrent_commits_only_one_takes_effect() {
+    async fn two_concurrent_commits_win_once_and_reject_the_loser() {
         let db = crate::db::test_helpers::fresh_in_memory_db().await;
         let mgr = ConnectionManager::new();
         let (broker, mock) = install_mock_delegation(&mgr).await;
@@ -6227,16 +6229,97 @@ mod tests {
             mgr.cancel_with_scope_token(&db.conn, "c1", &t1),
             mgr.cancel_with_scope_token(&db.conn, "c1", &t2)
         );
-        let effective = [&r1, &r2]
-            .iter()
-            .filter(|r| r.as_ref().is_ok_and(|ids| !ids.is_empty()))
-            .count();
+        // Exactly one Ok, exactly one Err — and the winner reports the real kill.
+        let (winner, loser) = match (&r1, &r2) {
+            (Ok(w), Err(l)) => (w, l),
+            (Err(l), Ok(w)) => (w, l),
+            other => panic!("expected exactly one Ok and one Err, got {other:?}"),
+        };
         assert_eq!(
-            effective, 1,
-            "exactly one commit may terminate the delegation; got {r1:?} / {r2:?}"
+            winner.count, 1,
+            "the winning commit terminated the one delegation"
+        );
+        assert!(
+            matches!(
+                loser,
+                AcpError::CancelScopeChanged | AcpError::CancelScopeTokenRejected(_)
+            ),
+            "the loser must be REJECTED, never Ok(empty): got {loser:?}"
         );
         // Nothing is left running either way.
         assert_eq!(broker.pending_count().await, 0);
+    }
+
+    /// Result contract through the FULL manager entry point: a preview that
+    /// counted one still-STARTING delegation, committed, must report that it was
+    /// terminated.
+    ///
+    /// The old contract could not express this — `cancel_by_parent_turn_within`
+    /// returned only running task ids, so this case produced "preview 1 /
+    /// killed 1 / reported 0" and the frontend would have told the user nothing
+    /// died. Asserts on `count`, which is the number the UI reports.
+    #[tokio::test]
+    async fn commit_reports_a_terminated_starting_delegation() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mgr = ConnectionManager::new();
+        let (broker, mock) = install_mock_delegation(&mgr).await;
+        let _rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+
+        // Pin one delegation inside the production `spawn` window: registered in
+        // `inflight`, so it has no `task_id` yet but WILL be terminated.
+        let release = mock.install_spawn_gate().await;
+        mock.queue_spawn(Ok("child-starting".into())).await;
+        mock.queue_send(Ok(7)).await;
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .start_delegation(crate::acp::delegation::types::DelegationRequest {
+                        parent_connection_id: "c1".to_string(),
+                        parent_conversation_id: 1,
+                        parent_tool_use_id: "pt-starting".to_string(),
+                        agent_type: AgentType::ClaudeCode,
+                        task: "do x".into(),
+                        working_dir: None,
+                        requested_working_dir: None,
+                        external_handle: None,
+                    })
+                    .await
+            })
+        };
+        while broker.inflight_count().await == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let preview = mgr.preview_cancel_scope("c1").await.expect("preview");
+        assert_eq!(preview.count, 1, "the starting delegation is counted");
+        assert!(
+            preview.task_ids.is_empty(),
+            "a starting delegation has no task_id to display yet"
+        );
+        let token = preview.token.clone().expect("count > 0 must carry a token");
+
+        let result = mgr
+            .cancel_with_scope_token(&db.conn, "c1", &token)
+            .await
+            .expect("commit under a fresh token must succeed");
+        assert_eq!(
+            result.count, 1,
+            "preview said 1 and 1 was terminated, so the report must say 1, not 0: {result:?}"
+        );
+        assert_eq!(result.terminated_starting, 1);
+        assert!(result.terminated_task_ids.is_empty());
+
+        // And it really was terminated, not merely counted.
+        let _ = release.send(());
+        let report = driver.await.unwrap();
+        assert_eq!(
+            report.error_code.as_deref(),
+            Some("canceled"),
+            "the delegation the result claims to have terminated must actually be canceled"
+        );
     }
 
     /// Both entry points reject an unknown / disconnected `conn_id` through the

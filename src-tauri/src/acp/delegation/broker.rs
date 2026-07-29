@@ -310,6 +310,12 @@ struct RunningTask {
     turn_id: Option<String>,
     /// Who dispatched this turn (Requirement 8.2).
     origin: TurnOrigin,
+    /// The parent's `scope_epoch` when this delegation registered, carried over
+    /// from its `InflightSetup` at park. Lets `PendingInner::seal_protects`
+    /// exclude it from an unbounded turn cancel whose authorization was sealed
+    /// BEFORE it existed — the P0 guarantee: whatever N the confirmation dialog
+    /// showed, the N+1th is not silently killed.
+    registered_epoch: u64,
 }
 
 /// The set of delegations a parent-turn cancel on one connection would
@@ -328,6 +334,16 @@ pub struct ParentCancelScope {
     pub running: Vec<String>,
     /// `inflight` keys of setups dispatched but not yet parked.
     pub starting: Vec<u64>,
+    /// The parent's `scope_epoch` when this scope was computed — the
+    /// authorization's version stamp.
+    ///
+    /// This is what makes the commit atomic rather than best-effort: the commit
+    /// re-compares it inside the same broker critical section that delegation
+    /// registration uses (`PendingInner::seal_parent_cancel_scope`), so any
+    /// registration between preview and commit is detected even if the resulting
+    /// SET looks unchanged (a delegation that registered and finished inside the
+    /// window leaves the set equal but the epoch moved).
+    pub epoch: u64,
 }
 
 impl ParentCancelScope {
@@ -340,6 +356,32 @@ impl ParentCancelScope {
     pub fn is_empty(&self) -> bool {
         self.count() == 0
     }
+}
+
+/// What a confirmed, bounded cancel ACTUALLY terminated (spec R4.3 · design §4
+/// "result contract").
+///
+/// Replaces a bare `Vec<String>` of running task ids, which could not express
+/// the truth: a delegation still starting up has no `task_id` yet, so reporting
+/// only ids made "preview 1 / killed 1 / reported 0" possible — the frontend
+/// would tell the user nothing was terminated when something was. `count` is
+/// therefore authoritative and `terminated_task_ids` is explicitly partial.
+///
+/// All three numbers are actuals, never the token's original count: a delegation
+/// that finished on its own while the dialog was open is not a kill.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelScopeResult {
+    /// Total delegations terminated = `terminated_task_ids.len()` +
+    /// `terminated_starting`. **This** is what the UI reports.
+    pub count: usize,
+    /// Ids of the terminated delegations that were already running. Partial by
+    /// construction — see `terminated_starting`.
+    pub terminated_task_ids: Vec<String>,
+    /// How many terminated delegations were still starting up, and so had no
+    /// `task_id` to report. Non-zero exactly in the start-up window the preview
+    /// already counts.
+    pub terminated_starting: usize,
 }
 
 /// A terminal delegation result retained so `get_delegation_status` /
@@ -609,7 +651,51 @@ struct PendingInner {
     /// order. Keys and stamps share this sequence but are never cross-compared
     /// (keys match by identity, stamps only by `<` against other stamps).
     seq: u64,
+    /// Per-parent scope epoch: bumped by EVERY event that can widen what a
+    /// parent-turn cancel would destroy — i.e. both delegation registration
+    /// paths (`register_inflight` / `register_inflight_for_task`). Compared and
+    /// sealed inside this same lock by
+    /// [`Self::seal_parent_cancel_scope`], which is what makes the
+    /// authorization boundary atomic: a preview records the epoch it showed, and
+    /// the commit refuses unless the epoch is still identical.
+    ///
+    /// Why an epoch and not a set comparison: a set comparison can only see the
+    /// delegations that still exist at commit time, so a register-then-finish
+    /// pair inside the window is invisible to it (the set is equal again) while
+    /// the epoch records that the scope moved. It also cannot be defeated by
+    /// `inflight` key reuse, since the counter never goes backwards.
+    ///
+    /// Absent entry = epoch 0 (a parent that never registered anything).
+    scope_epoch: HashMap<String, u64>,
+    /// Parents whose scope is SEALED: a cancel authorization has been committed
+    /// and the parent-turn `Cancel` it authorized has not yet been observed by
+    /// the connection loop. While sealed, a delegation registering on this
+    /// parent is recorded as `registered_after_seal`, which is what stops the
+    /// pre-existing unbounded `cancel_by_parent_turn` from destroying it.
+    ///
+    /// Keyed by `parent_connection_id`; the value is the seal's own epoch, used
+    /// to distinguish "registered before this seal" from "after".
+    sealed_scopes: HashMap<String, u64>,
+    /// Expiry for each entry in `sealed_scopes` ([`SEAL_GRACE`] from the seal).
+    ///
+    /// A seal is normally consumed by the very `Cancel` it authorized, but that
+    /// command travels an async queue and the connection could die first. Without
+    /// an expiry the orphaned seal would shield every delegation registered after
+    /// it from ALL later cancels — turning a safety mechanism into a leak. The
+    /// grace window only has to cover "enqueue → connection loop dequeues".
+    seal_deadlines: HashMap<String, Instant>,
 }
+
+/// How long a committed cancel authorization keeps protecting delegations that
+/// registered after it (see `PendingInner::seal_deadlines`).
+///
+/// Sized for "the authorized `ConnectionCommand::Cancel` travels its mpsc queue
+/// and the connection loop reaches its Cancel arm" — milliseconds in practice.
+/// Generous here, because the cost of being too long is only that an unrelated
+/// SECOND cancel arriving within the window spares a just-registered delegation
+/// (which the next cancel then kills), while the cost of being too short is
+/// destroying a delegation the user never authorized.
+const SEAL_GRACE: Duration = Duration::from_secs(10);
 
 /// One in-flight `handle_request` setup tracked for parent-cancel coverage.
 struct InflightSetup {
@@ -626,6 +712,12 @@ struct InflightSetup {
     /// in-dispatch continuation of ITS task (Requirement 2.12) without
     /// flagging the parent's unrelated setups.
     task_id: Option<String>,
+    /// The parent's `scope_epoch` at the moment this setup registered — the
+    /// authorization stamp. A cancel seal recorded at a LOWER epoch never saw
+    /// this delegation, so `PendingInner::seal_protects` shields it from that
+    /// cancel's unbounded cascade. Carried onto the `RunningTask` at park so the
+    /// protection survives the inflight→running transition.
+    registered_epoch: u64,
 }
 
 impl PendingInner {
@@ -703,6 +795,138 @@ impl PendingInner {
         self.early_cancels.remove(child_connection_id)
     }
 
+    /// Current scope epoch for `parent_connection_id` (0 if it never registered
+    /// anything). Read under the same lock as every mutation, so a value read
+    /// here and compared here cannot be stale.
+    fn scope_epoch(&self, parent_connection_id: &str) -> u64 {
+        self.scope_epoch
+            .get(parent_connection_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Bump `parent_connection_id`'s scope epoch and return the NEW value —
+    /// called by every path that can widen the parent-turn cancel scope, and by
+    /// a successful seal. Monotonic per parent, so the "epoch unchanged" test in
+    /// [`Self::seal_parent_cancel_scope`] cannot be satisfied by a scope that
+    /// grew and shrank back.
+    fn bump_scope_epoch(&mut self, parent_connection_id: &str) -> u64 {
+        let e = self
+            .scope_epoch
+            .entry(parent_connection_id.to_string())
+            .or_insert(0);
+        *e += 1;
+        *e
+    }
+
+    /// **The atomic authorization boundary** (spec R4.3 · design §4 · fixes the
+    /// preview/commit TOCTOU).
+    ///
+    /// Everything that must not be interleaved happens here, in ONE acquisition
+    /// of the lock that delegation registration itself takes:
+    ///
+    ///   1. compare the epoch the preview showed against the live one — any
+    ///      registration (or an earlier commit) in between moved it, so the
+    ///      authorization is stale and we refuse;
+    ///   2. bump + record the seal, which is what makes the FIRST commit win:
+    ///      every other token for this parent is now stale by construction;
+    ///   3. flag the authorized `starting` setups and collect the authorized
+    ///      `running` keys.
+    ///
+    /// Returns `None` when the epoch moved (caller must re-preview; NOTHING was
+    /// touched), otherwise the authorized-and-still-alive running keys plus the
+    /// number of `starting` setups this seal actually flagged — the two halves of
+    /// the honest [`CancelScopeResult`].
+    ///
+    /// The seal is the other half of the fix. The caller still has to stop the
+    /// parent turn through the unchanged `ConnectionCommand::Cancel` path, whose
+    /// cascade is deliberately unbounded — so a delegation registering between
+    /// this seal and that Cancel landing would be destroyed without ever having
+    /// been shown to the user. Because such a delegation registers *through this
+    /// same lock*, it gets an epoch above the seal's, and
+    /// [`Self::seal_protects`] then excludes it from the unbounded drain. That is
+    /// the whole reason the seal lives in the broker instead of the manager: only
+    /// here does it share a critical section with registration.
+    fn seal_parent_cancel_scope(
+        &mut self,
+        parent_connection_id: &str,
+        authorized: &ParentCancelScope,
+    ) -> Option<(Vec<String>, usize)> {
+        if self.scope_epoch(parent_connection_id) != authorized.epoch {
+            return None;
+        }
+        let seal_epoch = self.bump_scope_epoch(parent_connection_id);
+        self.sealed_scopes
+            .insert(parent_connection_id.to_string(), seal_epoch);
+        self.seal_deadlines.insert(
+            parent_connection_id.to_string(),
+            Instant::now() + SEAL_GRACE,
+        );
+        // Flag the authorized in-flight setups in the SAME acquisition that
+        // collects the authorized running ones, preserving the "caught by
+        // exactly one of the two registries" invariant the unbounded path relies
+        // on — just restricted to the authorized ids.
+        let stamp = self.tick();
+        let mut terminated_starting = 0usize;
+        for id in &authorized.starting {
+            if let Some(setup) = self.inflight.get_mut(id) {
+                if setup.parent_connection_id == parent_connection_id && setup.canceled_at.is_none()
+                {
+                    setup.canceled_at = Some(stamp);
+                    // Counted only when THIS seal did the flagging, so the
+                    // reported number stays an actual: a setup that already
+                    // finished (gone from `inflight`) or was already canceled is
+                    // not a kill of ours.
+                    terminated_starting += 1;
+                }
+            }
+        }
+        // Intersect the authorized set with what is still running AND still
+        // owned by this parent: a shrunken scope then succeeds (vanished ids are
+        // skipped) and reports actuals.
+        let keys: Vec<String> = authorized
+            .running
+            .iter()
+            .filter(|k| {
+                self.running
+                    .get(*k)
+                    .is_some_and(|v| v.parent_connection_id == parent_connection_id)
+            })
+            .cloned()
+            .collect();
+        Some((keys, terminated_starting))
+    }
+
+    /// Whether a live seal on `parent_connection_id` protects an entry that
+    /// registered at `registered_epoch` from an unbounded turn cancel.
+    ///
+    /// True only for entries registered AFTER the seal: those are exactly the
+    /// ones the user never saw, and the pending `ConnectionCommand::Cancel` the
+    /// seal authorized must not reach them. Everything registered before the
+    /// seal was inside the authorized set and stays killable.
+    ///
+    /// Expired seals protect nothing (see [`SEAL_GRACE`]): the authorized Cancel
+    /// is enqueued in the same operation as the seal, so if it has not arrived
+    /// within the grace window it never will, and a stale seal must not shield
+    /// delegations from a LATER, unrelated cancel.
+    fn seal_protects(&self, parent_connection_id: &str, registered_epoch: u64) -> bool {
+        self.sealed_scopes
+            .get(parent_connection_id)
+            .is_some_and(|seal| registered_epoch > *seal)
+            && self
+                .seal_deadlines
+                .get(parent_connection_id)
+                .is_some_and(|d| *d > Instant::now())
+    }
+
+    /// Consume `parent_connection_id`'s seal — called by the unbounded turn
+    /// cancel it authorized, once that cancel has done its (now filtered) drain.
+    /// Idempotent.
+    fn clear_seal(&mut self, parent_connection_id: &str) {
+        self.sealed_scopes.remove(parent_connection_id);
+        self.seal_deadlines.remove(parent_connection_id);
+    }
+
     /// Advance the monotonic arrival clock, returning the pre-increment value.
     /// Strictly increasing (wraps only after 2^64 calls — unreachable), so two
     /// events stamped under this lock always compare in their true arrival
@@ -723,12 +947,19 @@ impl PendingInner {
     /// the lock releases would reopen that window.
     fn register_inflight(&mut self, parent_connection_id: &str) -> u64 {
         let id = self.tick();
+        // Bump the parent's scope epoch in the SAME lock acquisition as the
+        // insert: this registration widens what a turn cancel would destroy, so
+        // any preview taken before now is stale and its commit must be refused
+        // (`seal_parent_cancel_scope`). Stamping the entry with the new epoch is
+        // also what lets an already-sealed cancel skip it.
+        let registered_epoch = self.bump_scope_epoch(parent_connection_id);
         self.inflight.insert(
             id,
             InflightSetup {
                 parent_connection_id: parent_connection_id.to_string(),
                 canceled_at: None,
                 task_id: None,
+                registered_epoch,
             },
         );
         id
@@ -739,12 +970,16 @@ impl PendingInner {
     /// can flag exactly this setup (Requirement 2.12).
     fn register_inflight_for_task(&mut self, parent_connection_id: &str, task_id: &str) -> u64 {
         let id = self.tick();
+        // Same reasoning as `register_inflight`: a continuation dispatch also
+        // widens the parent's cancel scope, so it moves the epoch.
+        let registered_epoch = self.bump_scope_epoch(parent_connection_id);
         self.inflight.insert(
             id,
             InflightSetup {
                 parent_connection_id: parent_connection_id.to_string(),
                 canceled_at: None,
                 task_id: Some(task_id.to_string()),
+                registered_epoch,
             },
         );
         id
@@ -760,6 +995,21 @@ impl PendingInner {
                 setup.canceled_at = Some(stamp);
             }
         }
+    }
+
+    /// The scope epoch this in-flight setup registered at (see
+    /// `InflightSetup::registered_epoch`). Read at park to carry the
+    /// authorization stamp onto the `RunningTask`, so a seal recorded before this
+    /// delegation existed keeps protecting it after it parks.
+    ///
+    /// Falls back to the parent's CURRENT epoch if the record is already gone,
+    /// which can only over-protect (a current epoch is >= any live seal), never
+    /// expose an authorized delegation to survival.
+    fn inflight_registered_epoch(&self, id: u64, parent_connection_id: &str) -> u64 {
+        self.inflight
+            .get(&id)
+            .map(|s| s.registered_epoch)
+            .unwrap_or_else(|| self.scope_epoch(parent_connection_id))
     }
 
     /// Drop an in-flight setup record (idempotent).
@@ -792,10 +1042,28 @@ impl PendingInner {
     /// parent's delegations is caught either here (still in-flight → flagged;
     /// `handle_request` tears its child down at the next checkpoint) or by the
     /// parked-call drain (already parked) — never neither.
+    ///
+    /// EXCEPT what a live seal protects: setups that registered after a
+    /// committed cancel authorization were never shown to the user, and this
+    /// unbounded cascade is exactly the one that authorization scheduled. Killing
+    /// them is the P0 defect (`seal_protects` — "showed N, must not kill the
+    /// N+1th"). They stay running and a fresh preview will include them.
     fn mark_inflight_canceled_for_parent(&mut self, parent_connection_id: &str) {
         let stamp = self.tick();
-        for setup in self.inflight.values_mut() {
-            if setup.parent_connection_id == parent_connection_id && setup.canceled_at.is_none() {
+        let protected: Vec<u64> = self
+            .inflight
+            .iter()
+            .filter(|(_, s)| {
+                s.parent_connection_id == parent_connection_id
+                    && self.seal_protects(parent_connection_id, s.registered_epoch)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for (id, setup) in self.inflight.iter_mut() {
+            if setup.parent_connection_id == parent_connection_id
+                && setup.canceled_at.is_none()
+                && !protected.contains(id)
+            {
                 setup.canceled_at = Some(stamp);
             }
         }
@@ -842,7 +1110,11 @@ impl PendingInner {
             .map(|(id, _)| *id)
             .collect();
         starting.sort_unstable();
-        ParentCancelScope { running, starting }
+        ParentCancelScope {
+            running,
+            starting,
+            epoch: self.scope_epoch(parent_connection_id),
+        }
     }
 
     /// Insert a terminal result into the completed-cache, then FIFO-evict this
@@ -3065,6 +3337,12 @@ impl DelegationBroker {
                 // insert with no `.await` between (so a parent cancel serialized
                 // AFTER us finds it in `running` and drains it).
                 (None, None) => {
+                    // Read the authorization stamp BEFORE deregistering, and
+                    // carry it onto the running entry: a cancel authorization
+                    // sealed while this delegation was still starting must keep
+                    // sparing it after it parks.
+                    let registered_epoch =
+                        inner.inflight_registered_epoch(inflight_id, &req.parent_connection_id);
                     inner.running.insert(
                         call_id.clone(),
                         RunningTask {
@@ -3080,6 +3358,7 @@ impl DelegationBroker {
                             turn_version: 1,
                             turn_id: None,
                             origin: TurnOrigin::ParentAgent,
+                            registered_epoch,
                         },
                     );
                     inner.deregister_inflight(inflight_id);
@@ -3663,24 +3942,28 @@ impl DelegationBroker {
     }
 
     /// Cascade-cancel a parent turn, but only within `authorized` — the scope a
-    /// preview showed the user (spec R4.3 / design §4).
+    /// preview showed the user — and **atomically seal** that authorization
+    /// (spec R4.3 / design §4).
     ///
-    /// The difference from [`Self::cancel_by_parent_turn`] is the bound, and the
-    /// bound is the whole point: the user approved "kill these N", not "kill
-    /// whatever exists when I click OK".
+    /// This is THE authorization boundary. Everything that must not interleave
+    /// happens in [`PendingInner::seal_parent_cancel_scope`], under the single
+    /// lock that delegation registration also takes:
     ///
-    ///   * scope SHRANK (a delegation finished on its own) → execute, and report
-    ///     the ids ACTUALLY terminated. Callers must report this, not the
-    ///     token's original count, or they would claim kills that never
-    ///     happened;
-    ///   * scope GREW (a new delegation appeared) → the newcomer is outside what
-    ///     the user authorized, so it is left running.
+    ///   * scope UNCHANGED → seal, flag the authorized `starting` setups, drain
+    ///     the authorized `running` ones, and report actuals;
+    ///   * scope MOVED (anything registered since the preview, or another commit
+    ///     already sealed) → `None`: nothing is touched and the caller must
+    ///     re-preview. This is also what rejects the loser of two concurrent
+    ///     commits, instead of letting it pass a set comparison and fire a second
+    ///     cancel;
+    ///   * a delegation registering AFTER the seal is stamped with a higher epoch,
+    ///     so the unbounded `cancel_by_parent_turn` that the caller then triggers
+    ///     skips it (`PendingInner::seal_protects`). Without that, the bounded
+    ///     drain here would spare the newcomer and the unbounded cascade would
+    ///     kill it anyway — the P0 defect.
     ///
-    /// Returns the `task_id`s actually drained. The `starting` half is
-    /// intentionally absent from the return value: an in-flight setup has no
-    /// `task_id` to report, and it is flagged rather than drained here (its own
-    /// `start_delegation` tears the child down at its next checkpoint — see
-    /// `mark_inflight_canceled_for_parent`).
+    /// A shrunken scope still succeeds and reports the smaller ACTUAL set:
+    /// delegations that finished on their own are not kills.
     ///
     /// Everything else — tracker tombstoning, `consumed` retention, inline fast
     /// drain with backgrounded child teardown — matches the unbounded path
@@ -3690,51 +3973,35 @@ impl DelegationBroker {
         &self,
         parent_connection_id: &str,
         authorized: &ParentCancelScope,
-    ) -> Vec<String> {
+    ) -> Option<CancelScopeResult> {
         // Same tombstoning as the unbounded turn cancel: retain `consumed` so a
-        // late re-emit can't mis-bind the next same-key delegation.
+        // late re-emit can't mis-bind the next same-key delegation. Done before
+        // the seal attempt because it is idempotent and scope-independent; a
+        // refused seal below leaves NO delegation touched, which is the property
+        // that matters.
         self.drop_tool_calls_for_parent(parent_connection_id, true)
             .await;
-        let (terminated, drained) = {
+        let (result, drained) = {
             let mut inner = self.pending.inner.lock().await;
-            // Flag only the authorized in-flight setups, in the SAME lock
-            // acquisition that drains the authorized running ones — preserving
-            // the "caught by exactly one of the two" invariant the unbounded
-            // path relies on, just restricted to the authorized ids.
-            let stamp = inner.tick();
-            for id in &authorized.starting {
-                if let Some(setup) = inner.inflight.get_mut(id) {
-                    if setup.parent_connection_id == parent_connection_id
-                        && setup.canceled_at.is_none()
-                    {
-                        setup.canceled_at = Some(stamp);
-                    }
-                }
-            }
-            // Intersect the authorized set with what is still running AND still
-            // owned by this parent. The intersection is what makes a shrunken
-            // scope succeed (vanished ids are simply skipped) and a grown scope
-            // safe (unauthorized ids were never in `authorized`).
-            let keys: Vec<String> = authorized
-                .running
-                .iter()
-                .filter(|k| {
-                    inner
-                        .running
-                        .get(*k)
-                        .is_some_and(|v| v.parent_connection_id == parent_connection_id)
-                })
-                .cloned()
-                .collect();
-            let terminated = keys.clone();
+            // `?` on the seal: a moved scope means refuse and touch NOTHING.
+            let (keys, terminated_starting) =
+                inner.seal_parent_cancel_scope(parent_connection_id, authorized)?;
+            let terminated_task_ids = keys.clone();
             let drained = drain_and_record_canceled(&mut inner, keys, "parent canceled");
-            (terminated, drained)
+            (
+                CancelScopeResult {
+                    count: terminated_task_ids.len() + terminated_starting,
+                    terminated_task_ids,
+                    terminated_starting,
+                },
+                drained,
+            )
         };
         let broker = self.clone();
         tokio::spawn(async move {
             broker.finalize_parent_cancel(drained).await;
         });
-        terminated
+        Some(result)
     }
 
     /// Fast, lock-guarded part of a parent cancel: drop/tombstone this parent's
@@ -3772,8 +4039,29 @@ impl DelegationBroker {
                 .running
                 .iter()
                 .filter(|(_, v)| v.parent_connection_id == parent_connection_id)
+                // Skip what a live seal protects: these registered AFTER a
+                // committed cancel authorization, so this cascade (the one that
+                // authorization scheduled) must not reach them — the user was
+                // never shown them. This is the P0 fix's teeth: without it the
+                // bounded drain spares the newcomer and then this unbounded scan
+                // kills it anyway.
+                .filter(|(_, v)| !inner.seal_protects(parent_connection_id, v.registered_epoch))
                 .map(|(k, _)| k.clone())
                 .collect();
+            // The authorization has now been fully served by this cascade;
+            // release it so a LATER, independently-authorized cancel sees a
+            // clean scope. Also move the epoch: any preview taken before this
+            // cancel describes a world that no longer exists, so its commit must
+            // be refused rather than sealing a scope that was already drained
+            // (this is what turns the second of two concurrent tokens into an
+            // Err instead of a scope-widening no-op cancel).
+            //
+            // Bumped, never removed: a `conn_id` could be reused, and restarting
+            // at 0 would let a still-live token minted for the OLD connection
+            // match by coincidence. Monotonic-forever costs one `u64` per
+            // connection id and closes that hole.
+            inner.clear_seal(parent_connection_id);
+            inner.bump_scope_epoch(parent_connection_id);
             if keep_consumed {
                 // Turn cancel: connection stays alive → keep each canceled
                 // result queryable.
@@ -4550,6 +4838,10 @@ impl DelegationBroker {
                 // The previous turn's cached text is no longer the current
                 // answer — drop it so a status poll reports Running.
                 inner.remove_completed_entry(task_id);
+                // Same as the `start_delegation` park: carry the authorization
+                // stamp from the in-flight dispatch record before it is dropped.
+                let registered_epoch =
+                    inner.inflight_registered_epoch(plan.inflight_id, parent_connection_id);
                 inner.running.insert(
                     task_id.to_string(),
                     RunningTask {
@@ -4565,6 +4857,7 @@ impl DelegationBroker {
                         turn_version,
                         turn_id: Some(turn_id),
                         origin,
+                        registered_epoch,
                     },
                 );
                 let mut ack = running_ack(
@@ -9478,16 +9771,17 @@ mod tests {
             s
         });
 
-        let terminated = broker
+        let result = broker
             .cancel_by_parent_turn_within("parent-a", &scope)
-            .await;
+            .await
+            .expect("an unmoved scope must commit");
         assert_eq!(
-            terminated.len(),
-            3,
+            result.count, 3,
             "the cancel must terminate exactly the previewed set"
         );
+        assert_eq!(result.terminated_starting, 0, "all three were running");
         for id in &mine {
-            assert!(terminated.contains(id));
+            assert!(result.terminated_task_ids.contains(id));
         }
         // The other parent's delegations are untouched.
         assert_eq!(broker.pending_count().await, 2);
@@ -9549,9 +9843,25 @@ mod tests {
 
         // And the cancel really does reach the starting one: it is flagged, so
         // `start_delegation` tears its child down instead of returning Running.
-        broker
+        // The RESULT must say so too — reporting only running ids here produced
+        // "preview 2 / killed 2 / reported 1", which is what the DTO exists to
+        // stop.
+        let result = broker
             .cancel_by_parent_turn_within("parent-conn", &scope)
-            .await;
+            .await
+            .expect("an unmoved scope must commit");
+        assert_eq!(
+            result.count, 2,
+            "the reported total must cover the starting delegation too, got {result:?}"
+        );
+        assert_eq!(
+            result.terminated_starting, 1,
+            "the starting delegation must be reported as terminated, not dropped"
+        );
+        assert_eq!(
+            result.terminated_task_ids, parked,
+            "only the parked one has a task_id to list"
+        );
         let _ = release.send(());
         let report = driver.await.unwrap();
         assert_eq!(
@@ -9590,20 +9900,29 @@ mod tests {
             )
             .await;
 
-        let terminated = broker
+        let result = broker
             .cancel_by_parent_turn_within("parent-conn", &scope)
-            .await;
+            .await
+            .expect("a SHRUNKEN scope is still within the authorization");
         assert_eq!(
-            terminated,
+            result.terminated_task_ids,
             vec![ids[1].clone()],
             "must report the ACTUAL (smaller) set, not the previewed 2"
         );
+        assert_eq!(result.count, 1, "the count is an actual, not the token's 2");
     }
 
-    /// A scope that GREW: the newcomer is outside the authorization, so the
-    /// bounded cancel leaves it alone (R4.3 — never silently widen).
+    /// A scope that GREW: the newcomer registered through the same broker lock,
+    /// so it moved the scope epoch and the commit is REFUSED outright (`None`) —
+    /// nothing is cancelled and the caller must re-preview.
+    ///
+    /// This replaces the older "kill the authorized subset, leave the newcomer"
+    /// behavior, which was not actually safe: the manager then still had to stop
+    /// the parent turn via the unbounded cascade, which killed the newcomer
+    /// anyway. Refusing is the only outcome that keeps "showed N, never kill the
+    /// N+1th" true (R4.3 · design §4).
     #[tokio::test]
-    async fn bounded_cancel_leaves_delegations_added_after_the_preview() {
+    async fn bounded_cancel_refuses_when_a_delegation_appeared_after_the_preview() {
         let mock = Arc::new(MockSpawner::new());
         let broker =
             DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
@@ -9616,17 +9935,176 @@ mod tests {
         // A new delegation appears AFTER the user saw "1".
         let second = park_running(&broker, &mock, "parent-conn", 1).await;
 
-        let terminated = broker
+        assert!(
+            broker
+                .cancel_by_parent_turn_within("parent-conn", &authorized)
+                .await
+                .is_none(),
+            "a scope that grew since the preview must be refused, not partially executed"
+        );
+        // NEITHER is touched: a refused commit cancels nothing at all.
+        for id in first.iter().chain(second.iter()) {
+            let report = broker
+                .get_task_status("parent-conn", Some(1), id, StatusWait::Immediate)
+                .await;
+            assert_eq!(
+                report.status,
+                TaskStatus::Running,
+                "a refused commit must leave every delegation running ({id})"
+            );
+        }
+    }
+
+    /// **THE P0 regression.** A delegation that registers in the window between
+    /// the authorization being sealed and the unbounded parent-turn `Cancel`
+    /// actually landing must NOT be terminated.
+    ///
+    /// Reproduces the reported sequence exactly:
+    ///   1. preview authorizes terminating 1 delegation;
+    ///   2. the commit seals that authorization and bounded-drains it;
+    ///   3. the parent agent registers a 2nd delegation — the `Cancel` command is
+    ///      already queued but the connection loop has not processed it;
+    ///   4. the loop reaches its Cancel arm and runs the UNBOUNDED
+    ///      `cancel_by_parent_turn`.
+    ///
+    /// Before the fix, step 4 killed the 2nd delegation: the bounded drain in
+    /// step 2 correctly spared it, and then the unbounded cascade destroyed it
+    /// anyway — the user authorized killing 1 and 2 died. The seal makes step 4
+    /// skip it.
+    ///
+    /// Fails if `seal_parent_cancel_scope` stops sealing, if `seal_protects`
+    /// stops filtering, or if either registration path stops bumping the epoch.
+    #[tokio::test]
+    async fn delegation_registered_after_the_seal_survives_the_unbounded_cancel() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        // 1. The user sees exactly one delegation and authorizes killing it.
+        let authorized_ids = park_running(&broker, &mock, "parent-conn", 1).await;
+        let authorized = broker.parent_cancel_scope("parent-conn").await;
+        assert_eq!(authorized.count(), 1, "the dialog showed 1");
+
+        // 2. Commit: seals the authorization and drains the authorized set.
+        let result = broker
             .cancel_by_parent_turn_within("parent-conn", &authorized)
-            .await;
-        assert_eq!(terminated, first, "only the authorized id may be killed");
+            .await
+            .expect("an unmoved scope must commit");
+        assert_eq!(result.terminated_task_ids, authorized_ids);
+
+        // 3. The parent registers a SECOND delegation while `Cancel` is still in
+        //    the command queue. This is the N+1th the user never saw.
+        let newcomer = park_running(&broker, &mock, "parent-conn", 1).await;
+
+        // 4. The connection loop finally processes Cancel → unbounded cascade.
+        broker.cancel_by_parent_turn("parent-conn").await;
+
         let report = broker
-            .get_task_status("parent-conn", Some(1), &second[0], StatusWait::Immediate)
+            .get_task_status("parent-conn", Some(1), &newcomer[0], StatusWait::Immediate)
             .await;
         assert_eq!(
             report.status,
             TaskStatus::Running,
-            "a delegation the user never authorized must survive the cancel"
+            "the user authorized killing 1 delegation; the 2nd registered after that \
+             authorization and must survive the cancel it never covered"
+        );
+        assert_eq!(
+            broker.pending_count().await,
+            1,
+            "exactly the newcomer remains"
+        );
+    }
+
+    /// The same window, but the newcomer is still STARTING (in `inflight`, not
+    /// yet parked) when the unbounded cancel lands — the other half of the scope,
+    /// reached via `mark_inflight_canceled_for_parent` rather than the running
+    /// drain. It must survive too, otherwise the P0 hole simply moves into the
+    /// start-up window.
+    #[tokio::test]
+    async fn starting_delegation_registered_after_the_seal_survives_the_unbounded_cancel() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let authorized_ids = park_running(&broker, &mock, "parent-conn", 1).await;
+        let authorized = broker.parent_cancel_scope("parent-conn").await;
+        assert_eq!(authorized.count(), 1);
+        let result = broker
+            .cancel_by_parent_turn_within("parent-conn", &authorized)
+            .await
+            .expect("an unmoved scope must commit");
+        assert_eq!(result.terminated_task_ids, authorized_ids);
+
+        // A new delegation pinned mid-`spawn`: registered in `inflight` only.
+        let release = mock.install_spawn_gate().await;
+        mock.queue_spawn(Ok("child-late".into())).await;
+        mock.queue_send(Ok(7)).await;
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.start_delegation(request(1, "pt-late")).await })
+        };
+        while broker.inflight_count().await == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // The queued Cancel now lands.
+        broker.cancel_by_parent_turn("parent-conn").await;
+
+        let _ = release.send(());
+        let report = driver.await.unwrap();
+        assert_eq!(
+            report.status,
+            TaskStatus::Running,
+            "a delegation still starting when the authorized cancel landed was never \
+             shown to the user and must not be canceled; got error_code={:?}",
+            report.error_code
+        );
+    }
+
+    /// A LATER, independently-authorized cancel must still kill the delegation
+    /// the previous seal protected — the seal is a one-cancel shield, not a
+    /// permanent immunity. Without this, the P0 fix would leak: delegations
+    /// registered after any commit would become unkillable.
+    #[tokio::test]
+    async fn a_fresh_authorization_can_cancel_what_the_previous_seal_protected() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        park_running(&broker, &mock, "parent-conn", 1).await;
+        let first = broker.parent_cancel_scope("parent-conn").await;
+        broker
+            .cancel_by_parent_turn_within("parent-conn", &first)
+            .await
+            .expect("first commit");
+        let newcomer = park_running(&broker, &mock, "parent-conn", 1).await;
+        // The authorized Cancel lands and consumes the seal.
+        broker.cancel_by_parent_turn("parent-conn").await;
+        assert_eq!(
+            broker.pending_count().await,
+            1,
+            "the newcomer survived the first cancel (P0 guarantee)"
+        );
+
+        // The user now stops again — a FRESH preview covers the newcomer, so the
+        // new authorization does include it.
+        let second = broker.parent_cancel_scope("parent-conn").await;
+        assert_eq!(
+            second.running, newcomer,
+            "the re-preview shows the newcomer"
+        );
+        let result = broker
+            .cancel_by_parent_turn_within("parent-conn", &second)
+            .await
+            .expect("a fresh authorization must commit");
+        assert_eq!(result.terminated_task_ids, newcomer);
+        assert_eq!(
+            broker.pending_count().await,
+            0,
+            "a re-confirmed cancel must actually kill it — the seal is not immunity"
         );
     }
 

@@ -85,6 +85,11 @@ interface ConversationShellProps {
   onQueueReorder?: (items: QueuedMessage[]) => void
   onQueueEdit?: (id: string) => void
   onQueueDelete?: (id: string) => void
+  /** Agent's mid-turn steering capability (`undefined` = unknown → treated as
+   *  unsupported). Gates the per-item "send now" action. */
+  supportsSteering?: boolean | undefined
+  /** Inject a queued item into the RUNNING turn. */
+  onQueueSendNow?: (id: string) => void
   editingItemId?: string | null
   editingDraftText?: string | null
   editingDraftBlocks?: PromptInputBlock[] | null
@@ -140,6 +145,8 @@ export function ConversationShell({
   onQueueReorder,
   onQueueEdit,
   onQueueDelete,
+  supportsSteering,
+  onQueueSendNow,
   editingItemId,
   editingDraftText,
   editingDraftBlocks,
@@ -275,6 +282,8 @@ export function ConversationShell({
               onQueueReorder={onQueueReorder}
               onQueueEdit={onQueueEdit}
               onQueueDelete={onQueueDelete}
+              supportsSteering={supportsSteering}
+              onQueueSendNow={onQueueSendNow}
               editingItemId={editingItemId}
               editingDraftText={editingDraftText}
               editingDraftBlocks={editingDraftBlocks}

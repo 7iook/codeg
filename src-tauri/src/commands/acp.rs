@@ -8479,10 +8479,11 @@ pub async fn acp_preview_cancel_scope(
 
 /// Confirmed cancel under a preview token (spec R4.3).
 ///
-/// Returns the `task_id`s ACTUALLY terminated — report these, not the token's
-/// original count, since delegations may have finished on their own while the
-/// dialog was open. A rejected token (used / expired / wrong connection) or a
-/// grown scope cancels NOTHING.
+/// Returns what was ACTUALLY terminated — report `count` from this result, not
+/// the token's original count, since delegations may have finished on their own
+/// while the dialog was open. `count` covers still-starting delegations too,
+/// which have no `task_id` to list. A rejected token (used / expired / wrong
+/// connection) or a scope that moved since the preview cancels NOTHING.
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn acp_cancel_with_scope_token(
@@ -8490,7 +8491,7 @@ pub async fn acp_cancel_with_scope_token(
     scope_token: String,
     db: State<'_, AppDatabase>,
     manager: State<'_, ConnectionManager>,
-) -> Result<Vec<String>, AcpError> {
+) -> Result<crate::acp::delegation::broker::CancelScopeResult, AcpError> {
     manager
         .cancel_with_scope_token(&db.conn, &connection_id, &scope_token)
         .await

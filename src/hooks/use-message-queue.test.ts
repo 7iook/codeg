@@ -115,3 +115,148 @@ describe("useMessageQueue bounce FIFO ordering", () => {
     expect(texts(result.current.queue)).toEqual(["B", "A-edited"])
   })
 })
+
+describe("useMessageQueue steering status field (T4)", () => {
+  it("enqueues items as `queued` with a distinct client-generated messageId", () => {
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("A"), null))
+    act(() => result.current.enqueue(draft("B"), null))
+    const [a, b] = result.current.queue
+    expect(a.status).toBe("queued")
+    expect(b.status).toBe("queued")
+    // Delivery identity is distinct from the React list key: `id` is reassigned
+    // by a requeue, while `messageId` is the value local dedup keys on.
+    expect(a.messageId).toBeTruthy()
+    expect(b.messageId).toBeTruthy()
+    expect(a.messageId).not.toBe(b.messageId)
+  })
+
+  it("setStatus moves one item without disturbing its position or siblings", () => {
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("A"), null))
+    act(() => result.current.enqueue(draft("B"), null))
+    act(() => result.current.enqueue(draft("C"), null))
+    const targetId = result.current.queue[1].id
+    act(() => result.current.setStatus(targetId, "in_flight"))
+    expect(texts(result.current.queue)).toEqual(["A", "B", "C"])
+    expect(result.current.queue.map((i) => i.status)).toEqual([
+      "queued",
+      "in_flight",
+      "queued",
+    ])
+  })
+
+  it("markInFlight claims a queued item exactly ONCE (single dequeue)", () => {
+    // Auto-flush and "send now" race through this one gate; the loser must be
+    // told it did not get the item rather than delivering it a second time.
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("only"), null))
+    const id = result.current.queue[0].id
+    let first = false
+    let second = true
+    act(() => {
+      first = result.current.markInFlight(id)
+      second = result.current.markInFlight(id)
+    })
+    expect(first).toBe(true)
+    expect(second).toBe(false)
+    expect(result.current.queue[0].status).toBe("in_flight")
+  })
+
+  it("markInFlight refuses an unknown id without mutating the queue", () => {
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("A"), null))
+    let claimed = true
+    act(() => {
+      claimed = result.current.markInFlight("no-such-id")
+    })
+    expect(claimed).toBe(false)
+    expect(result.current.queue).toHaveLength(1)
+    expect(result.current.queue[0].status).toBe("queued")
+  })
+
+  it("markInFlight refuses an item that is already delivered", () => {
+    // Same `messageId` twice → the second attempt is skipped. `delivered` is
+    // terminal; re-delivering it would run the user's instruction again.
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("A"), null))
+    const id = result.current.queue[0].id
+    act(() => result.current.setStatus(id, "delivered"))
+    let claimed = true
+    act(() => {
+      claimed = result.current.markInFlight(id)
+    })
+    expect(claimed).toBe(false)
+  })
+
+  it("dequeue SKIPS a non-queued head so the auto-flush can't re-take it", () => {
+    // The head is mid-injection: the flush must look past it rather than
+    // shifting it out and sending the same message a second time.
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("head"), null))
+    act(() => result.current.enqueue(draft("next"), null))
+    const headId = result.current.queue[0].id
+    act(() => result.current.markInFlight(headId))
+    let taken: string | undefined
+    act(() => {
+      taken = result.current.dequeue()?.draft.displayText
+    })
+    expect(taken).toBe("next")
+    // The in-flight head STAYS in the queue: its own outcome decides its fate.
+    expect(texts(result.current.queue)).toEqual(["head"])
+  })
+
+  it("dequeue returns undefined when no item is claimable", () => {
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("A"), null))
+    act(() => result.current.markInFlight(result.current.queue[0].id))
+    let taken: unknown = "unset"
+    act(() => {
+      taken = result.current.dequeue()
+    })
+    expect(taken).toBeUndefined()
+  })
+
+  it("carries each item's status through a drag-reorder", () => {
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("A"), null))
+    act(() => result.current.enqueue(draft("B"), null))
+    act(() => result.current.setStatus(result.current.queue[1].id, "unknown"))
+    const [a, b] = result.current.queue
+    act(() => result.current.reorder([b, a]))
+    expect(texts(result.current.queue)).toEqual(["B", "A"])
+    expect(result.current.queue.map((i) => i.status)).toEqual([
+      "unknown",
+      "queued",
+    ])
+  })
+
+  it("keeps status and messageId when the item's draft is edited", () => {
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("before"), null))
+    const { id, messageId } = result.current.queue[0]
+    act(() => result.current.setStatus(id, "unknown"))
+    act(() => result.current.updateItem(id, draft("after")))
+    expect(result.current.queue[0].draft.displayText).toBe("after")
+    expect(result.current.queue[0].status).toBe("unknown")
+    expect(result.current.queue[0].messageId).toBe(messageId)
+  })
+
+  it("keeps delete working on an item carrying a non-queued status", () => {
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("A"), null))
+    act(() => result.current.enqueue(draft("B"), null))
+    const id = result.current.queue[0].id
+    act(() => result.current.setStatus(id, "in_flight"))
+    act(() => result.current.remove(id))
+    expect(texts(result.current.queue)).toEqual(["B"])
+  })
+
+  it("requeueFront still puts a bounced draft at the head as `queued`", () => {
+    const { result } = renderHook(() => useMessageQueue())
+    act(() => result.current.enqueue(draft("existing"), null))
+    act(() => result.current.requeueFront(draft("bounced"), null))
+    expect(texts(result.current.queue)).toEqual(["bounced", "existing"])
+    expect(result.current.queue[0].status).toBe("queued")
+  })
+})

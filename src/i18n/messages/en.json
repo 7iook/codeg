@@ -2472,7 +2472,16 @@
         "saveEdit": "Save",
         "cancelEdit": "Cancel edit",
         "editItem": "Edit",
-        "deleteItem": "Remove"
+        "deleteItem": "Remove",
+        "willSendAfterTurn": "will send after this turn",
+        "sendNow": "Send now",
+        "sendNowTooltip": "Send now — interrupts the current output",
+        "statusSending": "sending...",
+        "statusUnknown": "delivery result unknown",
+        "statusUnknownTooltip": "No response came back, so we can't tell whether the agent received this. Send it again only if you're sure.",
+        "resend": "Send again",
+        "sendNowRefused": "The agent can't accept a message at this stage. Your message is still queued.",
+        "sendNowUnknown": "No response came back — we can't tell whether the message was received. It's still in the queue for you to decide."
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "Settings > Agents",

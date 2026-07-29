@@ -70,7 +70,7 @@ Feature: `midturn-steering`
 
 **R2.4** 用户必须能看出当前会话属于哪种模式。理由：两者对"我这条消息什么时候被处理"的预期完全不同，误判会导致重复发送或长时间干等（Zed issue #48175 的实证：队列不可见导致用户以为消息丢失）。
 
-**R2.5** 支持 steering 但当前阶段拒绝插入时（Codex 的 review/compact 轮返回 `failed`），必须提示"当前阶段不可插入"且消息留在队列，不得静默丢弃。
+**R2.5** 支持 steering 但当前阶段拒绝插入时（agent 返回 `failed`），必须提示"当前阶段不可插入"且消息留在队列，不得静默丢弃。⚠️ **当前无生产 producer**（本机 `codex-acp` v1.1.2 对 steering 零命中），此分支为向前兼容的 dormant 路径，只能用 fake peer 验。
 
 **AC2**：三个场景分别验收 ——
 - **a** 支持 steering：排队消息有「立即发送」，点击后本轮内响应；
@@ -159,7 +159,7 @@ Feature: `midturn-steering`
 | turn 在飞 → 直接 push 进同一 streaming input，`{outcome:"injected"}` | `acp-agent.js:913-947` |
 | 能力标志在 initialize 响应**顶层** `_meta.steering.supported`，是 `agentCapabilities` 的兄弟 | `acp-agent.js:636` |
 | `startedNewTurn` 竞态下 client 拿不到该 turn 终态 | 上游 issue #903，修复 PR #919 未合并 |
-| codex-acp 用**同名方法**，outcome 多 `failed` | `codex-acp/src/AcpExtensions.ts` |
+| ~~codex-acp 用**同名方法**，outcome 多 `failed`~~ **已实测推翻** —— 本机 codex-acp v1.1.2 dist 对 `steer`/`_session/steering` **零命中**；`failed` 当前无生产 producer | `codex-acp/dist/index.js`（零命中） |
 | 项目已有同形状 mid-turn ext request 在生产跑 | `connection.rs:4503` `send_goal_control` + `ConnectionCommand::GoalControl` + `:6021` select 分支 |
 | 队列 flush 门控要求整轮结束 | `conversation-detail-panel.tsx:745` |
 | 后端串行硬拒第二个 prompt | `manager.rs:728-729` |
