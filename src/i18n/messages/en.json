@@ -594,14 +594,14 @@
       "loadFailed": "Failed to load delegation settings: {detail}",
       "tabGeneral": "General",
       "tabAgentDefaults": "Agent defaults",
-      "agentDefaultsDescription": "Per-agent overrides applied when Multi-Agent Collaboration spawns a subagent for a delegation call. Options shown here come from a live probe — what you pick is exactly what the agent will accept.",
+      "agentDefaultsDescription": "The config a subagent is launched with when a task is delegated to it — mode, model, reasoning effort. This is the only place that decides it; it does not change what you picked in the chat composer. Options come from a live probe, so what you pick is exactly what the agent gets. Anything you leave blank is decided by that agent itself at run time.",
       "probing": "Loading available options from the agent…",
       "probeFailed": "Failed to load options: {detail}",
       "retry": "Retry",
       "noConfigAvailable": "This agent has no configurable options.",
       "modeLabel": "Mode",
-      "agentDefaultHint": "Agent default: {value}",
-      "defaultOptionLabel": "Default ({value})"
+      "agentDefaultHint": "Left blank, this agent picks {value}",
+      "defaultOptionLabel": "Let the agent decide ({value})"
     },
     "actions": {
       "dragSort": "Drag to reorder",

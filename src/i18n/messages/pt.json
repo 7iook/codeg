@@ -594,14 +594,14 @@
       "loadFailed": "Falha ao carregar configurações de delegação: {detail}",
       "tabGeneral": "Geral",
       "tabAgentDefaults": "Padrões do subagente",
-      "agentDefaultsDescription": "Substituições por agente aplicadas quando a Colaboração multiagente inicia um subagente para uma chamada de delegação. As opções mostradas vêm de uma sondagem ao vivo: o que você escolhe é exatamente o que o agente aceitará.",
+      "agentDefaultsDescription": "A configuração com que um subagente é iniciado quando uma tarefa é delegada a ele (modo, modelo, esforço de raciocínio). É o único lugar que decide isso: não altera o que você escolheu na caixa de escrita do chat. As opções vêm de uma sondagem ao vivo, então o que você escolher é exatamente o que o agente receberá. O que você deixar em branco é decidido por esse agente em tempo de execução.",
       "probing": "Carregando opções disponíveis do agente…",
       "probeFailed": "Falha ao carregar opções: {detail}",
       "retry": "Tentar novamente",
       "noConfigAvailable": "Este agente não possui opções configuráveis.",
       "modeLabel": "Modo",
-      "agentDefaultHint": "Padrão do agente: {value}",
-      "defaultOptionLabel": "Padrão ({value})"
+      "agentDefaultHint": "Se deixar em branco, este agente escolhe {value}",
+      "defaultOptionLabel": "Deixar o agente decidir ({value})"
     },
     "actions": {
       "dragSort": "Arraste para reordenar",

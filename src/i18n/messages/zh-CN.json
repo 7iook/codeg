@@ -594,14 +594,14 @@
       "loadFailed": "加载委托设置失败：{detail}",
       "tabGeneral": "通用",
       "tabAgentDefaults": "子智能体配置",
-      "agentDefaultsDescription": "多智能体协同在为委托调用启动子智能体时使用这些覆盖项。下方选项通过实时探测获取，所选即所用。",
+      "agentDefaultsDescription": "派发子智能体时，用这里的配置启动它（模式、模型、思考强度等）。这里是委托配置的唯一来源，不会改动你在聊天输入框里选的配置。下方选项通过实时探测获取，所选即所用；留空的项在运行时由该智能体自己决定。",
       "probing": "正在加载该智能体的可用配置项…",
       "probeFailed": "加载配置项失败：{detail}",
       "retry": "重试",
       "noConfigAvailable": "该智能体没有可配置项。",
       "modeLabel": "模式",
-      "agentDefaultHint": "智能体默认：{value}",
-      "defaultOptionLabel": "默认（{value}）"
+      "agentDefaultHint": "留空时，该智能体会自行选择 {value}",
+      "defaultOptionLabel": "由智能体决定（{value}）"
     },
     "actions": {
       "dragSort": "拖拽排序",

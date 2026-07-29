@@ -594,14 +594,14 @@
       "loadFailed": "위임 설정 로드 실패: {detail}",
       "tabGeneral": "일반",
       "tabAgentDefaults": "하위 에이전트 설정",
-      "agentDefaultsDescription": "다중 에이전트 협업이 위임 호출을 위해 하위 에이전트를 시작할 때 적용되는 재정의 항목입니다. 아래 옵션은 실시간 프로브로 가져오므로 선택한 항목이 그대로 에이전트에 전달됩니다.",
+      "agentDefaultsDescription": "작업을 위임해 하위 에이전트를 시작할 때 사용하는 설정입니다(모드·모델·추론 강도 등). 이를 결정하는 곳은 여기뿐이며, 채팅 입력창에서 선택한 설정은 바뀌지 않습니다. 아래 옵션은 실시간 프로브로 가져오므로 선택한 항목이 그대로 에이전트에 전달됩니다. 비워 둔 항목은 실행 시 해당 에이전트가 스스로 결정합니다.",
       "probing": "에이전트에서 사용 가능한 옵션을 로드 중…",
       "probeFailed": "옵션 로드 실패: {detail}",
       "retry": "다시 시도",
       "noConfigAvailable": "이 에이전트에는 구성 가능한 옵션이 없습니다.",
       "modeLabel": "모드",
-      "agentDefaultHint": "에이전트 기본값: {value}",
-      "defaultOptionLabel": "기본값 ({value})"
+      "agentDefaultHint": "비워 두면 이 에이전트가 {value}을(를) 선택합니다",
+      "defaultOptionLabel": "에이전트에 맡기기 ({value})"
     },
     "actions": {
       "dragSort": "드래그하여 순서 변경",

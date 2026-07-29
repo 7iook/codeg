@@ -594,14 +594,14 @@
       "loadFailed": "Error al cargar la configuración de delegación: {detail}",
       "tabGeneral": "General",
       "tabAgentDefaults": "Valores por defecto del agente",
-      "agentDefaultsDescription": "Anulaciones por agente que se aplican cuando Colaboración multiagente inicia un subagente para una llamada de delegación. Las opciones mostradas provienen de un sondeo en vivo: lo que selecciones es exactamente lo que el agente aceptará.",
+      "agentDefaultsDescription": "La configuración con la que se inicia un subagente cuando se le delega una tarea (modo, modelo, esfuerzo de razonamiento). Es el único lugar que lo decide: no cambia lo que elegiste en el cuadro de escritura del chat. Las opciones provienen de un sondeo en vivo, así que lo que selecciones es exactamente lo que recibirá el agente. Lo que dejes en blanco lo decide ese agente en tiempo de ejecución.",
       "probing": "Cargando las opciones disponibles del agente…",
       "probeFailed": "Error al cargar las opciones: {detail}",
       "retry": "Reintentar",
       "noConfigAvailable": "Este agente no tiene opciones configurables.",
       "modeLabel": "Modo",
-      "agentDefaultHint": "Predeterminado del agente: {value}",
-      "defaultOptionLabel": "Predeterminado ({value})"
+      "agentDefaultHint": "Si lo dejas en blanco, este agente elige {value}",
+      "defaultOptionLabel": "Que decida el agente ({value})"
     },
     "actions": {
       "dragSort": "Arrastrar para reordenar",

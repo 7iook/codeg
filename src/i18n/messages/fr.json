@@ -594,14 +594,14 @@
       "loadFailed": "Échec du chargement des paramètres de délégation : {detail}",
       "tabGeneral": "Général",
       "tabAgentDefaults": "Valeurs par défaut du sous-agent",
-      "agentDefaultsDescription": "Remplacements par agent appliqués lorsque la Collaboration multi-agent démarre un sous-agent pour un appel de délégation. Les options affichées proviennent d’une sonde en direct : votre sélection correspond exactement à ce que l’agent acceptera.",
+      "agentDefaultsDescription": "La configuration avec laquelle un sous-agent est démarré lorsqu’une tâche lui est déléguée (mode, modèle, effort de raisonnement). C’est le seul endroit qui la détermine : votre choix dans la zone de saisie du chat reste inchangé. Les options proviennent d’une sonde en direct : votre sélection correspond exactement à ce que recevra l’agent. Ce que vous laissez vide est décidé par cet agent à l’exécution.",
       "probing": "Chargement des options disponibles depuis l’agent…",
       "probeFailed": "Échec du chargement des options : {detail}",
       "retry": "Réessayer",
       "noConfigAvailable": "Cet agent n’a aucune option configurable.",
       "modeLabel": "Mode",
-      "agentDefaultHint": "Valeur par défaut de l’agent : {value}",
-      "defaultOptionLabel": "Par défaut ({value})"
+      "agentDefaultHint": "Si vous laissez vide, cet agent choisit {value}",
+      "defaultOptionLabel": "Laisser l’agent décider ({value})"
     },
     "actions": {
       "dragSort": "Glisser pour réordonner",

@@ -594,14 +594,14 @@
       "loadFailed": "Delegationseinstellungen konnten nicht geladen werden: {detail}",
       "tabGeneral": "Allgemein",
       "tabAgentDefaults": "Subagent-Standards",
-      "agentDefaultsDescription": "Pro-Agent-Überschreibungen, die angewendet werden, wenn die Multi-Agent-Zusammenarbeit einen Subagenten für einen Delegationsaufruf startet. Die hier gezeigten Optionen stammen aus einer Live-Abfrage – Ihre Auswahl ist exakt das, was der Agent akzeptiert.",
+      "agentDefaultsDescription": "Die Konfiguration, mit der ein Subagent gestartet wird, wenn eine Aufgabe an ihn delegiert wird – Modus, Modell, Denkaufwand. Nur hier wird das entschieden; Ihre Auswahl im Chat-Eingabefeld bleibt unverändert. Die Optionen stammen aus einer Live-Abfrage, Ihre Auswahl ist also genau das, was der Agent erhält. Was Sie leer lassen, entscheidet dieser Agent zur Laufzeit selbst.",
       "probing": "Verfügbare Optionen vom Agenten werden geladen…",
       "probeFailed": "Optionen konnten nicht geladen werden: {detail}",
       "retry": "Erneut versuchen",
       "noConfigAvailable": "Dieser Agent hat keine konfigurierbaren Optionen.",
       "modeLabel": "Modus",
-      "agentDefaultHint": "Agent-Standard: {value}",
-      "defaultOptionLabel": "Standard ({value})"
+      "agentDefaultHint": "Leer gelassen, wählt dieser Agent {value}",
+      "defaultOptionLabel": "Agent entscheiden lassen ({value})"
     },
     "actions": {
       "dragSort": "Zum Neuordnen ziehen",

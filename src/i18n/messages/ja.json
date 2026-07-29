@@ -594,14 +594,14 @@
       "loadFailed": "委任設定の読み込みに失敗しました: {detail}",
       "tabGeneral": "一般",
       "tabAgentDefaults": "サブエージェント設定",
-      "agentDefaultsDescription": "マルチエージェント連携が委任呼び出しのためにサブエージェントを起動するときに適用される上書き設定です。ここに表示されるオプションはライブプローブで取得しており、選択した内容がそのままエージェントに渡されます。",
+      "agentDefaultsDescription": "タスクを委任してサブエージェントを起動するときに使う設定です（モード・モデル・推論の強さなど）。これを決めるのはここだけで、チャット入力欄で選んだ設定は変わりません。以下のオプションはライブプローブで取得しており、選択した内容がそのままエージェントに渡されます。空欄のままにした項目は、実行時にそのエージェント自身が決定します。",
       "probing": "エージェントの利用可能な設定項目を読み込み中…",
       "probeFailed": "設定項目の読み込みに失敗しました: {detail}",
       "retry": "再試行",
       "noConfigAvailable": "このエージェントには設定可能な項目がありません。",
       "modeLabel": "モード",
-      "agentDefaultHint": "エージェント既定: {value}",
-      "defaultOptionLabel": "既定（{value}）"
+      "agentDefaultHint": "空欄のままなら、このエージェントは {value} を選びます",
+      "defaultOptionLabel": "エージェントに任せる（{value}）"
     },
     "actions": {
       "dragSort": "ドラッグして並べ替え",
