@@ -2815,6 +2815,7 @@
           "writeWithTarget": "{target} 쓰기",
           "notebookEditWithTarget": "NotebookEdit({target})",
           "globWithPattern": "Glob 패턴 {pattern}",
+          "listFilesWithPath": "파일 목록 {path}",
           "grepWithPattern": "Grep 패턴 {pattern}",
           "taskCreateWithSubject": "작업 생성: {subject}",
           "taskUpdateWithStatus": "작업 업데이트 #{id} -> {status}",
@@ -2824,6 +2825,12 @@
           "todosProgress": "할 일 ({done}/{total})",
           "skillWithName": "Skill: {name}",
           "genericWithContext": "{tool} ({context})"
+        },
+        "search": {
+          "noMatches": "일치하는 결과 없음",
+          "matchSummary": "{matches}개 일치 · {files}개 파일",
+          "fileSummary": "{files}개 파일",
+          "moreResults": "{count}개 결과가 더 있음(표시되지 않음)"
         },
         "toolGroup": {
           "search": "{count}회 검색",

@@ -2815,6 +2815,7 @@
           "writeWithTarget": "كتابة {target}",
           "notebookEditWithTarget": "NotebookEdit ({target})",
           "globWithPattern": "نمط glob {pattern}",
+          "listFilesWithPath": "عرض الملفات {path}",
           "grepWithPattern": "نمط grep {pattern}",
           "taskCreateWithSubject": "إنشاء مهمة: {subject}",
           "taskUpdateWithStatus": "تحديث المهمة #{id} -> {status}",
@@ -2824,6 +2825,12 @@
           "todosProgress": "المهام ({done}/{total})",
           "skillWithName": "Skill: {name}",
           "genericWithContext": "{tool} ({context})"
+        },
+        "search": {
+          "noMatches": "لا توجد نتائج مطابقة",
+          "matchSummary": "{matches, plural, zero {صفر تطابق} one {تطابق واحد} two {تطابقان} few {# تطابقات} many {# تطابقاً} other {# تطابق}} في {files, plural, zero {صفر ملف} one {ملف واحد} two {ملفان} few {# ملفات} many {# ملفاً} other {# ملف}}",
+          "fileSummary": "{files, plural, zero {صفر ملف} one {ملف واحد} two {ملفان} few {# ملفات} many {# ملفاً} other {# ملف}}",
+          "moreResults": "{count, plural, zero {لا نتائج إضافية} one {نتيجة إضافية واحدة غير معروضة} two {نتيجتان إضافيتان غير معروضتين} few {# نتائج إضافية غير معروضة} many {# نتيجة إضافية غير معروضة} other {# نتيجة إضافية غير معروضة}}"
         },
         "toolGroup": {
           "search": "{count, plural, zero {بحث صفر مرة} one {بحث مرة واحدة} two {بحث مرتين} few {بحث # مرات} many {بحث # مرة} other {بحث # مرة}}",

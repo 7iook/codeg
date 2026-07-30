@@ -2815,6 +2815,7 @@
           "writeWithTarget": "{target} schreiben",
           "notebookEditWithTarget": "NotebookEdit ({target})",
           "globWithPattern": "Glob-Muster {pattern}",
+          "listFilesWithPath": "Dateien auflisten {path}",
           "grepWithPattern": "Grep-Muster {pattern}",
           "taskCreateWithSubject": "Aufgabe erstellen: {subject}",
           "taskUpdateWithStatus": "Aufgabe aktualisieren #{id} -> {status}",
@@ -2824,6 +2825,12 @@
           "todosProgress": "Aufgaben ({done}/{total})",
           "skillWithName": "Skill: {name}",
           "genericWithContext": "{tool} ({context})"
+        },
+        "search": {
+          "noMatches": "Keine Treffer",
+          "matchSummary": "{matches, plural, one {# Treffer} other {# Treffer}} in {files, plural, one {# Datei} other {# Dateien}}",
+          "fileSummary": "{files, plural, one {# Datei} other {# Dateien}}",
+          "moreResults": "{count, plural, one {# weiteres Ergebnis nicht angezeigt} other {# weitere Ergebnisse nicht angezeigt}}"
         },
         "toolGroup": {
           "search": "{count, plural, one {# Suche durchgeführt} other {# Suchen durchgeführt}}",

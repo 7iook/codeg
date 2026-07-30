@@ -2815,6 +2815,7 @@
           "writeWithTarget": "写入 {target}",
           "notebookEditWithTarget": "Notebook 编辑 {target}",
           "globWithPattern": "Glob {pattern}",
+          "listFilesWithPath": "列出文件 {path}",
           "grepWithPattern": "Grep {pattern}",
           "taskCreateWithSubject": "创建任务：{subject}",
           "taskUpdateWithStatus": "更新任务 #{id} -> {status}",
@@ -2824,6 +2825,12 @@
           "todosProgress": "待办（{done}/{total}）",
           "skillWithName": "Skill：{name}",
           "genericWithContext": "{tool}：{context}"
+        },
+        "search": {
+          "noMatches": "无匹配结果",
+          "matchSummary": "{matches} 处匹配 · {files} 个文件",
+          "fileSummary": "{files} 个文件",
+          "moreResults": "另有 {count} 条结果未显示"
         },
         "toolGroup": {
           "search": "搜索 {count} 次",

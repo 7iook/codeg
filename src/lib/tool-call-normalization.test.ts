@@ -597,3 +597,52 @@ describe("inferLiveToolName Grok plan-mode via x.ai/tool.kind", () => {
     ).toBe("bash")
   })
 })
+
+describe("normalizeToolName codex command-action titles", () => {
+  it("resolves search command actions to grep", () => {
+    // codex-acp announces a search-classified shell command with NO rawInput and
+    // no tool name — only the title. Without this the whole title became the
+    // "tool name": no search icon, an "other" tool-group tally, and a body that
+    // dumped the raw {formatted_output, exit_code} envelope.
+    for (const title of [
+      "Search for 'Tests run:' in com.forwayaudio.app",
+      "Search for 'TODO'",
+      "Search in 'src/lib'",
+      "Search",
+    ]) {
+      expect(normalizeToolName(title)).toBe("grep")
+    }
+  })
+
+  it("resolves list-files command actions to glob", () => {
+    expect(normalizeToolName("List files in 'src/components'")).toBe("glob")
+    expect(normalizeToolName("List files")).toBe("glob")
+  })
+
+  it("keeps the sibling read command action on read", () => {
+    expect(normalizeToolName("Read file 'src/lib/a.ts'")).toBe("read")
+  })
+
+  it("leaves unrelated titles alone", () => {
+    // Note the trailing-quote strip normalizeToolName applies to unmatched names.
+    expect(normalizeToolName("Research 'x' in y")).toBe("Research 'x' in y")
+    expect(normalizeToolName("Searching for 'x'")).toBe("Searching for 'x")
+  })
+
+  it("infers the live name from the title when there is no rawInput", () => {
+    expect(
+      inferLiveToolName({
+        title: "Search for 'Tests run:' in com.forwayaudio.app",
+        kind: "search",
+        rawInput: null,
+      })
+    ).toBe("grep")
+    expect(
+      inferLiveToolName({
+        title: "List files in 'src'",
+        kind: "read",
+        rawInput: null,
+      })
+    ).toBe("glob")
+  })
+})

@@ -2815,6 +2815,7 @@
           "writeWithTarget": "{target} に書き込み",
           "notebookEditWithTarget": "NotebookEdit（{target}）",
           "globWithPattern": "Glob パターン {pattern}",
+          "listFilesWithPath": "ファイル一覧 {path}",
           "grepWithPattern": "Grep パターン {pattern}",
           "taskCreateWithSubject": "タスク作成: {subject}",
           "taskUpdateWithStatus": "タスク更新 #{id} -> {status}",
@@ -2824,6 +2825,12 @@
           "todosProgress": "タスク ({done}/{total})",
           "skillWithName": "Skill: {name}",
           "genericWithContext": "{tool}（{context}）"
+        },
+        "search": {
+          "noMatches": "一致する結果なし",
+          "matchSummary": "{matches} 件の一致 · {files} 件のファイル",
+          "fileSummary": "{files} 件のファイル",
+          "moreResults": "他に {count} 件の結果は非表示"
         },
         "toolGroup": {
           "search": "{count} 件を検索",

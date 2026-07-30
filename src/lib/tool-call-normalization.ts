@@ -1,3 +1,7 @@
+import {
+  parseCodexListFilesTitle,
+  parseCodexSearchTitle,
+} from "@/lib/codex-command-action"
 import { COLLAB_AGENT_TOOL_NAME, isCodexCollabInput } from "@/lib/collab-tool"
 
 const EXACT_TOOL_NAME_ALIASES: Record<string, string> = {
@@ -350,8 +354,8 @@ function inferFromInput(
 }
 
 export function normalizeToolName(toolName: string): string {
-  const trimmed = toolName
-    .trim()
+  const raw = toolName.trim()
+  const trimmed = raw
     .replace(/^[:：'"`“”‘’\s]+/, "")
     .replace(/['"`“”‘’\s]+$/, "")
   if (!trimmed) return "tool"
@@ -361,6 +365,19 @@ export function normalizeToolName(toolName: string): string {
 
   const goalUpdate = parseGoalUpdateTitle(trimmed)
   if (goalUpdate) return goalUpdate.toolName
+
+  // codex-acp command-action tool calls (`createCommandActionEvent`) carry no
+  // tool name and no rawInput — only a human title — so the search / list-files
+  // identity has to be read back out of it. Without this the whole title becomes
+  // the "tool name": no search icon, an "other" tool-group tally, and a body
+  // that dumps the raw `{formatted_output, exit_code}` envelope. The sibling
+  // `Read file '<path>'` shape already resolves via the `^read` freeform rule.
+  //
+  // Matched against `raw`, not `trimmed`: these titles END in the quote that
+  // closes the interpolated query/path (`Search for 'TODO'`), and the trailing-
+  // quote strip above would eat it.
+  if (parseCodexSearchTitle(raw)) return "grep"
+  if (parseCodexListFilesTitle(raw)) return "glob"
 
   const canonical = canonicalizeToolName(trimmed)
   const alias = EXACT_TOOL_NAME_ALIASES[canonical]
