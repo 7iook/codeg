@@ -3080,6 +3080,14 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       switch (e.type) {
         case "status_changed":
           flushStreamingQueue()
+          // Also drain the tool-call queue. The panel promotes `liveMessage`
+          // into `localTurns` on the prompting→idle edge that this dispatch
+          // produces, and promotion snapshots whatever the sink has written by
+          // then — so any tool update still queued here is dropped for good
+          // (`liveMessage` is nulled by COMPLETE_TURN). That is the sender-side
+          // half of the "last step vanishes at completion" report: the queued
+          // `status: completed` updates never reach the promoted turn.
+          flushPendingToolCallUpdates()
           dispatch({ type: "STATUS_CHANGED", contextKey, status: e.status })
           break
         case "content_delta":

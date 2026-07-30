@@ -535,6 +535,83 @@ describe("AcpConnectionsProvider permission request details", () => {
     }
   })
 
+  it("drains queued tool-call updates before a status change so promotion can see them", async () => {
+    // The panel promotes `liveMessage` → `localTurns` on the prompting→idle
+    // edge and COMPLETE_TURN then nulls `liveMessage`, so a tool update still
+    // sitting in the rAF queue when the status flips is lost permanently — the
+    // sender's own view rewinds to before that step. `status_changed` must
+    // therefore drain the tool queue, exactly as it already drains the
+    // streaming text queue.
+    const originalRaf = globalThis.requestAnimationFrame
+    const originalCancelRaf = globalThis.cancelAnimationFrame
+    // Suspended frame loop: only an explicit flush can drain the queue.
+    vi.stubGlobal("requestAnimationFrame", () => 1)
+    vi.stubGlobal("cancelAnimationFrame", () => {})
+
+    try {
+      await mountProvider()
+
+      await act(async () => {
+        await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+      })
+
+      const handlers = latestAttachHandlers()
+
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "status_changed",
+        status: "prompting",
+      })
+
+      emitAcpEvent(handlers, {
+        seq: 2,
+        connection_id: "spawned-conn",
+        type: "tool_call",
+        tool_call_id: "call_last",
+        title: "Bash",
+        kind: "execute",
+        status: "pending",
+        content: null,
+        raw_input: JSON.stringify({ command: "pnpm build" }),
+        raw_output: null,
+      })
+
+      // The final step's completion, still queued...
+      emitAcpEvent(handlers, {
+        seq: 3,
+        connection_id: "spawned-conn",
+        type: "tool_call_update",
+        tool_call_id: "call_last",
+        title: "Bash",
+        status: "completed",
+        content: "step3 done",
+        raw_input: null,
+        raw_output: null,
+      })
+
+      // ...and the turn ends immediately after. Promotion reads liveMessage
+      // synchronously off this dispatch, so the update must already be in.
+      emitAcpEvent(handlers, {
+        seq: 4,
+        connection_id: "spawned-conn",
+        type: "status_changed",
+        status: "connected",
+      })
+
+      const live = h.store!.getConnection(TAB)?.liveMessage
+      const block = live?.content.find(
+        (b) => b.type === "tool_call" && b.info.tool_call_id === "call_last"
+      )
+      expect(block?.type === "tool_call" ? block.info.status : undefined).toBe(
+        "completed"
+      )
+    } finally {
+      vi.stubGlobal("requestAnimationFrame", originalRaf)
+      vi.stubGlobal("cancelAnimationFrame", originalCancelRaf)
+    }
+  })
+
   it("hydrates snapshot permission details from active tool call input", async () => {
     await mountProvider()
 
