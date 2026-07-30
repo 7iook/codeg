@@ -3028,8 +3028,33 @@ async fn run_connection(
                 let runtime = terminal_runtime.clone();
                 async move |req: WaitForTerminalExitRequest,
                             responder: Responder<WaitForTerminalExitResponse>,
-                            _cx: ConnectionTo<Agent>| {
-                    respond_terminal_request(responder, runtime.wait_for_terminal_exit(req).await)?;
+                            cx: ConnectionTo<Agent>| {
+                    // `terminal/wait_for_exit` blocks until the command exits,
+                    // and sacp awaits request handlers INSIDE its single
+                    // dispatch loop ("the loop awaits the handler to completion
+                    // before processing the next message"). Answering inline
+                    // therefore freezes the ENTIRE connection for a command
+                    // that never exits — an agent that backgrounds a dev server
+                    // and then monitors it (grok does exactly this) would stall
+                    // the turn forever, with every later session/update stuck
+                    // unprocessed in the transport queue.
+                    //
+                    // Answer from a spawned task instead — sacp's own sanctioned
+                    // escape hatch. `cx.spawn` rather than `tokio::spawn` so the
+                    // wait is connection-scoped and torn down with it.
+                    let runtime = runtime.clone();
+                    cx.spawn(async move {
+                        let result = runtime.wait_for_terminal_exit(req).await;
+                        if let Err(err) = respond_terminal_request(responder, result) {
+                            // Propagating this would tear down the whole
+                            // connection, and a failed send only means the peer
+                            // is already gone.
+                            tracing::warn!(
+                                "[ACP] failed to answer terminal/wait_for_exit: {err}"
+                            );
+                        }
+                        Ok(())
+                    })?;
                     Ok(())
                 }
             },
