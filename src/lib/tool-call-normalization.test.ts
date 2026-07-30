@@ -598,6 +598,100 @@ describe("inferLiveToolName Grok plan-mode via x.ai/tool.kind", () => {
   })
 })
 
+describe("inferLiveToolName Grok identity via x.ai/tool.name", () => {
+  // The three frames of ONE background-task poll, captured from a real session
+  // (~/.grok/…/019fb314…). Grok rewrites `title` on every update, so the title
+  // fallback named this single call three different things — the last one
+  // colliding with the bash card it was polling.
+  const meta = {
+    "x.ai/tool": {
+      version: 1,
+      name: "get_command_or_subagent_output",
+      kind: "background_task_action",
+      namespace: "grok_build",
+      label: "Background Task",
+      read_only: true,
+    },
+  }
+
+  it("keeps one identity across the whole mutating lifecycle", () => {
+    const announced = inferLiveToolName({
+      title: "get_command_or_subagent_output",
+      kind: null,
+      rawInput: JSON.stringify({ task_ids: ["term_b0d"], timeout_ms: 15000 }),
+      meta,
+    })
+    const inFlight = inferLiveToolName({
+      title: "Get task output: term_b0d9512484964551a5bac4f82a805ae2",
+      kind: "other",
+      rawInput: JSON.stringify({
+        variant: "TaskOutput",
+        task_ids: ["term_b0d"],
+        timeout_ms: 15000,
+      }),
+      meta,
+    })
+    // Completed: the title becomes the polled command — this used to collapse
+    // to "bash" and fold into the launching command's tool group.
+    const completed = inferLiveToolName({
+      title: "/bin/bash -lc 'pnpm dev -- --port 3001' (term_b0d)",
+      kind: "other",
+      rawInput: JSON.stringify({
+        variant: "TaskOutput",
+        task_ids: ["term_b0d"],
+        timeout_ms: 15000,
+      }),
+      meta,
+    })
+
+    expect(announced).toBe("get_command_or_subagent_output")
+    expect(inFlight).toBe(announced)
+    expect(completed).toBe(announced)
+  })
+
+  it("lets the input shape keep priority over the meta name", () => {
+    // Grok's edit tool: the meta name (`search_replace`) has no card of its own,
+    // while the input shape routes it to the diff card. Input wins.
+    expect(
+      inferLiveToolName({
+        title: "Edit `/tmp/a.ts`",
+        kind: "edit",
+        rawInput: JSON.stringify({
+          file_path: "/tmp/a.ts",
+          old_string: "a",
+          new_string: "b",
+        }),
+        meta: { "x.ai/tool": { name: "search_replace", kind: "edit" } },
+      })
+    ).toBe("edit")
+  })
+
+  it("resolves an arg-less frame from the meta name", () => {
+    // Before rawInput streams in there is nothing else to go on.
+    expect(
+      inferLiveToolName({
+        title: "read_file",
+        kind: null,
+        rawInput: null,
+        meta: { "x.ai/tool": { name: "read_file", kind: "read" } },
+      })
+    ).toBe("read")
+  })
+
+  it("ignores the generic `use_tool` MCP envelope", () => {
+    // The backend unwraps the envelope into the title; the envelope name would
+    // send every MCP call to the generic tool card instead.
+    expect(
+      inferLiveToolName({
+        title: "codeg-mcp__delegate_to_agent",
+        kind: "other",
+        rawInput: JSON.stringify({ agent_type: "codex", task: "run build" }),
+        meta: { "x.ai/tool": { name: "use_tool", kind: "use_tool" } },
+      })
+    ).toBe("delegate_to_agent")
+  })
+})
+
 describe("normalizeToolName codex command-action titles", () => {
   it("resolves search command actions to grep", () => {
     // codex-acp announces a search-classified shell command with NO rawInput and

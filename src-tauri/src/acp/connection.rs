@@ -6571,10 +6571,12 @@ pub(crate) fn json_value_to_text(val: &Option<serde_json::Value>) -> Option<Stri
 ///
 /// Mirror the history parser (`parsers/grok.rs::update_tool_output`): prefer the
 /// already-serialized `content`, and only fall back — when `content` is empty —
-/// to the object's string `output_for_prompt` (Bash/terminal) or, for an MCP
-/// `rawOutput`, the text under `output` (see grok_mcp_output_text). Returning
-/// `None` lets the frontend render `content`. Never emit the object blob.
-/// Non-object / absent / unrecognized `rawOutput` → `None`.
+/// to the object's string `output_for_prompt` (Bash/terminal), a background-task
+/// `TaskOutput` envelope (see `parsers::grok::grok_task_output_envelope`, the
+/// one exception to "never emit the object blob": the frontend parses it into a
+/// background-task card), or, for an MCP `rawOutput`, the text under `output`
+/// (see grok_mcp_output_text). Returning `None` lets the frontend render
+/// `content`. Non-object / absent / unrecognized `rawOutput` → `None`.
 ///
 /// Note: `content` here is `serialize_tool_call_content`, which for a Grok
 /// terminal call is the plain text block (verified against real `~/.grok`
@@ -6598,6 +6600,13 @@ fn grok_live_tool_output(
         .filter(|s| !s.is_empty())
     {
         return Some(text.to_string());
+    }
+    // Background-task polls (`get_command_or_subagent_output`): the command,
+    // exit code and shell text all live under the `TaskOutput` envelope, which
+    // matches none of the paths around it — without this the card streams empty.
+    // Shared with the history parser so both hand the frontend the same string.
+    if let Some(envelope) = crate::parsers::grok::grok_task_output_envelope(raw) {
+        return Some(envelope);
     }
     // MCP calls (Grok's `use_tool` envelope): the result text lives under
     // `output.<*Output>` instead (see grok_mcp_output_text). Without this a
@@ -9325,6 +9334,38 @@ mod tests {
         assert_eq!(
             grok_live_tool_output(&ws, &raw).as_deref(),
             Some("exit: 0\n\nok")
+        );
+    }
+
+    /// A `get_command_or_subagent_output` poll has no `content[]` and no
+    /// `output_for_prompt` — its whole result sits under the `TaskOutput`
+    /// envelope, which used to be dropped, streaming an empty card. Live must
+    /// emit the SAME string the history parser stores so the background-task
+    /// card renders identically before and after a reload.
+    #[test]
+    fn grok_live_tool_output_emits_task_output_envelope() {
+        let raw = serde_json::json!({
+            "type": "TaskOutput",
+            "Result": {
+                "task_id": "term_b0d",
+                "command": "/bin/bash -lc 'pnpm dev'",
+                "status": "failed",
+                "exit_code": 1,
+                "output": "boom",
+            },
+        });
+        let live = grok_live_tool_output(&None, &Some(raw.clone())).expect("envelope emitted");
+        assert_eq!(
+            live,
+            crate::parsers::grok::grok_task_output_envelope(&raw).unwrap(),
+            "live and history must hand the frontend the same string"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&live).unwrap();
+        assert_eq!(parsed["Result"]["exit_code"], 1);
+        // A poll that DOES carry clean content keeps content's precedence.
+        assert_eq!(
+            grok_live_tool_output(&Some("已完成".to_string()), &Some(raw)),
+            None
         );
     }
 

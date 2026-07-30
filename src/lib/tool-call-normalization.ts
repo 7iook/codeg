@@ -548,6 +548,21 @@ export function inferLiveToolName(params: {
   // heuristic rewrites `memory_recall` to `memory_re`.
   if (metaToolName) return metaToolName.toLowerCase()
 
+  // Grok stamps the authoritative tool name in `_meta["x.ai/tool"].name` while
+  // its `title` MUTATES across the lifecycle. A background-task poll is the
+  // worst case: `get_command_or_subagent_output` → "Get task output: term_…" →
+  // "/bin/bash -lc 'pnpm dev …' (term_b0d)", so the title fallback below named
+  // the same call three different things and finally collapsed it to "bash" —
+  // where the history path (which reads `x.ai/tool.name`) kept the real name.
+  //
+  // Placed AFTER `inferFromInput` so every input-shape classification is
+  // preserved (`search_replace` → "edit" via old_string/new_string,
+  // `run_terminal_command` → "bash" via command, …) and this only decides the
+  // cases where the input shape is silent. See `extractGrokToolName` for the
+  // `use_tool` exclusion.
+  const grokToolName = extractGrokToolName(params.meta)
+  if (grokToolName) return normalizeToolName(grokToolName)
+
   const byTitle = normalizeToolName(params.title ?? "")
   if (byTitle !== "tool") return byTitle
 
@@ -622,4 +637,27 @@ function extractGrokPlanModeToolName(
   if (kind === "enter_plan") return "enter_plan_mode"
   if (kind === "exit_plan") return "exit_plan_mode"
   return null
+}
+
+/**
+ * Grok's authoritative tool name from `_meta["x.ai/tool"].name` — the same
+ * field the history parser stores (`parsers/grok.rs`), and the only identity on
+ * the live wire that does NOT mutate across a call's lifecycle (`title` does).
+ *
+ * `use_tool` — Grok's generic MCP envelope — is excluded: the backend unwraps it
+ * and puts the inner `<server>__<tool>` name in the TITLE
+ * (`connection.rs::unwrap_grok_use_tool`), so the envelope name would send every
+ * MCP call (delegation companions included) to the generic tool card.
+ */
+function extractGrokToolName(
+  meta: Record<string, unknown> | null | undefined
+): string | null {
+  if (!meta || typeof meta !== "object") return null
+  const tool = (meta as Record<string, unknown>)["x.ai/tool"]
+  if (!tool || typeof tool !== "object") return null
+  const name = (tool as Record<string, unknown>).name
+  if (typeof name !== "string") return null
+  const trimmed = name.trim()
+  if (!trimmed || trimmed === "use_tool") return null
+  return trimmed
 }
