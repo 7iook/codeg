@@ -439,7 +439,22 @@ pub enum ConnectionCommand {
         message_id: String,
         reply: tokio::sync::oneshot::Sender<Result<crate::acp::types::SteerOutcome, AcpError>>,
     },
-    Cancel,
+    /// Stop the current turn.
+    ///
+    /// `authorization` is `Some` exactly when this Cancel was committed through
+    /// the cancel-scope preview flow (`AcpManager::cancel_with_scope_token`),
+    /// and it names the seal installed by that commit. Carrying it on the command
+    /// is what binds the authorization to THIS Cancel: the delegation cascade
+    /// consumes only the seal it owns, so an unauthorized cascade arriving first
+    /// (a natural non-`end_turn` turn end) can no longer consume it and leave this
+    /// Cancel to run unbounded over delegations the user was never shown.
+    ///
+    /// `None` for every ordinary cancel (no delegations to authorize, or a
+    /// non-preview caller); those keep the pre-existing unbounded turn cascade,
+    /// which is correct for them.
+    Cancel {
+        authorization: Option<crate::acp::delegation::broker::CancelAuthorization>,
+    },
     RespondPermission {
         request_id: String,
         option_id: String,
@@ -2407,18 +2422,22 @@ fn claude_raw_sdk_session_meta(
 ///   `=== true`, and a pre-0.63 binary ignores the unknown key, so this is
 ///   inert everywhere it isn't understood.
 fn build_client_capabilities(agent_type: AgentType) -> ClientCapabilities {
-    let mut client_capabilities = ClientCapabilities::new().terminal(true).fs(
-        FileSystemCapabilities::new()
-            .read_text_file(true)
-            .write_text_file(true),
-    );
+    let mut client_capabilities =
+        ClientCapabilities::new()
+            .terminal(true)
+            .fs(FileSystemCapabilities::new()
+                .read_text_file(true)
+                .write_text_file(true));
     if agent_type == AgentType::Codex {
         client_capabilities = client_capabilities
             .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
     }
     if agent_type == AgentType::ClaudeCode {
         let mut meta = serde_json::Map::new();
-        meta.insert("subagent-transcript".to_string(), serde_json::Value::Bool(true));
+        meta.insert(
+            "subagent-transcript".to_string(),
+            serde_json::Value::Bool(true),
+        );
         client_capabilities = client_capabilities.meta(meta);
     }
     client_capabilities
@@ -6453,7 +6472,7 @@ async fn run_conversation_loop<'a>(
                                         "mid-turn",
                                     );
                                 }
-                                Some(ConnectionCommand::Cancel) => {
+                                Some(ConnectionCommand::Cancel { authorization }) => {
                                     // Send CancelNotification to agent to stop the current turn
                                     let _ = cx.send_notification_to(
                                         Agent,
@@ -6515,7 +6534,34 @@ async fn run_conversation_loop<'a>(
                                     // drain-first lock guarantees no double
                                     // DelegationCompleted emit.
                                     if let Some(inj) = delegation_injection {
-                                        inj.broker.cancel_by_parent_turn(conn_id).await;
+                                        // An authorized Cancel presents its seal
+                                        // so the cascade consumes exactly the
+                                        // authorization that scheduled it. A
+                                        // `false` return means that seal is no
+                                        // longer live (already served, superseded,
+                                        // or the connection was torn down and
+                                        // re-established): NOTHING was drained, so
+                                        // fall back to the unbounded cascade would
+                                        // be exactly the silent downgrade we are
+                                        // eliminating. Skip the delegation cascade
+                                        // instead and let the user re-preview —
+                                        // the turn itself is still stopped above.
+                                        match authorization {
+                                            Some(auth) => {
+                                                if !inj
+                                                    .broker
+                                                    .cancel_by_parent_turn_authorized(conn_id, auth)
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        "[ACP] authorized cancel arrived without a live seal; \
+                                                         skipping the delegation cascade (re-preview required) \
+                                                         connection_id={conn_id}"
+                                                    );
+                                                }
+                                            }
+                                            None => inj.broker.cancel_by_parent_turn(conn_id).await,
+                                        }
                                         // Reclaim any parked `ask_user_question` /
                                         // Grok `exit_plan_mode` approval owned by this
                                         // connection. Unlike `perms` (drained inline
@@ -6690,7 +6736,7 @@ async fn run_conversation_loop<'a>(
                     "while idle",
                 );
             }
-            Some(ConnectionCommand::Cancel) => {
+            Some(ConnectionCommand::Cancel { authorization }) => {
                 let cx = session.connection();
                 let sid = session.session_id().clone();
                 let _ = cx.send_notification_to(Agent, CancelNotification::new(sid.clone()));
@@ -6716,7 +6762,26 @@ async fn run_conversation_loop<'a>(
                 // backgrounds the slow child teardown): see inner Cancel
                 // handler above for rationale.
                 if let Some(inj) = delegation_injection {
-                    inj.broker.cancel_by_parent_turn(conn_id).await;
+                    // Same authorization routing as the mid-prompt arm above: an
+                    // authorized Cancel consumes only its own seal, and a seal
+                    // that is no longer live means skip the cascade (nothing was
+                    // drained) rather than silently widening to unbounded.
+                    match authorization {
+                        Some(auth) => {
+                            if !inj
+                                .broker
+                                .cancel_by_parent_turn_authorized(conn_id, auth)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "[ACP] authorized cancel arrived without a live seal; \
+                                     skipping the delegation cascade (re-preview required) \
+                                     connection_id={conn_id}"
+                                );
+                            }
+                        }
+                        None => inj.broker.cancel_by_parent_turn(conn_id).await,
+                    }
                 }
             }
             Some(ConnectionCommand::Fork { reply }) => {
@@ -6915,7 +6980,9 @@ fn build_new_file_diff(path: &str, new_text: &str) -> String {
 /// on `AcpEvent::ToolCall(Update)` stays absent for non-image tool calls
 /// (preserves replace-on-update semantics: an absent field means "keep
 /// prior", a `Some(vec)` replaces).
-pub(crate) fn extract_tool_call_images(content: &[ToolCallContent]) -> Option<Vec<ToolCallImageInfo>> {
+pub(crate) fn extract_tool_call_images(
+    content: &[ToolCallContent],
+) -> Option<Vec<ToolCallImageInfo>> {
     let mut imgs: Vec<ToolCallImageInfo> = Vec::new();
     for item in content {
         if let ToolCallContent::Content(c) = item {
@@ -9431,7 +9498,10 @@ mod tests {
                 message,
             } => {
                 assert_eq!(session_id, "session-123");
-                assert_eq!(message.get("subtype").and_then(|v| v.as_str()), Some("api_retry"));
+                assert_eq!(
+                    message.get("subtype").and_then(|v| v.as_str()),
+                    Some("api_retry")
+                );
             }
             other => panic!("api_retry must still map to ClaudeSdkMessage, got {other:?}"),
         }
@@ -10726,7 +10796,7 @@ mod tests {
                             "test",
                         );
                     }
-                    ConnectionCommand::Cancel => {
+                    ConnectionCommand::Cancel { .. } => {
                         loop_cancels.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         break;
                     }
@@ -10761,7 +10831,9 @@ mod tests {
         // outstanding. The window is far below STEERING_REQUEST_TIMEOUT (10s), so
         // an inline await cannot pass this by simply timing out first.
         cmd_tx
-            .send(ConnectionCommand::Cancel)
+            .send(ConnectionCommand::Cancel {
+                authorization: None,
+            })
             .await
             .expect("the loop must still be dequeuing commands");
         tokio::time::timeout(Duration::from_millis(500), loop_handle)
@@ -10935,10 +11007,23 @@ mod tests {
             .find(test_mod)
             .expect("test module attribute not found; re-derive the production window");
         let prod = &src[..prod_end];
-        let dispatch_call = concat!("spawn_steering_request(", "\n");
+        // The trailing newline proves the call is a WRAPPED multi-line invocation
+        // rather than a substring of some longer identifier. It must be matched
+        // line-ending-agnostically: the committed blob is LF, but this repo has
+        // `core.autocrlf=true`, so on a Windows checkout the file on disk (which
+        // is what `include_str!` reads) is CRLF. A bare `"...(\n"` needle finds
+        // ZERO matches there and this gate fails while production is perfectly
+        // fine — a false red, which erodes trust in the gate exactly as fast as a
+        // false green hides a defect.
+        let dispatch_call = concat!("spawn_steering_request(", "\r\n");
+        let dispatch_call_lf = concat!("spawn_steering_request(", "\n");
+        let dispatch_count = if prod.contains(dispatch_call) {
+            prod.matches(dispatch_call).count()
+        } else {
+            prod.matches(dispatch_call_lf).count()
+        };
         assert_eq!(
-            prod.matches(dispatch_call).count(),
-            2,
+            dispatch_count, 2,
             "each Steer arm must dispatch via `spawn_steering_request` — an arm \
              that awaits the request inline stops the loop from dequeuing \
              Cancel/Disconnect while the agent is unresponsive"

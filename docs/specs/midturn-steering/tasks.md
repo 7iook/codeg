@@ -35,7 +35,7 @@ Feature: `midturn-steering` · 2026-07-29
 - verify: `cargo test --no-default-features --bin codeg-mcp --lib` → EXIT=0 (1937 passed 当时); 负向 mutation 将探测改为 `parse_steering_supported(None)` → EXIT=101 (`left: 0 right: 1`)，主 AI 已独立复现红/绿
 - files: `src-tauri/src/acp/connection.rs:1676-1687,3295,3311,3399-3411,9700-9744`, `src-tauri/src/acp/types.rs:206-210`, `src-tauri/src/acp/session_state.rs:409-421,654-656,1382,1473-1481`, `src/lib/types.ts:1416-1419,1816`, `src/lib/snapshot-denormalize.ts:63-68,134-136`, `src/contexts/acp-connections-context.tsx:173-180,519-523,2158-2168,3434-3441`
 - AC: R2.1 / R2.2（能力三态）
-- commit: pending
+- commit: 1e0eec4b
 - ⚠️ 实现者自查出首版门是**假门**（`include_str!` needle 匹配到测试自身源码），已用 `concat!` 拆分 needle 重建
 
 ## T1.5 可达性与令牌绑定（design §2.2.1 · **P1**·原定 P0 已降级 · 与 T2/T7 同期）
@@ -65,7 +65,7 @@ Feature: `midturn-steering` · 2026-07-29
 - verify: `cargo test --no-default-features --bin codeg-mcp --lib` → EXIT=0 (1969 passed / 0 failed); 定位式门破坏两次均转红（删 arm · 留空 arm）
 - files: `src-tauri/src/acp/types.rs:223,1219`, `src-tauri/src/acp/connection.rs:49,404,4625,4659,4686,6246,6505,10119`, `src-tauri/src/acp/manager.rs:1279`, `src-tauri/src/acp/session_state.rs:488,632,669,1543`, `src-tauri/src/acp/error.rs:47`, `src-tauri/src/commands/acp.rs:8401`, `src-tauri/src/web/handlers/acp.rs:415`, `src-tauri/src/web/router.rs:638`, `src-tauri/src/lib.rs:1110`
 - AC: R1.1 / R1.6（失败分类）
-- commit: pending
+- commit: 1e0eec4b
 - ⚠️ 事实纠正：本机 `codex-acp` v1.1.2 对 `steer|_session/steering` **零命中**，`failed` 分支目前不可达（主 AI 已复验）。spec 中"天然覆盖 Codex"的说法已收回。
 
 ## T3 startedNewTurn 竞态降级（R1.1 · 依赖 T2）
@@ -140,7 +140,7 @@ Feature: `midturn-steering` · 2026-07-29
 - verify: `pnpm test` → EXIT=0 (240 files / 3100 tests，含 `src/i18n/messages.test.ts` locale parity 门); `pnpm build` → EXIT=0
 - files: `src/i18n/messages/{en,zh-CN,zh-TW,ja,ko,es,de,fr,pt,ar}.json:597,603,604`（零 `.tsx` 改动，故 C2 结构上不可违反）
 - AC: AC5
-- commit: pending
+- commit: 93b0014d（i18n 三条文案 · 10 locale）+ caabd474（评审后二次收敛）
 
 ## ~~T9 resume 用户入口~~ · 已裁决不实施
 
@@ -150,7 +150,7 @@ Feature: `midturn-steering` · 2026-07-29
 - verify: 业务现实门四问逐一作答（无需跑命令）→ 无真实场景·无真实损失·既有三条路径已覆盖（会话列表点击 / `connection.rs:3372-3386` 自动降级 / `broker.rs:3953-4000` 续跑）→ 裁决 D
 - files: `docs/specs/midturn-steering/requirements.md` §R6（裁决记录）；无代码改动
 - AC: AC6
-- commit: pending
+- commit: caabd474
 
 ## T10 端到端验收（依赖 T1–T6 · 不可省）
 
@@ -168,7 +168,7 @@ Feature: `midturn-steering` · 2026-07-29
   - verify: 见 T9（裁决型项目，无命令可跑）
   - files: `docs/specs/midturn-steering/requirements.md` §R6
   - AC: AC6
-  - commit: pending
+  - commit: caabd474
 - [ ] **负向 mutation 打在生产装配点**：让 `connection.rs:6021` select arm 不处理 `Steer` → 端到端门必红。仍绿 = 测试自行构造链路、对生产装配失明（E-091）
 - [ ] ⚠️ 单测绿**不算**通过（E-052/E-091：造好没接、门对不准交付物）
 
@@ -232,3 +232,11 @@ T8、T9、T0-R 完全独立，可并行
 
 - 2026-07-30 **合并核验（主 AI 独立跑，非采信 SUB 自述）**：`cargo test --no-default-features --bin codeg-mcp --lib` **1986 passed / 0 failed**；`cargo clippy --all-targets --features test-utils -- -D warnings` EXIT=0；`cargo check --no-default-features --bin codeg-server` 干净；`pnpm tsc --noEmit` EXIT=0；`pnpm test` **3154 passed / 243 files**。
   - **仍未验证（诚实声明）**：真实 mid-turn 注入**一次都没跑过**。全部证据为静态 —— agent dist 源码、单测、受控 mutation。T10 端到端是它的第一次真实检验；在那之前不得宣称功能对用户可用。
+
+- 2026-07-30 **第二次异构审查（sonnet · 后端+前端合并阶段）结论 NEEDS_CHANGES：3 critical + 1 important**。它确认了上一轮 P0 的即时注册窗口**已真封住**（两条注册路径在同一 `PendingInner` 锁内递增 epoch，inflight→running 搬迁保留 `registered_epoch`，seal 与 bounded drain 之间不释锁），但指出封印机制本身还有两个洞，且二者同源：
+  - **C1 封印未绑定到授权它的那条 Cancel** —— `ConnectionCommand::Cancel`（`connection.rs:442`）是**无载荷的 unit variant**，所以封印只能是"每连接一个全局标志"，`drain_for_parent_cancel`（`broker.rs:4063`）无条件 `clear_seal`，**先到的任何级联都会代领并清掉它**。四个生产 `cancel_by_parent_turn` 调用点里有三个是 `if reason_str != "end_turn"` 的**自然轮次结束**（`connection.rs:6248/6315/6518`），不是用户取消 —— 于是：用户授权杀 N → N+1 注册 → 父轮以 `empty`/`max_tokens`/`refusal` 自然结束，该级联尊重封印（放过 N+1）**然后清掉它** → 真正的用户 Cancel 稍后到达，无封印、无界级联，N+1 死。主 AI 已独立复核：`clear_seal` 全仓仅一处调用、`cancel_by_parent_turn` 四处生产调用点、doc comment 自己写着"a non-`end_turn` turn end, **or** a user Cancel"——**该路径确实可达**，不是理论担忧。
+  - **C2 `SEAL_GRACE` 10s 定时过期** —— 授权的 Cancel 若在 10s 后才被 dequeue（命令循环正忙于先前取出的控制请求 / 运行时暂停 / 宿主休眠 / 调度拥塞），保护失效、无界级联杀 N+1。dequeue 延迟无上界、无 matching ack、无实测数据支撑 10s，**这个常量是经验猜测而非可辩护的安全边界**。修复方向：不许调大常量；保护须持续到匹配的 Cancel 被明确消费或撤销，过期只能让迟到命令**安全拒绝/要求重新预览**，不得降级成无界取消。
+  - **C3 已提交项仍写 `commit: pending`**（5 处）—— 主 AI 已按真实归属回填而非一律填最新 hash：T1/T2 → `1e0eec4b`；T8 → `93b0014d` + `caabd474`（文案落地 + 评审后二次收敛）；T9/AC6 → `caabd474`。
+  - **I1 面板层竞态**：当前实现**安全但无测试**。安全性来源被注释写错了 —— 不是"两条 dequeue 路径都经过 `markInFlight`"（它们用的是两个不同 primitive：auto-flush 走同步 `dequeue()`、send-now 走同步 `markInFlight()`），而是**两个 claim 都对同一权威 ref 同步生效**，JS 事件循环串行 → 后到者必然看到"不存在"或"非 queued"。任一处加 `await`、改 state-based read 或拆分 claim 都会静默重新引入双发而现有测试全绿。
+  - 裁决三问的回答：即时 seal 窗口 = 设计正确但完整授权窗口仍未闭合（封印被错误 cascade 提前消费）；`SEAL_GRACE` = 授权 Cancel 超 10s 到达时 N+1 会死，常量无可验证上界；panel-level race = 当前无真实双发，但组合层回归测试应补齐。
+  - 上一个 reviewer（非本次）连续三轮只给进度说明，且**把 mutation 留在生产代码里没恢复**（`build_steering_request` 的 wire method 仍是 `"_session/broken"`）。主 AI 接手后自行跑完四条 mutation 表（wire method / params 键名 / 强制 `Injected` / 反转 `StartedNewTurn`）全部转红，逐条 `edit_block` 还原，`git status` 干净、1986 passed / 0 failed。**教训：SUB 自述"已恢复文件"不可采信，须主 AI 独立核 `git diff`**（同 E-045）。

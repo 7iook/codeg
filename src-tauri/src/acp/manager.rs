@@ -13,7 +13,7 @@ use sea_orm::{
 use crate::acp::connection::{
     spawn_agent_connection, AgentConnection, ConnectionCommand, GoalControlAction,
 };
-use crate::acp::delegation::broker::CancelScopeResult;
+use crate::acp::delegation::broker::{CancelAuthorization, CancelScopeResult};
 use crate::acp::delegation::cancel_scope::CancelScopePreview;
 use crate::acp::error::AcpError;
 use crate::acp::feedback::{
@@ -1336,7 +1336,26 @@ impl ConnectionManager {
         }
     }
 
+    /// Stop `conn_id`'s turn. Public entry point for every ordinary cancel; the
+    /// authorized (preview-confirmed) path goes through
+    /// [`Self::cancel_with_scope_token`], which calls
+    /// [`Self::cancel_authorized`] instead.
     pub async fn cancel(&self, db: &DatabaseConnection, conn_id: &str) -> Result<(), AcpError> {
+        self.cancel_authorized(db, conn_id, None).await
+    }
+
+    /// [`Self::cancel`] carrying an optional [`CancelAuthorization`].
+    ///
+    /// `authorization` rides on the `ConnectionCommand::Cancel` itself so the
+    /// delegation cascade this cancel triggers consumes exactly the seal that
+    /// authorized it — see that command's docs. `None` reproduces the plain
+    /// unbounded cancel.
+    async fn cancel_authorized(
+        &self,
+        db: &DatabaseConnection,
+        conn_id: &str,
+        authorization: Option<CancelAuthorization>,
+    ) -> Result<(), AcpError> {
         let (cmd_tx, state_arc, emitter) = {
             let connections = self.connections.lock().await;
             let conn = connections
@@ -1349,7 +1368,7 @@ impl ConnectionManager {
             )
         };
         cmd_tx
-            .send(ConnectionCommand::Cancel)
+            .send(ConnectionCommand::Cancel { authorization })
             .await
             .map_err(|_| AcpError::ProcessExited)?;
 
@@ -1493,19 +1512,29 @@ impl ConnectionManager {
         let conn_owned = conn_id.to_string();
         inj.cancel_scope_tokens
             .commit(conn_id, token, move |authorized| async move {
+                // Mint the authorization BEFORE sealing so the same identity can
+                // be sealed here and carried on the Cancel below. This is what
+                // makes the seal belong to one specific Cancel instead of being a
+                // per-connection flag that any earlier cascade consumes.
+                let authorization = CancelAuthorization::mint();
                 // ONE atomic broker operation: epoch compare + seal + bounded
                 // drain. `None` ⇒ the scope moved and NOTHING was touched.
                 let Some(result) = broker
-                    .cancel_by_parent_turn_within(&conn_owned, &authorized)
+                    .cancel_by_parent_turn_within(&conn_owned, &authorized, authorization)
                     .await
                 else {
                     return Err(AcpError::CancelScopeChanged);
                 };
-                // Then stop the turn itself through the unchanged path. Its
-                // cascade is still unbounded by design, but the seal above makes
-                // it skip anything registered after the authorization — so it can
-                // only re-drain the already-drained authorized set (a no-op).
-                manager.cancel(&db, &conn_owned).await?;
+                // Then stop the turn itself through the unchanged path, carrying
+                // the authorization. Its cascade is still unbounded by design, but
+                // the seal above makes it skip anything registered after the
+                // authorization — so it can only re-drain the already-drained
+                // authorized set (a no-op) — and because the Cancel names the
+                // seal, no OTHER cascade can consume it first and leave this one
+                // unbounded.
+                manager
+                    .cancel_authorized(&db, &conn_owned, Some(authorization))
+                    .await?;
                 Ok(result)
             })
             .await

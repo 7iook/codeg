@@ -1,0 +1,5 @@
+#!/bin/sh
+# pwsh-only (PS7). Do NOT fall back to Windows PowerShell 5.1: gate scripts may carry
+# non-ASCII and PS5.1 reads .ps1 as GBK on zh-CN Windows -> parse error.
+pwsh -NoProfile -ExecutionPolicy Bypass -File tools/git-pre-commit.ps1
+exit $?

@@ -384,6 +384,35 @@ pub struct CancelScopeResult {
     pub terminated_starting: usize,
 }
 
+/// Identity of one committed cancel authorization — the capability that binds a
+/// seal to the specific [`ConnectionCommand::Cancel`] it authorized.
+///
+/// Minted by the committing caller (the manager) BEFORE it seals, so the same
+/// value can be sealed in the broker and carried on the command; the connection
+/// loop then presents it back and only the matching seal is consumed. Without
+/// this identity the seal is a bare per-connection flag that whichever cascade
+/// arrives first consumes — including a natural-turn-end cascade that was never
+/// authorized by anyone, which then leaves the real user Cancel to run fully
+/// unbounded (the "we showed N, we killed the N+1th" defect).
+///
+/// Deliberately opaque and NOT serialized: it is an internal capability, never
+/// part of the frontend contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CancelAuthorization(u64);
+
+impl CancelAuthorization {
+    /// Mint a fresh, globally unique authorization.
+    ///
+    /// Process-wide monotonic rather than per-connection: a seal is scoped to
+    /// one connection id, so per-connection counters would suffice, but a global
+    /// sequence makes a value minted for one connection unable to match another's
+    /// seal even by coincidence (connection ids are reused).
+    pub fn mint() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// A terminal delegation result retained so `get_delegation_status` /
 /// `cancel_delegation` can answer after the lifecycle resolved the task.
 /// Parent-scoped, FIFO-evicted once the parent's retained result text exceeds
@@ -673,29 +702,45 @@ struct PendingInner {
     /// parent is recorded as `registered_after_seal`, which is what stops the
     /// pre-existing unbounded `cancel_by_parent_turn` from destroying it.
     ///
-    /// Keyed by `parent_connection_id`; the value is the seal's own epoch, used
-    /// to distinguish "registered before this seal" from "after".
-    sealed_scopes: HashMap<String, u64>,
-    /// Expiry for each entry in `sealed_scopes` ([`SEAL_GRACE`] from the seal).
-    ///
-    /// A seal is normally consumed by the very `Cancel` it authorized, but that
-    /// command travels an async queue and the connection could die first. Without
-    /// an expiry the orphaned seal would shield every delegation registered after
-    /// it from ALL later cancels — turning a safety mechanism into a leak. The
-    /// grace window only has to cover "enqueue → connection loop dequeues".
-    seal_deadlines: HashMap<String, Instant>,
+    /// Keyed by `parent_connection_id`; see [`Seal`] for the value.
+    sealed_scopes: HashMap<String, Seal>,
 }
 
-/// How long a committed cancel authorization keeps protecting delegations that
-/// registered after it (see `PendingInner::seal_deadlines`).
+/// One live cancel authorization on a parent connection.
 ///
-/// Sized for "the authorized `ConnectionCommand::Cancel` travels its mpsc queue
-/// and the connection loop reaches its Cancel arm" — milliseconds in practice.
-/// Generous here, because the cost of being too long is only that an unrelated
-/// SECOND cancel arriving within the window spares a just-registered delegation
-/// (which the next cancel then kills), while the cost of being too short is
-/// destroying a delegation the user never authorized.
-const SEAL_GRACE: Duration = Duration::from_secs(10);
+/// Bound to the [`CancelAuthorization`] the committing caller minted, which is
+/// what makes the protection belong to a SPECIFIC pending
+/// `ConnectionCommand::Cancel` rather than to "whichever cascade arrives first".
+/// Only a cascade presenting `authorization` consumes this seal
+/// (`PendingInner::consume_seal`); an unauthorized cascade — a natural
+/// non-`end_turn` turn end, or connection teardown — honors it and leaves it in
+/// place for the cancel that actually owns it.
+///
+/// There is deliberately NO deadline field. The previous design expired seals on
+/// a 10s timer, which meant any dequeue slower than that (connection loop busy
+/// on a previously-dequeued control request, runtime pause, host sleep,
+/// scheduler congestion) silently downgraded the authorized cancel into an
+/// unbounded one — destroying delegations the user never saw, with no measured
+/// bound on dequeue latency to justify the number. The honest bound is the
+/// CONNECTION's lifetime: a seal is scoped to one `parent_connection_id`, and
+/// `cancel_by_parent` (connection teardown, run at `run_connection` exit) drops
+/// the whole entry, so an orphaned seal cannot outlive the connection whose
+/// queued Cancel it was waiting for.
+///
+/// Staleness is instead handled by identity, not time: because the seal records
+/// which authorization owns it, a later UNRELATED cancel can no longer be
+/// silently shielded by it — such a cancel either presents its own (different)
+/// authorization, in which case `consume_seal` refuses and the caller must
+/// re-preview, or it is unauthorized and stays bounded by the standing seal.
+/// That preserves what the expiry was reaching for while dropping the timer.
+#[derive(Debug, Clone, Copy)]
+struct Seal {
+    /// The seal's own scope epoch: entries registered at a HIGHER epoch arrived
+    /// after the authorization and were never shown to the user.
+    epoch: u64,
+    /// The authorization this seal belongs to — the only key that consumes it.
+    authorization: CancelAuthorization,
+}
 
 /// One in-flight `handle_request` setup tracked for parent-cancel coverage.
 struct InflightSetup {
@@ -851,16 +896,30 @@ impl PendingInner {
         &mut self,
         parent_connection_id: &str,
         authorized: &ParentCancelScope,
+        authorization: CancelAuthorization,
     ) -> Option<(Vec<String>, usize)> {
         if self.scope_epoch(parent_connection_id) != authorized.epoch {
             return None;
         }
+        // An outstanding seal means a previously authorized Cancel is still in
+        // flight on this connection. Refuse rather than overwrite: replacing it
+        // would orphan that Cancel's authorization, and when it finally dequeued
+        // it would find a seal it does not own — which now (correctly) refuses to
+        // run, so the user's earlier stop would silently do nothing. Refusing
+        // here surfaces as "re-preview", which is the honest answer. Unreachable
+        // via the epoch test alone: sealing bumps the epoch, so a second token
+        // minted BEFORE the first commit is already stale — but a token minted
+        // AFTER it would pass the epoch test, and this is what stops it.
+        if self.is_sealed(parent_connection_id) {
+            return None;
+        }
         let seal_epoch = self.bump_scope_epoch(parent_connection_id);
-        self.sealed_scopes
-            .insert(parent_connection_id.to_string(), seal_epoch);
-        self.seal_deadlines.insert(
+        self.sealed_scopes.insert(
             parent_connection_id.to_string(),
-            Instant::now() + SEAL_GRACE,
+            Seal {
+                epoch: seal_epoch,
+                authorization,
+            },
         );
         // Flag the authorized in-flight setups in the SAME acquisition that
         // collects the authorized running ones, preserving the "caught by
@@ -905,26 +964,62 @@ impl PendingInner {
     /// seal authorized must not reach them. Everything registered before the
     /// seal was inside the authorized set and stays killable.
     ///
-    /// Expired seals protect nothing (see [`SEAL_GRACE`]): the authorized Cancel
-    /// is enqueued in the same operation as the seal, so if it has not arrived
-    /// within the grace window it never will, and a stale seal must not shield
-    /// delegations from a LATER, unrelated cancel.
+    /// Expired seals protect nothing — no longer applicable: protection now
+    /// lasts until the matching authorized cancel is actually consumed
+    /// ([`Self::consume_seal`]) or the connection tears down. See [`Seal`] for
+    /// why the former 10s grace window was unsound.
     fn seal_protects(&self, parent_connection_id: &str, registered_epoch: u64) -> bool {
         self.sealed_scopes
             .get(parent_connection_id)
-            .is_some_and(|seal| registered_epoch > *seal)
-            && self
-                .seal_deadlines
-                .get(parent_connection_id)
-                .is_some_and(|d| *d > Instant::now())
+            .is_some_and(|seal| registered_epoch > seal.epoch)
     }
 
-    /// Consume `parent_connection_id`'s seal — called by the unbounded turn
-    /// cancel it authorized, once that cancel has done its (now filtered) drain.
-    /// Idempotent.
-    fn clear_seal(&mut self, parent_connection_id: &str) {
+    /// Consume `parent_connection_id`'s seal on behalf of `authorization` —
+    /// called by the unbounded turn cancel that authorization scheduled, once
+    /// that cancel has done its (seal-filtered) drain.
+    ///
+    /// Returns `true` only when a seal was present AND owned by
+    /// `authorization`. That identity check is the whole point: it stops an
+    /// unauthorized cascade (a natural non-`end_turn` turn end) from consuming
+    /// somebody else's authorization and leaving the real user Cancel to run
+    /// unbounded. Idempotent for the owner (a second call finds nothing).
+    ///
+    /// A `Some(other)` authorization that does not match leaves the seal intact
+    /// and returns `false` — the caller must treat that as "not my
+    /// authorization", which is the fail-safe direction: the standing seal keeps
+    /// bounding the cascade rather than being silently discarded.
+    fn consume_seal(
+        &mut self,
+        parent_connection_id: &str,
+        authorization: CancelAuthorization,
+    ) -> bool {
+        let owned = self
+            .sealed_scopes
+            .get(parent_connection_id)
+            .is_some_and(|seal| seal.authorization == authorization);
+        if owned {
+            self.sealed_scopes.remove(parent_connection_id);
+        }
+        owned
+    }
+
+    /// Drop `parent_connection_id`'s seal unconditionally — connection teardown
+    /// only ([`DelegationBroker::cancel_by_parent`]).
+    ///
+    /// This is the honest bound that replaced the timer: the seal exists to
+    /// protect delegations from one queued Cancel on THIS connection, so when the
+    /// connection goes away the authorization can never arrive and the entry must
+    /// not outlive it. Everything the seal protected is being torn down by the
+    /// same teardown anyway.
+    fn drop_seal(&mut self, parent_connection_id: &str) {
         self.sealed_scopes.remove(parent_connection_id);
-        self.seal_deadlines.remove(parent_connection_id);
+    }
+
+    /// Whether `parent_connection_id` currently holds a live seal — used to
+    /// refuse a second authorization while one is still outstanding, so a late
+    /// authorized cancel can never find its seal replaced by a newer one.
+    fn is_sealed(&self, parent_connection_id: &str) -> bool {
+        self.sealed_scopes.contains_key(parent_connection_id)
     }
 
     /// Advance the monotonic arrival clock, returning the pre-increment value.
@@ -3891,8 +3986,17 @@ impl DelegationBroker {
     /// `consumed`) since the connection is going away. Runs fully inline — the
     /// connection is already exiting, so there is no next prompt to unblock.
     pub async fn cancel_by_parent(&self, parent_connection_id: &str) {
+        // The connection is going away, so any seal waiting for a queued Cancel
+        // on it can never be consumed — drop it before draining so nothing is
+        // spared from a teardown that tears down everything anyway. This is the
+        // bound that replaced the old 10s expiry (see `Seal`).
+        self.pending
+            .inner
+            .lock()
+            .await
+            .drop_seal(parent_connection_id);
         let drained = self
-            .drain_for_parent_cancel(parent_connection_id, false)
+            .drain_for_parent_cancel(parent_connection_id, false, None)
             .await;
         self.finalize_parent_cancel(drained).await;
     }
@@ -3915,9 +4019,18 @@ impl DelegationBroker {
     /// a host re-emit of an already-handled `tool_call_id` re-register and
     /// mis-bind the next same-key delegation on this live connection — see
     /// `drop_tool_calls_for_parent`.
+    /// Unbounded by design, and it presents NO authorization: it is used by the
+    /// callers that have none to present — the natural non-`end_turn` turn ends.
+    /// A standing seal from someone else's committed authorization still BOUNDS
+    /// this cascade (delegations registered after that seal are spared), but this
+    /// cascade must not CONSUME that seal; the authorized
+    /// [`Self::cancel_by_parent_turn_authorized`] is the only thing that does.
+    /// Consuming it here was the stolen-seal defect: this cascade would spare the
+    /// newcomer, clear the seal, and the real user Cancel would then arrive
+    /// unbounded and kill it.
     pub async fn cancel_by_parent_turn(&self, parent_connection_id: &str) {
         let drained = self
-            .drain_for_parent_cancel(parent_connection_id, true)
+            .drain_for_parent_cancel(parent_connection_id, true, None)
             .await;
         // The fast drain above already ran inline (scoped to the just-ended
         // turn); background only the slow child teardown.
@@ -3925,6 +4038,48 @@ impl DelegationBroker {
         tokio::spawn(async move {
             broker.finalize_parent_cancel(drained).await;
         });
+    }
+
+    /// The authorized counterpart of [`Self::cancel_by_parent_turn`]: the same
+    /// unbounded turn cascade, but presenting the [`CancelAuthorization`] whose
+    /// seal it is serving, so that seal is consumed by exactly this cancel and no
+    /// other.
+    ///
+    /// Returns `false` when `authorization` does not own a live seal on this
+    /// parent — which is the fail-safe signal, NOT a variant of success. It means
+    /// the authorization was already served, or was superseded, or the connection
+    /// was torn down and re-established: in every one of those cases the scope the
+    /// user confirmed no longer describes reality, so the caller must refuse and
+    /// require a re-preview rather than proceed. **Nothing is drained in that
+    /// case** — the check happens before the drain, so a late or unmatched
+    /// command cannot silently degrade into an unbounded cancel (the defect that
+    /// the removed 10s `SEAL_GRACE` produced whenever dequeue took longer than
+    /// the timer).
+    pub async fn cancel_by_parent_turn_authorized(
+        &self,
+        parent_connection_id: &str,
+        authorization: CancelAuthorization,
+    ) -> bool {
+        // Verify ownership BEFORE draining anything: an unmatched authorization
+        // must be a no-op, not an unbounded cascade.
+        {
+            let inner = self.pending.inner.lock().await;
+            let owned = inner
+                .sealed_scopes
+                .get(parent_connection_id)
+                .is_some_and(|seal| seal.authorization == authorization);
+            if !owned {
+                return false;
+            }
+        }
+        let drained = self
+            .drain_for_parent_cancel(parent_connection_id, true, Some(authorization))
+            .await;
+        let broker = self.clone();
+        tokio::spawn(async move {
+            broker.finalize_parent_cancel(drained).await;
+        });
+        true
     }
 
     /// What a parent-turn cancel on this connection would terminate RIGHT NOW —
@@ -3973,6 +4128,7 @@ impl DelegationBroker {
         &self,
         parent_connection_id: &str,
         authorized: &ParentCancelScope,
+        authorization: CancelAuthorization,
     ) -> Option<CancelScopeResult> {
         // Same tombstoning as the unbounded turn cancel: retain `consumed` so a
         // late re-emit can't mis-bind the next same-key delegation. Done before
@@ -3985,7 +4141,7 @@ impl DelegationBroker {
             let mut inner = self.pending.inner.lock().await;
             // `?` on the seal: a moved scope means refuse and touch NOTHING.
             let (keys, terminated_starting) =
-                inner.seal_parent_cancel_scope(parent_connection_id, authorized)?;
+                inner.seal_parent_cancel_scope(parent_connection_id, authorized, authorization)?;
             let terminated_task_ids = keys.clone();
             let drained = drain_and_record_canceled(&mut inner, keys, "parent canceled");
             (
@@ -4020,6 +4176,7 @@ impl DelegationBroker {
         &self,
         parent_connection_id: &str,
         keep_consumed: bool,
+        authorization: Option<CancelAuthorization>,
     ) -> Vec<(RunningTask, u64)> {
         // Also drain any tool_call ids captured ahead of an MCP round-trip that
         // never arrived — keeps the map bounded across parent reconnects.
@@ -4048,19 +4205,37 @@ impl DelegationBroker {
                 .filter(|(_, v)| !inner.seal_protects(parent_connection_id, v.registered_epoch))
                 .map(|(k, _)| k.clone())
                 .collect();
-            // The authorization has now been fully served by this cascade;
-            // release it so a LATER, independently-authorized cancel sees a
-            // clean scope. Also move the epoch: any preview taken before this
-            // cancel describes a world that no longer exists, so its commit must
-            // be refused rather than sealing a scope that was already drained
-            // (this is what turns the second of two concurrent tokens into an
-            // Err instead of a scope-widening no-op cancel).
+            // Release the authorization ONLY if this cascade is the one it
+            // scheduled. `authorization` is `Some` exactly for the cancel the
+            // manager sealed and then dispatched; the natural-turn-end cascades
+            // and connection teardown pass `None` and therefore consume nothing.
+            //
+            // That distinction is the fix for the stolen-seal defect: previously
+            // this cleared unconditionally, so a natural non-`end_turn` turn end
+            // arriving before the queued user Cancel would honor the seal (sparing
+            // the newcomer) and then destroy it — leaving the real Cancel to run
+            // fully unbounded and kill the very delegation the seal existed to
+            // protect. A cascade that owns no authorization must leave the seal
+            // standing for the one that does.
+            //
+            // Teardown (`cancel_by_parent`) is the exception and drops the seal
+            // outright — see `drop_seal`; the connection is going away, so the
+            // authorized Cancel can never arrive.
+            //
+            // The epoch bump is likewise scoped to the owning cancel: any preview
+            // taken before it describes a world that no longer exists, so its
+            // commit must be refused rather than sealing an already-drained
+            // scope. An unauthorized cascade DOES also invalidate outstanding
+            // previews (it drained things), so it bumps too — but without
+            // touching the seal.
             //
             // Bumped, never removed: a `conn_id` could be reused, and restarting
             // at 0 would let a still-live token minted for the OLD connection
             // match by coincidence. Monotonic-forever costs one `u64` per
             // connection id and closes that hole.
-            inner.clear_seal(parent_connection_id);
+            if let Some(auth) = authorization {
+                inner.consume_seal(parent_connection_id, auth);
+            }
             inner.bump_scope_epoch(parent_connection_id);
             if keep_consumed {
                 // Turn cancel: connection stays alive → keep each canceled
@@ -9745,6 +9920,25 @@ mod tests {
         ids
     }
 
+    /// Commit an authorization the way the manager does — mint the identity,
+    /// seal with it, and hand the same identity back so the test can play the
+    /// authorized `Cancel` that consumes exactly this seal.
+    ///
+    /// Mirroring the production pairing here is deliberate: a test that sealed
+    /// with one identity and cancelled with a fresh one would exercise a flow
+    /// no caller can produce.
+    async fn commit_authorized(
+        broker: &DelegationBroker,
+        parent: &str,
+        authorized: &ParentCancelScope,
+    ) -> Option<(CancelScopeResult, CancelAuthorization)> {
+        let authorization = CancelAuthorization::mint();
+        let result = broker
+            .cancel_by_parent_turn_within(parent, authorized, authorization)
+            .await?;
+        Some((result, authorization))
+    }
+
     /// 5 running globally, 3 of them in the stopping parent's scope → the
     /// preview reports 3, and the bounded cancel kills exactly those 3 while
     /// the other parent's 2 keep running (spec AC4).
@@ -9771,8 +9965,7 @@ mod tests {
             s
         });
 
-        let result = broker
-            .cancel_by_parent_turn_within("parent-a", &scope)
+        let (result, _auth) = commit_authorized(&broker, "parent-a", &scope)
             .await
             .expect("an unmoved scope must commit");
         assert_eq!(
@@ -9846,8 +10039,7 @@ mod tests {
         // The RESULT must say so too — reporting only running ids here produced
         // "preview 2 / killed 2 / reported 1", which is what the DTO exists to
         // stop.
-        let result = broker
-            .cancel_by_parent_turn_within("parent-conn", &scope)
+        let (result, _auth) = commit_authorized(&broker, "parent-conn", &scope)
             .await
             .expect("an unmoved scope must commit");
         assert_eq!(
@@ -9900,8 +10092,7 @@ mod tests {
             )
             .await;
 
-        let result = broker
-            .cancel_by_parent_turn_within("parent-conn", &scope)
+        let (result, _auth) = commit_authorized(&broker, "parent-conn", &scope)
             .await
             .expect("a SHRUNKEN scope is still within the authorization");
         assert_eq!(
@@ -9936,8 +10127,7 @@ mod tests {
         let second = park_running(&broker, &mock, "parent-conn", 1).await;
 
         assert!(
-            broker
-                .cancel_by_parent_turn_within("parent-conn", &authorized)
+            commit_authorized(&broker, "parent-conn", &authorized)
                 .await
                 .is_none(),
             "a scope that grew since the preview must be refused, not partially executed"
@@ -9987,8 +10177,7 @@ mod tests {
         assert_eq!(authorized.count(), 1, "the dialog showed 1");
 
         // 2. Commit: seals the authorization and drains the authorized set.
-        let result = broker
-            .cancel_by_parent_turn_within("parent-conn", &authorized)
+        let (result, auth) = commit_authorized(&broker, "parent-conn", &authorized)
             .await
             .expect("an unmoved scope must commit");
         assert_eq!(result.terminated_task_ids, authorized_ids);
@@ -9997,8 +10186,14 @@ mod tests {
         //    the command queue. This is the N+1th the user never saw.
         let newcomer = park_running(&broker, &mock, "parent-conn", 1).await;
 
-        // 4. The connection loop finally processes Cancel → unbounded cascade.
-        broker.cancel_by_parent_turn("parent-conn").await;
+        // 4. The connection loop finally processes the AUTHORIZED Cancel → the
+        //    unbounded cascade, presenting the seal it owns.
+        assert!(
+            broker
+                .cancel_by_parent_turn_authorized("parent-conn", auth)
+                .await,
+            "the authorization's own cancel must find its seal live"
+        );
 
         let report = broker
             .get_task_status("parent-conn", Some(1), &newcomer[0], StatusWait::Immediate)
@@ -10031,8 +10226,7 @@ mod tests {
         let authorized_ids = park_running(&broker, &mock, "parent-conn", 1).await;
         let authorized = broker.parent_cancel_scope("parent-conn").await;
         assert_eq!(authorized.count(), 1);
-        let result = broker
-            .cancel_by_parent_turn_within("parent-conn", &authorized)
+        let (result, auth) = commit_authorized(&broker, "parent-conn", &authorized)
             .await
             .expect("an unmoved scope must commit");
         assert_eq!(result.terminated_task_ids, authorized_ids);
@@ -10049,8 +10243,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
-        // The queued Cancel now lands.
-        broker.cancel_by_parent_turn("parent-conn").await;
+        // The queued authorized Cancel now lands.
+        assert!(
+            broker
+                .cancel_by_parent_turn_authorized("parent-conn", auth)
+                .await,
+            "the authorization's own cancel must find its seal live"
+        );
 
         let _ = release.send(());
         let report = driver.await.unwrap();
@@ -10076,13 +10275,17 @@ mod tests {
 
         park_running(&broker, &mock, "parent-conn", 1).await;
         let first = broker.parent_cancel_scope("parent-conn").await;
-        broker
-            .cancel_by_parent_turn_within("parent-conn", &first)
+        let (_first_result, first_auth) = commit_authorized(&broker, "parent-conn", &first)
             .await
             .expect("first commit");
         let newcomer = park_running(&broker, &mock, "parent-conn", 1).await;
-        // The authorized Cancel lands and consumes the seal.
-        broker.cancel_by_parent_turn("parent-conn").await;
+        // The authorized Cancel lands and consumes its own seal.
+        assert!(
+            broker
+                .cancel_by_parent_turn_authorized("parent-conn", first_auth)
+                .await,
+            "the first authorization's cancel must find its seal live"
+        );
         assert_eq!(
             broker.pending_count().await,
             1,
@@ -10096,8 +10299,7 @@ mod tests {
             second.running, newcomer,
             "the re-preview shows the newcomer"
         );
-        let result = broker
-            .cancel_by_parent_turn_within("parent-conn", &second)
+        let (result, _second_auth) = commit_authorized(&broker, "parent-conn", &second)
             .await
             .expect("a fresh authorization must commit");
         assert_eq!(result.terminated_task_ids, newcomer);
@@ -10105,6 +10307,231 @@ mod tests {
             broker.pending_count().await,
             0,
             "a re-confirmed cancel must actually kill it — the seal is not immunity"
+        );
+    }
+
+    /// **Defect 1 regression — an unauthorized cascade must not consume someone
+    /// else's authorization.**
+    ///
+    /// The seal used to be a bare per-connection flag cleared unconditionally by
+    /// `drain_for_parent_cancel`, so whichever cascade arrived FIRST consumed it.
+    /// Three of the four production `cancel_by_parent_turn` call sites fire on a
+    /// natural non-`end_turn` turn end (`empty` / `max_tokens` / `refusal` / ...),
+    /// not on a user cancel — and that cascade could run between the commit and
+    /// the queued user Cancel:
+    ///
+    ///   1. the user previews and authorizes terminating 1 delegation; seal
+    ///      installed, bounded drain completes;
+    ///   2. delegation N+1 registers (correctly protected by the seal);
+    ///   3. the parent turn ends naturally with a non-`end_turn` reason. That
+    ///      cascade honors the seal — sparing N+1 — and then CLEARS it;
+    ///   4. the real user Cancel arrives, finds no seal, and runs a fully
+    ///      unbounded cascade that kills N+1.
+    ///
+    /// The user authorized killing 1 and 2 died. The fix binds the seal to the
+    /// [`CancelAuthorization`] that installed it: step 3 presents none, so it
+    /// leaves the seal standing for step 4, which still finds it and stays
+    /// bounded.
+    ///
+    /// Fails if `cancel_by_parent_turn` starts consuming seals again, or if the
+    /// authorized path stops presenting its identity.
+    #[tokio::test]
+    async fn natural_turn_end_cascade_does_not_consume_the_users_authorization() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        // 1. The dialog showed 1; the user confirmed.
+        let authorized_ids = park_running(&broker, &mock, "parent-conn", 1).await;
+        let authorized = broker.parent_cancel_scope("parent-conn").await;
+        assert_eq!(authorized.count(), 1, "the dialog showed 1");
+        let (result, auth) = commit_authorized(&broker, "parent-conn", &authorized)
+            .await
+            .expect("an unmoved scope must commit");
+        assert_eq!(result.terminated_task_ids, authorized_ids);
+
+        // 2. The N+1th registers — never disclosed to the user.
+        let newcomer = park_running(&broker, &mock, "parent-conn", 1).await;
+
+        // 3. The parent turn ends naturally (non-`end_turn`) BEFORE the queued
+        //    user Cancel is dequeued. This cascade holds no authorization.
+        broker.cancel_by_parent_turn("parent-conn").await;
+        let after_natural = broker
+            .get_task_status("parent-conn", Some(1), &newcomer[0], StatusWait::Immediate)
+            .await;
+        assert_eq!(
+            after_natural.status,
+            TaskStatus::Running,
+            "the unauthorized natural-turn-end cascade must honor the standing seal"
+        );
+
+        // 4. NOW the user's authorized Cancel arrives. Its seal must still be
+        //    live — the natural cascade must not have eaten it.
+        assert!(
+            broker
+                .cancel_by_parent_turn_authorized("parent-conn", auth)
+                .await,
+            "the natural-turn-end cascade consumed the user's authorization, so this \
+             cancel would fall back to an UNBOUNDED cascade and destroy a delegation \
+             the user was never shown"
+        );
+
+        let report = broker
+            .get_task_status("parent-conn", Some(1), &newcomer[0], StatusWait::Immediate)
+            .await;
+        assert_eq!(
+            report.status,
+            TaskStatus::Running,
+            "the user authorized killing 1; the delegation that registered afterwards \
+             must survive both cascades"
+        );
+        assert_eq!(
+            broker.pending_count().await,
+            1,
+            "exactly the undisclosed newcomer remains"
+        );
+    }
+
+    /// **Defect 2 regression — protection must not expire on a timer.**
+    ///
+    /// The seal used to carry a 10s `SEAL_GRACE` deadline, after which
+    /// `seal_protects` returned false. Nothing bounded the dequeue latency it was
+    /// sized against: if the connection loop was busy on a previously-dequeued
+    /// control request, or the runtime paused, or the host slept, the authorized
+    /// Cancel arrived to an expired seal and ran a fully unbounded cascade —
+    /// silently destroying delegations the user never saw.
+    ///
+    /// Uses REAL elapsed time, deliberately. The former expiry was built on
+    /// `std::time::Instant`, whose `elapsed()` reads the wall clock and is
+    /// completely unaffected by `tokio::time::advance` — a paused-clock version
+    /// of this test passes even with the 10s expiry in place, so it would prove
+    /// nothing. Sleeping just past the old grace window is what actually
+    /// reproduces the defect, and it costs the suite ~11s once.
+    ///
+    /// Fails if a time-based expiry is reintroduced with a window ≤ the sleep.
+    #[tokio::test]
+    async fn late_authorized_cancel_still_spares_the_undisclosed_delegation() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let authorized_ids = park_running(&broker, &mock, "parent-conn", 1).await;
+        let authorized = broker.parent_cancel_scope("parent-conn").await;
+        assert_eq!(authorized.count(), 1, "the dialog showed 1");
+        let (result, auth) = commit_authorized(&broker, "parent-conn", &authorized)
+            .await
+            .expect("an unmoved scope must commit");
+        assert_eq!(result.terminated_task_ids, authorized_ids);
+
+        // The N+1th registers, protected by the seal.
+        let newcomer = park_running(&broker, &mock, "parent-conn", 1).await;
+
+        // The connection loop is wedged past the old 10s grace window. Real
+        // sleep, not `advance`: the old expiry read the wall clock (see above).
+        tokio::time::sleep(Duration::from_millis(10_500)).await;
+
+        // The authorized Cancel finally gets dequeued.
+        assert!(
+            broker
+                .cancel_by_parent_turn_authorized("parent-conn", auth)
+                .await,
+            "a late authorized cancel must still own its seal — expiring it silently \
+             downgrades this into an unbounded cancel"
+        );
+
+        let report = broker
+            .get_task_status("parent-conn", Some(1), &newcomer[0], StatusWait::Immediate)
+            .await;
+        assert_eq!(
+            report.status,
+            TaskStatus::Running,
+            "dequeue latency must not decide whether an undisclosed delegation lives; \
+             the seal held for 10s and this cancel arrived later"
+        );
+        assert_eq!(
+            broker.pending_count().await,
+            1,
+            "exactly the undisclosed newcomer remains"
+        );
+    }
+
+    /// An authorization that does not own a live seal must be REFUSED, not
+    /// silently widened into an unbounded cancel — the fail-safe direction.
+    ///
+    /// Covers the residual case the timer used to "handle" by expiring: an
+    /// authorization arriving when its seal is gone (already served, superseded,
+    /// or the connection was torn down and re-established). The old code ran a
+    /// full unbounded cascade there; now the caller gets `false`, drains nothing,
+    /// and must re-preview.
+    #[tokio::test]
+    async fn unmatched_authorization_refuses_instead_of_cancelling_unbounded() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let parked = park_running(&broker, &mock, "parent-conn", 2).await;
+        // An authorization that was never sealed on this parent.
+        let stranger = CancelAuthorization::mint();
+
+        assert!(
+            !broker
+                .cancel_by_parent_turn_authorized("parent-conn", stranger)
+                .await,
+            "an authorization with no live seal must be refused"
+        );
+        for id in &parked {
+            let report = broker
+                .get_task_status("parent-conn", Some(1), id, StatusWait::Immediate)
+                .await;
+            assert_eq!(
+                report.status,
+                TaskStatus::Running,
+                "a refused authorization must cancel NOTHING, never widen to unbounded ({id})"
+            );
+        }
+        assert_eq!(broker.pending_count().await, 2);
+    }
+
+    /// A connection teardown drops the seal, so an orphaned authorization cannot
+    /// outlive the connection it was scoped to — the honest bound that replaced
+    /// the 10s timer.
+    ///
+    /// Without this, removing the expiry would leak: a committed authorization
+    /// whose Cancel never arrives would leave a seal that shields every later
+    /// registration on a reused connection id forever.
+    #[tokio::test]
+    async fn connection_teardown_drops_an_unconsumed_seal() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        park_running(&broker, &mock, "parent-conn", 1).await;
+        let authorized = broker.parent_cancel_scope("parent-conn").await;
+        let (_result, _auth) = commit_authorized(&broker, "parent-conn", &authorized)
+            .await
+            .expect("an unmoved scope must commit");
+        // A delegation registers under the seal's protection, then the connection
+        // dies before the authorized Cancel is ever dequeued.
+        park_running(&broker, &mock, "parent-conn", 1).await;
+        broker.cancel_by_parent("parent-conn").await;
+        assert_eq!(
+            broker.pending_count().await,
+            0,
+            "teardown tears down everything, seal or not"
+        );
+
+        // The connection id is reused. A fresh delegation must be killable by an
+        // ordinary cancel — the dead connection's seal must not still shield it.
+        park_running(&broker, &mock, "parent-conn", 1).await;
+        broker.cancel_by_parent_turn("parent-conn").await;
+        assert_eq!(
+            broker.pending_count().await,
+            0,
+            "a stale seal from a torn-down connection must not grant immunity"
         );
     }
 
