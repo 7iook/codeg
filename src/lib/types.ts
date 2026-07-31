@@ -1,18 +1,9 @@
+import { BUILTIN_AGENT_ROSTER } from "./agent-roster"
+
+export { BUILTIN_AGENT_ROSTER } from "./agent-roster"
+
 /** The agents codeg ships hand-written support for. */
-export type BuiltinAgentType =
-  | "claude_code"
-  | "codex"
-  | "open_code"
-  | "gemini"
-  | "open_claw"
-  | "cline"
-  | "hermes"
-  | "code_buddy"
-  | "kimi_code"
-  | "pi"
-  | "grok"
-  | "cursor"
-  | "kiro"
+export type BuiltinAgentType = (typeof BUILTIN_AGENT_ROSTER)[number]
 
 /**
  * Which agent backs a conversation.
@@ -651,19 +642,7 @@ export function compareAgentType(a: AgentType, b: AgentType): number {
 }
 
 export const ALL_AGENT_TYPES: BuiltinAgentType[] = [
-  "claude_code",
-  "codex",
-  "open_code",
-  "gemini",
-  "open_claw",
-  "cline",
-  "hermes",
-  "code_buddy",
-  "kimi_code",
-  "pi",
-  "grok",
-  "cursor",
-  "kiro",
+  ...BUILTIN_AGENT_ROSTER,
 ]
 
 export const MODEL_PROVIDER_AGENT_TYPES: BuiltinAgentType[] = [

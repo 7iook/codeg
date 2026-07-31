@@ -31,6 +31,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
+  BUILTIN_AGENT_ROSTER,
   type AgentDelegationDefaults,
   type AgentOptionsSnapshot,
   type AgentType,
@@ -54,22 +55,6 @@ const DEFAULT_SENTINEL = "__codeg_default__"
 // CLI). 250ms is below the threshold of feeling laggy while comfortably
 // absorbing a mid-click reconsideration.
 const TAB_SWITCH_DEBOUNCE_MS = 250
-
-const BUILTIN_AGENT_TYPES: AgentType[] = [
-  "claude_code",
-  "codex",
-  "open_code",
-  "gemini",
-  "open_claw",
-  "cline",
-  "hermes",
-  "code_buddy",
-  "kimi_code",
-  "pi",
-  "grok",
-  "cursor",
-  "kiro",
-]
 
 interface CachedSnapshot {
   snapshot: AgentOptionsSnapshot
@@ -110,7 +95,7 @@ export function DelegationAgentDefaultsPanel({
   const { agents } = useAcpAgents()
   const agentTypes = useMemo<AgentType[]>(
     () => [
-      ...BUILTIN_AGENT_TYPES,
+      ...BUILTIN_AGENT_ROSTER,
       ...agents.map((a) => a.agent_type).filter(isCustomAgentType),
     ],
     [agents]

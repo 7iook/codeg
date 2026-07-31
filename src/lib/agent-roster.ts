@@ -1,0 +1,15 @@
+export const BUILTIN_AGENT_ROSTER = [
+  "claude_code",
+  "codex",
+  "open_code",
+  "gemini",
+  "open_claw",
+  "cline",
+  "hermes",
+  "code_buddy",
+  "kimi_code",
+  "pi",
+  "grok",
+  "cursor",
+  "kiro",
+] as const
