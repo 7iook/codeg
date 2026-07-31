@@ -10158,6 +10158,206 @@ mod tests {
         assert!(parse_steering_supported(Some(&alongside_caps)));
     }
 
+    /// Canonical form of Rust source for the two source-layout gates below:
+    /// comments stripped, then every whitespace run dropped UNLESS it separates
+    /// two word characters. So `foo /* c */ (` and a CRLF-wrapped `foo(` both
+    /// canonicalize to `foo(`, while `let x` keeps its one space.
+    ///
+    /// WHY: counting raw substrings makes source LAYOUT a semantic contract, and
+    /// two such false reds were measured on the previous form of these gates:
+    ///   * a needle ending in `"("` + newline matched ZERO times on a
+    ///     `core.autocrlf=true` checkout (`include_str!` reads the CRLF file on
+    ///     disk, not the committed LF blob), and picking between a CRLF and an LF
+    ///     needle with a `contains` probe UNDERCOUNTS mixed-ending files — one
+    ///     call of each form counted 1, not 2;
+    ///   * inserting `/* harmless */` between a call's name and its `(` reddened
+    ///     the gate with no behavior change whatsoever.
+    /// A gate that cries wolf gets bypassed, which costs exactly what a gate that
+    /// misses costs. Canonicalizing first leaves ONE counting mode, correct for
+    /// LF, CRLF, mixed, re-wrapped and commented source alike.
+    ///
+    /// String and char literals are copied verbatim, so a `//` inside a string is
+    /// never mistaken for a comment (stripping one would desync everything after
+    /// it). A `'` opens a char literal only when it actually closes like one
+    /// (`'x'`, `'\n'`), never for a lifetime (`'static`).
+    fn canonical_code(src: &str) -> String {
+        fn is_word(c: u8) -> bool {
+            c.is_ascii_alphanumeric() || c == b'_'
+        }
+
+        let b = src.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(b.len());
+        let mut i = 0usize;
+        while i < b.len() {
+            // Line comment: drop to end of line. The newline itself is left for
+            // the whitespace arm, so tokens either side stay separated.
+            if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // Block comment (nestable in Rust). Dropped WITHOUT leaving a space:
+            // `name /* c */ (` must canonicalize to `name(`, which is the whole
+            // point of the "harmless reformat stays green" requirement.
+            if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                let mut depth = 1usize;
+                i += 2;
+                while i < b.len() && depth > 0 {
+                    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                        depth += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            // Whitespace run: kept only where it separates two word chars.
+            if b[i].is_ascii_whitespace() {
+                while i < b.len() && b[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                let joins_words = out.last().is_some_and(|&p| is_word(p))
+                    && b.get(i).is_some_and(|&n| is_word(n));
+                if joins_words {
+                    out.push(b' ');
+                }
+                continue;
+            }
+            // Raw string `r"..."` / `r#"..."#` — only at a token boundary, so an
+            // identifier ending in `r` is not misread as an opener.
+            if b[i] == b'r' && !out.last().is_some_and(|&p| is_word(p)) {
+                let mut j = i + 1;
+                while b.get(j) == Some(&b'#') {
+                    j += 1;
+                }
+                if b.get(j) == Some(&b'"') {
+                    let hashes = j - (i + 1);
+                    out.extend_from_slice(&b[i..=j]);
+                    i = j + 1;
+                    // Terminator is `"` followed by the same number of `#`.
+                    while i < b.len() {
+                        if b[i] == b'"' && b[i + 1..].iter().take(hashes).all(|&c| c == b'#') {
+                            let end = (i + 1 + hashes).min(b.len());
+                            out.extend_from_slice(&b[i..end]);
+                            i = end;
+                            break;
+                        }
+                        out.push(b[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+            // Ordinary / byte string.
+            if b[i] == b'"' {
+                out.push(b[i]);
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        out.extend_from_slice(&b[i..i + 2]);
+                        i += 2;
+                        continue;
+                    }
+                    out.push(b[i]);
+                    i += 1;
+                    if b[i - 1] == b'"' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Char literal vs lifetime. `'\x'` and `'x'` are literals and copied
+            // whole (they may contain `"` or `/`); anything else is a lifetime
+            // tick and copied as one ordinary byte.
+            if b[i] == b'\'' {
+                if b.get(i + 1) == Some(&b'\\') {
+                    let mut j = i + 2;
+                    while j < b.len() && b[j] != b'\'' {
+                        j += 1;
+                    }
+                    let end = (j + 1).min(b.len());
+                    out.extend_from_slice(&b[i..end]);
+                    i = end;
+                    continue;
+                }
+                if b.get(i + 2) == Some(&b'\'') {
+                    out.extend_from_slice(&b[i..i + 3]);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        String::from_utf8(out).expect("canonicalization preserves UTF-8 boundaries")
+    }
+
+    /// The canonicalizer is the foundation both source gates now stand on, so its
+    /// own edge cases are pinned here rather than assumed.
+    #[test]
+    fn canonical_code_is_layout_blind_but_literal_faithful() {
+        // The measured false reds: CRLF, a comment wedged into a call, and a
+        // wrapped invocation must all reach the SAME canonical text.
+        let want = "foo(a,b);";
+        for variant in [
+            "foo(a, b);",
+            "foo(a,\r\n    b);",
+            "foo /* harmless */ (a, b);",
+            "foo(a, b); // trailing note",
+            "foo/* one */(/* two */a, b);",
+        ] {
+            assert_eq!(
+                canonical_code(variant),
+                want,
+                "layout variant must canonicalize identically: {variant:?}"
+            );
+        }
+        // Canonicalization removes LAYOUT, not TOKENS: rustfmt adds a trailing
+        // comma when it wraps a call, and that comma is a real token. This is
+        // precisely why the gates' needles stop at the opening `(` instead of
+        // spanning arguments — the prefix is wrap-invariant, the argument list
+        // is not.
+        assert_eq!(canonical_code("foo(\n    a,\n    b,\n);"), "foo(a,b,);");
+        for wrapping in ["foo(a, b);", "foo(\n    a,\n    b,\n);", "foo(\r\n a);"] {
+            assert!(
+                canonical_code(wrapping).contains("foo("),
+                "the call-prefix needle must survive any wrapping: {wrapping:?}"
+            );
+        }
+        // Mixed line endings in ONE input: the bug that made two real calls
+        // count as one.
+        assert_eq!(canonical_code("foo(\r\n);foo(\n);"), "foo();foo();");
+
+        // Word-separating whitespace survives; everything else goes.
+        assert_eq!(canonical_code("let  x = 1 ;"), "let x=1;");
+        assert_eq!(canonical_code("let /* c */ x = 1;"), "let x=1;");
+
+        // Literals are NOT rewritten: a comment opener inside a string is text.
+        assert_eq!(
+            canonical_code(r#"let s = "a // b /* c */ d";"#),
+            r#"let s="a // b /* c */ d";"#
+        );
+        assert_eq!(canonical_code("let q = '\"';"), "let q='\"';");
+        assert_eq!(canonical_code("let e = '\\\\';"), "let e='\\\\';");
+        assert_eq!(
+            canonical_code("let r = r#\"x // y\"#;"),
+            "let r=r#\"x // y\"#;"
+        );
+        // A lifetime tick must not open a literal and swallow the rest.
+        assert_eq!(
+            canonical_code("fn f<'a>(x: &'a str) {}"),
+            "fn f<'a>(x:&'a str){}"
+        );
+        assert_eq!(canonical_code("T: Send + 'static,"), "T:Send+'static,");
+        // Nested block comments unwind to the right depth.
+        assert_eq!(canonical_code("a /* x /* y */ z */ b"), "a b");
+    }
+
     /// Wiring gate (E-091): the four `parse_steering_supported` unit tests above
     /// all pass even if the PRODUCTION probe call is rewired to the wrong source
     /// — they exercise the parser, not the assembly point. The probe lives deep
@@ -10169,7 +10369,13 @@ mod tests {
     /// `agent_capabilities` (the intuitive-but-always-None location).
     #[test]
     fn production_steering_probe_reads_top_level_init_meta() {
-        let src = include_str!("connection.rs");
+        // Canonicalized for the same reason as the gate below: the four facts
+        // asserted here are about which EXPRESSION is wired where, and none of
+        // them changes when the line is wrapped or a comment is added. Matching
+        // raw source made both of those a failure. Needles are therefore written
+        // in canonical form (no layout whitespace).
+        let src = canonical_code(include_str!("connection.rs"));
+        let src = src.as_str();
         // NOTE: the needles are assembled from split pieces via `concat!`. If
         // they were written as whole literals, THIS test's own source would
         // match them (`include_str!` reads the file this test lives in), making
@@ -10177,7 +10383,7 @@ mod tests {
         // even if the production line is deleted. Split needles appear verbatim
         // ONLY in the production line, so the counts below are meaningful.
         let probe_call = concat!(
-            "let supports_steering = parse_steering_supported(",
+            "let supports_steering=parse_steering_supported(",
             "init_resp.meta.as_ref());"
         );
         assert_eq!(
@@ -10198,14 +10404,14 @@ mod tests {
         // The probe result must actually be persisted onto the session state,
         // not merely computed and logged (the pre-existing shape of this code
         // was log-only for the continuation capabilities).
-        let persist = concat!("s.agent_supports_steering = ", "supports_steering;");
+        let persist = concat!("s.agent_supports_steering=", "supports_steering;");
         assert_eq!(
             src.matches(persist).count(),
             1,
             "the probed capability must be written to the session state"
         );
         // ...and shipped to the frontend, otherwise the wire contract dangles.
-        let emit = concat!("AcpEvent::SteeringSupported ", "{");
+        let emit = concat!("AcpEvent::SteeringSupported", "{");
         assert_eq!(
             src.matches(emit).count(),
             1,
@@ -10942,11 +11148,19 @@ mod tests {
     ///
     /// ⚠️ Needles are `concat!`-split because `include_str!` reads THIS file: a
     /// whole-literal needle would match the test's own source and stay green with
-    /// the production arm deleted (E-085).
+    /// the production arm deleted (E-085). They are matched against
+    /// `canonical_code`, so reformatting the production arms cannot redden this.
     #[test]
     fn steer_arm_reachable_in_prompting_state() {
-        let src = include_str!("connection.rs");
-        let arm = concat!("Some(ConnectionCommand::Steer ", "{");
+        // Canonicalized (see `canonical_code`): comments and layout whitespace are
+        // gone before anything is counted, so a re-wrapped or commented dispatch
+        // call still matches and a CRLF checkout counts the same as an LF one.
+        let src = canonical_code(include_str!("connection.rs"));
+        let src = src.as_str();
+        // Needles are written in CANONICAL form (no layout whitespace), because
+        // that is what they are matched against.
+        let arm = concat!("Some(ConnectionCommand::Steer", "{");
+
         // Both loops must handle it: the in-turn one (the whole point) and the idle
         // one (residual race — dropping it would strand the caller's oneshot).
         assert_eq!(
@@ -10962,8 +11176,8 @@ mod tests {
         // it must be inside the PROMPTING-state handler. That handler is delimited
         // by the in-turn `cmd_rx.recv()` select arm and the `disconnect_requested`
         // break that closes it (each occurring exactly once in this file).
-        let in_turn_cmd_start = concat!("cmd = cmd_rx.recv()", " => {");
-        let in_turn_cmd_end = concat!("if disconnect_requested ", "{");
+        let in_turn_cmd_start = concat!("cmd=cmd_rx.recv()", "=>{");
+        let in_turn_cmd_end = concat!("if disconnect_requested", "{");
         let start = src
             .find(in_turn_cmd_start)
             .expect("in-turn command dispatch (`cmd = cmd_rx.recv() => {`) not found");
@@ -11007,21 +11221,16 @@ mod tests {
             .find(test_mod)
             .expect("test module attribute not found; re-derive the production window");
         let prod = &src[..prod_end];
-        // The trailing newline proves the call is a WRAPPED multi-line invocation
-        // rather than a substring of some longer identifier. It must be matched
-        // line-ending-agnostically: the committed blob is LF, but this repo has
-        // `core.autocrlf=true`, so on a Windows checkout the file on disk (which
-        // is what `include_str!` reads) is CRLF. A bare `"...(\n"` needle finds
-        // ZERO matches there and this gate fails while production is perfectly
-        // fine — a false red, which erodes trust in the gate exactly as fast as a
-        // false green hides a defect.
-        let dispatch_call = concat!("spawn_steering_request(", "\r\n");
-        let dispatch_call_lf = concat!("spawn_steering_request(", "\n");
-        let dispatch_count = if prod.contains(dispatch_call) {
-            prod.matches(dispatch_call).count()
-        } else {
-            prod.matches(dispatch_call_lf).count()
-        };
+        // ONE counting mode. The needle stops at the opening `(` — a call prefix
+        // is invariant under every reformatting rustfmt can apply (wrapping the
+        // argument list, adding a trailing comma, inserting a comment before the
+        // paren), whereas anything spanning the arguments is not. The previous
+        // form appended a newline to prove "wrapped multi-line invocation" and had
+        // to choose between a CRLF and an LF needle with a `contains` probe, which
+        // silently UNDERCOUNTED a file holding one of each (measured: 1, not 2).
+        // Canonicalization already collapses both endings, so the choice is gone.
+        let dispatch_call = concat!("spawn_steering_request", "(");
+        let dispatch_count = prod.matches(dispatch_call).count();
         assert_eq!(
             dispatch_count, 2,
             "each Steer arm must dispatch via `spawn_steering_request` — an arm \
