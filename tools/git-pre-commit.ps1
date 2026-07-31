@@ -58,40 +58,155 @@ Write-Findings -Findings $F   # exits 1 on any blocking finding
 
 # --- language checks (auto-triggered by staged file types) ---
 if ($env:GATE_SKIP_LANG -ne '1') {
-    $rust = @($Staged | Where-Object { $_ -match '\.rs$' -or $_ -match '(^|/)Cargo\.(toml|lock)$' })
-    if ($rust.Count -gt 0 -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        # The Cargo workspace is NOT at the repo root here (it lives in
-        # src-tauri/), and `cargo fmt` resolves the manifest from the CWD. Run
-        # it from the manifest directory or cargo rejects the arguments and this
-        # gate reports a bogus failure on every Rust commit instead of checking
-        # formatting at all.
-        $manifestDir = @('src-tauri', '.') |
-            Where-Object { Test-Path (Join-Path $_ 'Cargo.toml') } |
-            Select-Object -First 1
-        if ($manifestDir) {
-            # Check the STAGED files only. The intent one line up is already
-            # "auto-triggered by staged file types"; `cargo fmt --all --check` broke
-            # that by judging all ~98 workspace files, of which 629 hunks are
-            # pre-existing unformatted code nobody in this commit touched. That made
-            # the gate unpassable on every Rust commit — and an unpassable gate does
-            # not enforce formatting, it just trains everyone to reach for
-            # GATE_SKIP=1, which disables the REAL findings above too.
-            #
-            # `rustfmt` is invoked DIRECTLY rather than through `cargo fmt -- <paths>`:
-            # cargo forwards the paths but rustfmt still expands from the crate root,
-            # so the scoped form silently checks the whole workspace anyway (verified
-            # — it printed all 98 files). Direct rustfmt honors the path list.
-            # Edition must be passed explicitly since we bypass cargo's manifest read;
-            # it matches the `2021` edition this crate declares.
-            $rustFiles = @($rust | Where-Object { $_ -match '\.rs$' -and (Test-Path $_) })
-            if ($rustFiles.Count -gt 0 -and (Get-Command rustfmt -ErrorAction SilentlyContinue)) {
-                Write-Host "==> rustfmt --check (staged .rs: $($rustFiles.Count) file(s))"
-                rustfmt --edition 2021 --check @rustFiles
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host 'rustfmt failed on a file you staged; run `rustfmt --edition 2021` on it and re-stage.' -ForegroundColor Red
-                    exit 1
+    # --- Rust formatting gate: judges the STAGED BLOB, never the working tree ---
+    # A pre-commit gate's authoritative input is the index, because that is the
+    # content about to enter history. Deriving the file LIST from the index but
+    # then letting rustfmt READ THE DISK compares the wrong bytes: stage a
+    # misformatted file, tidy it on disk without re-staging, and the gate greens
+    # while the bad blob commits (reproduced 2026-07-31, HOOK_EXIT=0).
+    #
+    # The blob is fed to rustfmt over STDIN rather than materialized into a temp
+    # directory: rustfmt resolves `mod foo;` against the file's own directory and
+    # exits 1 when the sibling file is absent -- indistinguishable from a real
+    # formatting failure (verified: materializing `pub mod proxy;` alone under a
+    # temp prefix failed with "failed to resolve mod `proxy`"). Over stdin there
+    # is no directory to resolve against.
+    #
+    # `--check` is deliberately NOT used: on stdin it prints the diff and STILL
+    # EXITS 0 (verified), so its exit code cannot carry the verdict. `--emit
+    # stdout` plus an exact byte comparison makes rustfmt's own output the
+    # oracle, which is self-evident and cannot silently invert.
+    $rustFiles = @($Staged | Where-Object { $_ -match '\.rs$' })
+    if ($rustFiles.Count -gt 0) {
+        # A gate that quietly turns itself off on machines missing the tool is
+        # not a gate -- it makes formatting optional as a function of who commits.
+        if (-not (Get-Command rustfmt -ErrorAction SilentlyContinue)) {
+            Write-Host "rustfmt not found, but $($rustFiles.Count) staged .rs file(s) require checking." -ForegroundColor Red
+            Write-Host 'Install it, then retry:  rustup component add rustfmt' -ForegroundColor Red
+            exit 1
+        }
+
+        # Edition comes from each file's NEAREST Cargo.toml. A hardcoded 2021
+        # mis-parses the edition-2024 crate vendored at src-tauri/vendor/sacp-tokio
+        # (verified: `fn gen() {}` exits 0 under --edition 2021 and 1 under 2024,
+        # `gen` being a 2024 reserved word), which would surface as a bogus syntax
+        # error instead of a formatting verdict.
+        $editionCache = @{}
+        function Resolve-RustEdition {
+            param([string]$RelPath, [hashtable]$Cache)
+            $dir = Split-Path -Parent $RelPath
+            while ($true) {
+                $key = if ($dir) { $dir } else { '.' }
+                if ($Cache.ContainsKey($key)) { return $Cache[$key] }
+                $manifest = if ($dir) { Join-Path $dir 'Cargo.toml' } else { 'Cargo.toml' }
+                if (Test-Path -LiteralPath $manifest) {
+                    $hit = Select-String -Path $manifest -Pattern '^\s*edition\s*=\s*"([0-9]{4})"' |
+                        Select-Object -First 1
+                    if ($hit) {
+                        $ed = $hit.Matches[0].Groups[1].Value
+                        $Cache[$key] = $ed
+                        return $ed
+                    }
+                }
+                if (-not $dir) { break }
+                $dir = Split-Path -Parent $dir
+            }
+            return '2021'
+        }
+
+        # Byte-exact child-process runner. `Start-Process -ArgumentList` is NOT
+        # usable here: it joins the array with spaces and does no quoting, so a
+        # staged path containing a space (`:probe space file.rs`) arrives as three
+        # separate arguments and the index read fails (observed as a bogus
+        # [index-read-failed]). ProcessStartInfo.ArgumentList escapes each element
+        # individually. Streams are handled as raw bytes because the bytes are
+        # exactly what is being compared -- a PowerShell pipeline would re-encode
+        # them and silently normalize the newlines that matter.
+        function Invoke-Bytes {
+            param([string]$Exe, [string[]]$Arguments, [byte[]]$StdinBytes)
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = $Exe
+            foreach ($a in $Arguments) { $psi.ArgumentList.Add($a) }
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $buf = [System.IO.MemoryStream]::new()
+            # Drain stdout concurrently with the stdin write, or a payload larger
+            # than the pipe buffer deadlocks both sides.
+            $pump = $proc.StandardOutput.BaseStream.CopyToAsync($buf)
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            if ($StdinBytes -and $StdinBytes.Length -gt 0) {
+                $proc.StandardInput.BaseStream.Write($StdinBytes, 0, $StdinBytes.Length)
+            }
+            $proc.StandardInput.BaseStream.Flush()
+            $proc.StandardInput.Close()
+            $pump.Wait()
+            $proc.WaitForExit()
+            return @{
+                Code = $proc.ExitCode
+                Out  = $buf.ToArray()
+                Err  = $errTask.Result
+            }
+        }
+
+        Write-Host "==> rustfmt on staged blobs ($($rustFiles.Count) .rs file(s))"
+        $badFmt = @()
+        foreach ($rel in $rustFiles) {
+            $edition = Resolve-RustEdition -RelPath $rel -Cache $editionCache
+            # `:<path>` reads the INDEX copy. A staged file deleted from disk still
+            # has a blob here, which is correct: the blob is what commits.
+            $blob = Invoke-Bytes -Exe 'git' -Arguments @('cat-file', 'blob', ":$rel")
+            if ($blob.Code -ne 0) {
+                Write-Host "  [index-read-failed] $rel" -ForegroundColor Red
+                if ($blob.Err.Trim()) { Write-Host "      $($blob.Err.Trim())" -ForegroundColor Red }
+                $badFmt += $rel
+                continue
+            }
+            $fmt = Invoke-Bytes -Exe 'rustfmt' `
+                -Arguments @('--edition', $edition, '--emit', 'stdout') `
+                -StdinBytes $blob.Out
+            if ($fmt.Code -ne 0) {
+                Write-Host "  [parse-error] $rel (edition $edition)" -ForegroundColor Red
+                ($fmt.Err -split "`r?`n") | Select-Object -First 3 |
+                    ForEach-Object { if ($_.Trim()) { Write-Host "      $_" -ForegroundColor Red } }
+                $badFmt += $rel
+                continue
+            }
+            $inBytes = $blob.Out
+            $outBytes = $fmt.Out
+            $same = ($inBytes.Length -eq $outBytes.Length)
+            if ($same) {
+                for ($i = 0; $i -lt $inBytes.Length; $i++) {
+                    if ($inBytes[$i] -ne $outBytes[$i]) { $same = $false; break }
                 }
             }
+            if (-not $same) {
+                Write-Host "  [unformatted-in-index] $rel (edition $edition)" -ForegroundColor Red
+                $badFmt += $rel
+            }
+        }
+
+        # Non-blocking on purpose: a disk copy that differs from the index is not
+        # the content being committed, so it cannot fail this gate (that would
+        # reject commits over changes deliberately left unstaged, e.g. `git add -p`).
+        # It does mislead the NEXT commit, so it is reported.
+        $drift = @(git diff --name-only -- $rustFiles)
+        if ($drift.Count -gt 0) {
+            Write-Host "  note: staged content differs from the working tree in $($drift.Count) file(s);" -ForegroundColor Yellow
+            Write-Host '        this gate judged the STAGED bytes. Unstaged edits are not committed.' -ForegroundColor Yellow
+        }
+
+        if ($badFmt.Count -gt 0) {
+            Write-Host ''
+            Write-Host 'rustfmt: the STAGED content of the file(s) above is not formatted.' -ForegroundColor Red
+            Write-Host 'Formatting the file on disk is not enough -- you must re-stage it:' -ForegroundColor Red
+            foreach ($b in $badFmt) {
+                $ed = Resolve-RustEdition -RelPath $b -Cache $editionCache
+                Write-Host ('    rustfmt --edition ' + $ed + ' "' + $b + '" ; git add "' + $b + '"') -ForegroundColor Red
+            }
+            exit 1
         }
     }
     $py = @($Staged | Where-Object { $_ -match '\.py$' })
