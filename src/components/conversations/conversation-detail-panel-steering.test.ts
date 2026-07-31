@@ -72,8 +72,9 @@ describe("send-now failure paths (R1.6 / design §2.5.1)", () => {
   })
 
   it("claims the item through markInFlight and bails when the claim is lost", () => {
-    // The single-dequeue gate: without the early return, the auto-flush and this
-    // handler could both deliver the same message.
+    // Send-now and auto-flush use different claims. Their safety comes from both
+    // synchronously reading, checking, and committing the same authoritative
+    // queueRef; this return is the losing claim's no-delivery branch.
     const handlerIdx = panelSource.indexOf("const handleQueueSendNow")
     const handler = panelSource.slice(handlerIdx, handlerIdx + 2600)
     expect(handler).toContain("if (!mqMarkInFlight(id)) return")

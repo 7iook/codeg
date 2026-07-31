@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest"
-import { act, renderHook } from "@testing-library/react"
+import { createElement, useEffect } from "react"
+import { describe, it, expect, vi } from "vitest"
+import { act, fireEvent, render, renderHook } from "@testing-library/react"
 import { useMessageQueue } from "./use-message-queue"
 import type { PromptDraft } from "@/lib/types"
 
@@ -9,6 +10,56 @@ function draft(text: string): PromptDraft {
 
 function texts(q: { draft: PromptDraft }[]): string[] {
   return q.map((item) => item.draft.displayText)
+}
+
+function ClaimRaceHarness({
+  deferWholeSendNowClaim,
+  onOrdinarySend,
+  onSteer,
+}: {
+  deferWholeSendNowClaim: boolean
+  onOrdinarySend: () => void
+  onSteer: () => void
+}) {
+  const { queue, enqueue, dequeue, markInFlight } = useMessageQueue()
+  const queueLength = queue.length
+
+  useEffect(() => {
+    if (queueLength === 0) return
+    const timer = setTimeout(() => {
+      if (dequeue()) onOrdinarySend()
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [queueLength, dequeue, onOrdinarySend])
+
+  return createElement(
+    "div",
+    null,
+    createElement(
+      "button",
+      { onClick: () => enqueue(draft("only"), null) },
+      "queue"
+    ),
+    createElement(
+      "button",
+      {
+        onClick: () => {
+          const item = queue[0]
+          if (!item) return
+          const claimAndSteer = () => {
+            if (!markInFlight(item.id)) return
+            onSteer()
+          }
+          if (deferWholeSendNowClaim) {
+            setTimeout(claimAndSteer, 0)
+          } else {
+            claimAndSteer()
+          }
+        },
+      },
+      "send now"
+    )
+  )
 }
 
 describe("useMessageQueue bounce FIFO ordering", () => {
@@ -146,9 +197,9 @@ describe("useMessageQueue steering status field (T4)", () => {
     ])
   })
 
-  it("markInFlight claims a queued item exactly ONCE (single dequeue)", () => {
-    // Auto-flush and "send now" race through this one gate; the loser must be
-    // told it did not get the item rather than delivering it a second time.
+  it("markInFlight claims a queued item exactly ONCE", () => {
+    // This covers repeated send-now claims. The cross-claim race with dequeue is
+    // covered below; both rely on synchronous read-check-write against queueRef.
     const { result } = renderHook(() => useMessageQueue())
     act(() => result.current.enqueue(draft("only"), null))
     const id = result.current.queue[0].id
@@ -162,6 +213,45 @@ describe("useMessageQueue steering status field (T4)", () => {
     expect(second).toBe(false)
     expect(result.current.queue[0].status).toBe("in_flight")
   })
+
+  it.each([
+    ["send-now claim runs synchronously", false],
+    ["whole send-now claim is deferred atomically", true],
+  ] as const)(
+    "delivers once when timer auto-flush races the send-now click: %s",
+    async (_scenario, deferWholeSendNowClaim) => {
+      vi.useFakeTimers()
+      try {
+        const ordinarySend = vi.fn()
+        const steer = vi.fn()
+        const view = render(
+          createElement(ClaimRaceHarness, {
+            deferWholeSendNowClaim,
+            onOrdinarySend: ordinarySend,
+            onSteer: steer,
+          })
+        )
+        fireEvent.click(view.getByRole("button", { name: "queue" }))
+        fireEvent.click(view.getByRole("button", { name: "send now" }))
+
+        act(() => {
+          // Keep promise callbacks pending until every same-tick timer has made
+          // its claim. The async timer helper would serialize a split read/write
+          // mutation and turn this regression guard back into a fake gate.
+          vi.runAllTimers()
+        })
+        await act(async () => {
+          await Promise.resolve()
+        })
+        view.unmount()
+
+        // The invariant is sink-level: ordinary prompt + steer totals exactly one.
+        expect(ordinarySend.mock.calls.length + steer.mock.calls.length).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
 
   it("markInFlight refuses an unknown id without mutating the queue", () => {
     const { result } = renderHook(() => useMessageQueue())

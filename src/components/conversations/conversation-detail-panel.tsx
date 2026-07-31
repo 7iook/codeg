@@ -1534,8 +1534,9 @@ const ConversationTabView = memo(function ConversationTabView({
     (id: string) => {
       const item = messageQueue.queue.find((entry) => entry.id === id)
       if (!item) return
-      // The ONE gate both dequeue paths share. Losing it means the auto-flush
-      // already took this item — returning here is what stops a double delivery.
+      // This and auto-flush are separate claims. Both synchronously read-check-
+      // write the same authoritative queueRef with no async gap; false means the
+      // auto-flush claim committed first, so this path must not deliver again.
       if (!mqMarkInFlight(id)) return
 
       const optimisticTurn = buildOptimisticUserTurnFromDraft(

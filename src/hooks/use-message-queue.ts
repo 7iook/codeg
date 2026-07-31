@@ -50,8 +50,9 @@ export interface UseMessageQueueReturn {
    * true. Returns false if the item is gone or is not `queued` — i.e. the caller
    * LOST the race and must not send.
    *
-   * This is the single gate both dequeue paths ("send now" and auto-flush) pass
-   * through, so one queue item can never produce two deliveries.
+   * `dequeue()` and `markInFlight()` are separate claims. Safety comes from both
+   * doing a synchronous read-check-write against the same authoritative
+   * `queueRef`, with no async boundary between reading and committing.
    */
   markInFlight: (id: string) => boolean
   /** Move an item to `status`, leaving its queue position untouched. */
