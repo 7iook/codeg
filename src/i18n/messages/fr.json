@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "Échec de la connexion",
           "sendPromptFailed": "Échec de l'envoi du message : {error}"
+        },
+        "cancelScope": {
+          "title": "Arrêter aussi les sous-agents ?",
+          "description": "{count, plural, one {Arrêter ce tour arrêtera aussi # sous-agent en cours d'exécution.} other {Arrêter ce tour arrêtera aussi # sous-agents en cours d'exécution.}}",
+          "keepRunning": "Continuer l'exécution",
+          "stopAll": "Tout arrêter",
+          "terminated": "{count, plural, one {# sous-agent arrêté} other {# sous-agents arrêtés}}",
+          "scopeMoved": "Les sous-agents ont changé pendant que vous décidiez. Rien n'a été arrêté — réessayez.",
+          "failed": "Impossible d'arrêter les sous-agents. Rien n'a été arrêté."
         }
       },
       "shared": {

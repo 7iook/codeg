@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "連線失敗",
           "sendPromptFailed": "訊息傳送失敗：{error}"
+        },
+        "cancelScope": {
+          "title": "同時停止子智慧代理？",
+          "description": "停止本輪對話會同時停止 {count} 個正在執行的子智慧代理。",
+          "keepRunning": "保持執行",
+          "stopAll": "全部停止",
+          "terminated": "已停止 {count} 個子智慧代理",
+          "scopeMoved": "你決定期間子智慧代理發生了變化，本次未停止任何內容，請重新點擊停止。",
+          "failed": "無法停止子智慧代理，本次未停止任何內容。"
         }
       },
       "shared": {

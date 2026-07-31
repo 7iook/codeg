@@ -25,6 +25,8 @@ import {
   acpSetConfigOption,
   acpGoalControl,
   acpCancel,
+  acpPreviewCancelScope,
+  acpCancelWithScopeToken,
   acpSteer,
   acpRespondPermission,
   acpAnswerQuestion,
@@ -35,6 +37,7 @@ import {
   acpFindConnectionForConversation,
 } from "@/lib/api"
 import { denormalizeSnapshot } from "@/lib/snapshot-denormalize"
+import type { CancelScopePreview, CancelScopeResult } from "@/lib/cancel-scope"
 import type { SteerOutcome } from "@/lib/steering-queue"
 import { buildDelegationSeedEnvelopes } from "@/lib/delegation-seed"
 import {
@@ -2428,6 +2431,22 @@ export interface AcpActionsValue {
   ): Promise<void>
   cancel(contextKey: string): Promise<void>
   /**
+   * Read-only preview of what a stop would cascade into (spec R4.1/R4.2).
+   * `null` when no connection exists at `contextKey` — the caller then has
+   * nothing to cancel either.
+   */
+  previewCancelScope(contextKey: string): Promise<CancelScopePreview | null>
+  /**
+   * Commit a cancel bounded by a preview token (spec R4.3), resolving with what
+   * was ACTUALLY terminated. `null` when no connection exists at `contextKey`.
+   * Rejects when the token was refused or the scope moved — in both cases
+   * nothing was cancelled and the caller must re-preview.
+   */
+  cancelWithScopeToken(
+    contextKey: string,
+    scopeToken: string
+  ): Promise<CancelScopeResult | null>
+  /**
    * Inject `blocks` into the connection's RUNNING turn (`_session/steering`) and
    * resolve with the outcome. Does NOT throw on a refusal — the caller must be
    * able to tell `failed` (safe to retry) from `unknown` (must not retry).
@@ -4719,6 +4738,24 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     await acpCancel(conn.connectionId)
   }, [])
 
+  const previewCancelScope = useCallback(async (contextKey: string) => {
+    const conn = storeRef.current.connections.get(contextKey)
+    if (!conn) return null
+    return acpPreviewCancelScope(conn.connectionId)
+  }, [])
+
+  const cancelWithScopeToken = useCallback(
+    async (contextKey: string, scopeToken: string) => {
+      const conn = storeRef.current.connections.get(contextKey)
+      if (!conn) return null
+      // A rejection propagates: the caller must be able to tell "refused,
+      // nothing cancelled, re-preview" from success. Swallowing it here would
+      // report a cancel that never happened.
+      return acpCancelWithScopeToken(conn.connectionId, scopeToken)
+    },
+    []
+  )
+
   /**
    * Inject `blocks` into the RUNNING turn (`_session/steering`).
    *
@@ -4923,6 +4960,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       setMode,
       setConfigOption,
       cancel,
+      previewCancelScope,
+      cancelWithScopeToken,
       steer,
       goalControl,
       respondPermission,
@@ -4946,6 +4985,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       setMode,
       setConfigOption,
       cancel,
+      previewCancelScope,
+      cancelWithScopeToken,
       steer,
       goalControl,
       respondPermission,

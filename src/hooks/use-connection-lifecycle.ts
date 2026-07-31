@@ -7,6 +7,12 @@ import { useAcpActions } from "@/contexts/acp-connections-context"
 import { useTaskContext } from "@/contexts/task-context"
 import { useConnection, type UseConnectionReturn } from "@/hooks/use-connection"
 import { extractAppCommandError } from "@/lib/app-error"
+import {
+  isCancelScopeRetryable,
+  needsCancelConfirmation,
+  type CancelScopePreview,
+  type CancelScopeResult,
+} from "@/lib/cancel-scope"
 import { TurnBusyError } from "@/lib/turn-busy"
 import { type AgentType, type PromptDraft } from "@/lib/types"
 import { getAgentLabel } from "@/lib/custom-agents"
@@ -31,6 +37,23 @@ interface UseConnectionLifecycleOptions {
    * connection under the same contextKey.
    */
   isTransientUnmount?: () => boolean
+}
+
+/**
+ * A stop click that is waiting on the user, because cancelling would ALSO kill
+ * `count` running / still-starting sub-agents (spec R4.1).
+ *
+ * `count` comes from the backend preview and is authoritative — it includes
+ * still-starting delegations that have no task_id yet, so it can exceed
+ * `taskIds.length`. Display `count`, never a length.
+ */
+export interface CancelScopeConfirmation {
+  /** How many sub-agents the cascade would terminate. The number to show. */
+  count: number
+  /** Commit the bounded cancel. Re-previews once if the token went stale. */
+  confirm: () => void
+  /** Dismiss without cancelling anything. */
+  dismiss: () => void
 }
 
 export interface UseConnectionLifecycleReturn {
@@ -66,7 +89,19 @@ export interface UseConnectionLifecycleReturn {
     }
   ) => void
   handleSetConfigOption: (configId: string, valueId: string) => void
+  /**
+   * Stop the current turn, disclosing the sub-agent cascade first (spec R4).
+   *
+   * Previews the scope; when nothing would be cascade-killed it cancels
+   * straight away, otherwise it resolves the pending confirmation into
+   * `cancelScopeConfirm` and waits for the user.
+   */
   handleCancel: () => void
+  /**
+   * The confirmation the stop button is waiting on, or `null`. Non-null means a
+   * cascade WOULD kill `count` sub-agents and the user has not yet decided.
+   */
+  cancelScopeConfirm: CancelScopeConfirmation | null
   handleRespondPermission: (requestId: string, optionId: string) => void
 }
 
@@ -132,6 +167,8 @@ export function useConnectionLifecycle({
     setMode: connSetMode,
     setConfigOption: connSetConfigOption,
     cancel: connCancel,
+    previewCancelScope: connPreviewCancelScope,
+    cancelWithScopeToken: connCancelWithScopeToken,
     respondPermission: connRespondPermission,
     modes,
     configOptions,
@@ -141,6 +178,10 @@ export function useConnectionLifecycle({
   const hasSelectorsData = modes !== null || configOptions !== null
   const effectiveSelectorsReady = selectorsReady || hasSelectorsData
   const selectorTaskIdRef = useRef<string | null>(null)
+  // Non-null while a stop click is waiting on the user because cancelling would
+  // also kill running sub-agents (spec R4.1).
+  const [cancelScopeConfirm, setCancelScopeConfirm] =
+    useState<CancelScopeConfirmation | null>(null)
   // Visual-only loading indicators for selector chips.
   // Skip loading indicators when we have cached selectors — even if the
   // cache contains no modes/configOptions (the agent simply doesn't have
@@ -464,11 +505,139 @@ export function useConnectionLifecycle({
     [connSetMode, sendPrompt, contextKey, touchActivity, t]
   )
 
+  /**
+   * Report what the bounded cancel ACTUALLY terminated.
+   *
+   * `result.count` — not the preview's number: the scope may legitimately have
+   * shrunk while the dialog was open (a sub-agent finishing on its own is not a
+   * kill), and it covers still-starting delegations that have no task_id, so
+   * `terminatedTaskIds.length` would under-report.
+   */
+  const reportTerminated = useCallback(
+    (result: CancelScopeResult | null) => {
+      if (!result || result.count === 0) return
+      toast.success(t("cancelScope.terminated", { count: result.count }))
+    },
+    [t]
+  )
+
+  /**
+   * Commit the bounded cancel, and on a stale authorization re-preview and
+   * re-confirm instead of proceeding.
+   *
+   * `cancel_scope_token_rejected` (used / expired / wrong connection) and
+   * `cancel_scope_changed` (a delegation appeared since the preview) BOTH mean
+   * nothing was cancelled. Falling back to the plain unbounded `acpCancel`
+   * here would kill an unknown number of sub-agents having shown the user a
+   * different number — the exact disclosure hole this feature closes. So the
+   * refusal re-enters the dialog with a FRESH preview (`allowRepreview` guards
+   * it to one hop, so a scope churning under us cannot loop).
+   */
+  const commitCancel = useCallback(
+    async (scopeToken: string, allowRepreview: boolean): Promise<void> => {
+      // Named inner function so the re-confirm can recurse directly. A
+      // `useRef` + effect would trip `react-hooks/immutability`, and there is
+      // no state to carry between hops anyway: `allowRepreview` alone bounds it.
+      const run = async (
+        token: string,
+        canRepreview: boolean
+      ): Promise<void> => {
+        try {
+          reportTerminated(await connCancelWithScopeToken(token))
+          return
+        } catch (e: unknown) {
+          if (!isCancelScopeRetryable(e)) {
+            console.error("[ConnLifecycle] cancelWithScopeToken:", e)
+            toast.error(t("cancelScope.failed"))
+            return
+          }
+          // Refused ⇒ nothing was cancelled. NEVER fall back to a plain cancel.
+          if (!canRepreview) {
+            toast.error(t("cancelScope.scopeMoved"))
+            return
+          }
+        }
+        let fresh: CancelScopePreview | null
+        try {
+          fresh = await connPreviewCancelScope()
+        } catch (e: unknown) {
+          console.error("[ConnLifecycle] previewCancelScope (re-preview):", e)
+          toast.error(t("cancelScope.scopeMoved"))
+          return
+        }
+        if (!fresh || !needsCancelConfirmation(fresh)) {
+          // The sub-agents finished on their own while we were refused, so the
+          // cascade the user was warned about no longer exists — a plain cancel
+          // now destroys nothing beyond the turn itself.
+          connCancel().catch((err: unknown) =>
+            console.error("[ConnLifecycle] cancel:", err)
+          )
+          return
+        }
+        const freshToken = fresh.token as string
+        setCancelScopeConfirm({
+          count: fresh.count,
+          confirm: () => {
+            setCancelScopeConfirm(null)
+            void run(freshToken, false)
+          },
+          dismiss: () => setCancelScopeConfirm(null),
+        })
+      }
+      return run(scopeToken, allowRepreview)
+    },
+    [
+      connCancel,
+      connCancelWithScopeToken,
+      connPreviewCancelScope,
+      reportTerminated,
+      t,
+    ]
+  )
+
+  /**
+   * Stop, disclosing the sub-agent cascade first (spec R4).
+   *
+   * `count === 0` (which is also the only case the backend issues no token for)
+   * cancels immediately — there are no sub-agents to warn about and a dialog
+   * would be pure friction. Otherwise the user must confirm, and the commit is
+   * bounded by the preview's token so it destroys exactly what was shown.
+   *
+   * A failed PREVIEW falls back to the plain cancel: the preview is read-only,
+   * so its failure means we could not learn the scope, and leaving the user
+   * unable to stop a runaway turn is worse than stopping without a count. A
+   * failed COMMIT never falls back — see `commitCancel`.
+   */
   const handleCancel = useCallback(() => {
-    connCancel().catch((e: unknown) =>
-      console.error("[ConnLifecycle] cancel:", e)
-    )
-  }, [connCancel])
+    void (async () => {
+      let preview: CancelScopePreview | null
+      try {
+        preview = await connPreviewCancelScope()
+      } catch (e: unknown) {
+        console.error("[ConnLifecycle] previewCancelScope:", e)
+        // Read-only call failed — stop must still work.
+        connCancel().catch((err: unknown) =>
+          console.error("[ConnLifecycle] cancel:", err)
+        )
+        return
+      }
+      if (!preview || !needsCancelConfirmation(preview)) {
+        // Nothing would be cascade-killed (R4.4): cancel directly.
+        connCancel().catch((e: unknown) =>
+          console.error("[ConnLifecycle] cancel:", e)
+        )
+        return
+      }
+      setCancelScopeConfirm({
+        count: preview.count,
+        confirm: () => {
+          setCancelScopeConfirm(null)
+          void commitCancel(preview.token as string, true)
+        },
+        dismiss: () => setCancelScopeConfirm(null),
+      })
+    })()
+  }, [connCancel, connPreviewCancelScope, commitCancel])
 
   const handleSetConfigOption = useCallback(
     (configId: string, valueId: string) => {
@@ -500,6 +669,7 @@ export function useConnectionLifecycle({
     handleSend,
     handleSetConfigOption,
     handleCancel,
+    cancelScopeConfirm,
     handleRespondPermission,
   }
 }

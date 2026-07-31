@@ -88,6 +88,8 @@ vi.mock("@/lib/api", () => ({
   acpSetMode: vi.fn(),
   acpSetConfigOption: vi.fn(),
   acpCancel: vi.fn(),
+  acpPreviewCancelScope: vi.fn(),
+  acpCancelWithScopeToken: vi.fn(),
   acpRespondPermission: vi.fn(),
   acpTouchConnection: vi.fn(),
   // Imported by the conversation runtime store (a real dependency of the

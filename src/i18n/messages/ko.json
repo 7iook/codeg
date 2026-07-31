@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "연결 실패",
           "sendPromptFailed": "메시지 전송에 실패했습니다: {error}"
+        },
+        "cancelScope": {
+          "title": "서브 에이전트도 중지할까요?",
+          "description": "이 턴을 중지하면 실행 중인 서브 에이전트 {count}개도 함께 중지됩니다.",
+          "keepRunning": "계속 실행",
+          "stopAll": "모두 중지",
+          "terminated": "서브 에이전트 {count}개를 중지했습니다",
+          "scopeMoved": "결정하는 동안 서브 에이전트 구성이 바뀌었습니다. 이번에는 아무것도 중지되지 않았으니 다시 중지해 주세요.",
+          "failed": "서브 에이전트를 중지할 수 없습니다. 아무것도 중지되지 않았습니다."
         }
       },
       "shared": {

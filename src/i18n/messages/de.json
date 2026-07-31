@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "Verbindung fehlgeschlagen",
           "sendPromptFailed": "Nachricht konnte nicht gesendet werden: {error}"
+        },
+        "cancelScope": {
+          "title": "Sub-Agenten auch stoppen?",
+          "description": "{count, plural, one {Wenn du diesen Durchlauf stoppst, wird auch # laufender Sub-Agent gestoppt.} other {Wenn du diesen Durchlauf stoppst, werden auch # laufende Sub-Agenten gestoppt.}}",
+          "keepRunning": "Weiterlaufen lassen",
+          "stopAll": "Alles stoppen",
+          "terminated": "{count, plural, one {# Sub-Agent gestoppt} other {# Sub-Agenten gestoppt}}",
+          "scopeMoved": "Die Sub-Agenten haben sich während deiner Entscheidung geändert. Es wurde nichts gestoppt – versuche es erneut.",
+          "failed": "Die Sub-Agenten konnten nicht gestoppt werden. Es wurde nichts gestoppt."
         }
       },
       "shared": {

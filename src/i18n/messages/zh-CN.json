@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "连接失败",
           "sendPromptFailed": "消息发送失败：{error}"
+        },
+        "cancelScope": {
+          "title": "同时停止子智能体？",
+          "description": "停止本轮对话会同时停止 {count} 个正在运行的子智能体。",
+          "keepRunning": "保持运行",
+          "stopAll": "全部停止",
+          "terminated": "已停止 {count} 个子智能体",
+          "scopeMoved": "你决定期间子智能体发生了变化，本次未停止任何内容，请重新点击停止。",
+          "failed": "无法停止子智能体，本次未停止任何内容。"
         }
       },
       "shared": {

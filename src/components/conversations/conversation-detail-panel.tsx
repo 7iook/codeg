@@ -45,6 +45,7 @@ import {
 import { ConversationShell } from "@/components/chat/conversation-shell"
 import { SessionConfigStaleBanner } from "@/components/chat/session-config-stale-banner"
 import { BackgroundTasksChip } from "@/components/chat/background-tasks-chip"
+import { CancelScopeDialog } from "@/components/chat/cancel-scope-dialog"
 import { FeedbackNotesDisplay } from "@/components/chat/feedback-notes-display"
 import { FeedbackDialog } from "@/components/chat/feedback-dialog"
 import { AgentDiagnosticsDialog } from "@/components/settings/agent-diagnostics-dialog"
@@ -548,6 +549,7 @@ const ConversationTabView = memo(function ConversationTabView({
     handleSend: lifecycleSend,
     handleSetConfigOption,
     handleCancel,
+    cancelScopeConfirm,
     handleRespondPermission,
   } = useConnectionLifecycle({
     contextKey: tabId,
@@ -1703,6 +1705,10 @@ const ConversationTabView = memo(function ConversationTabView({
         <>
           <SessionConfigStaleBanner contextKey={tabId} />
           <BackgroundTasksChip contextKey={tabId} />
+          {/* The stop button's sub-agent disclosure (R4.1). Mounted here rather
+              than beside the button so it survives composer remounts mid-click;
+              it renders nothing until a cascade would actually kill something. */}
+          <CancelScopeDialog confirmation={cancelScopeConfirm} />
         </>
       }
       status={connStatus}
@@ -1855,6 +1861,9 @@ const ConversationTabView = memo(function ConversationTabView({
                 flush
                 tall
               />
+              {/* Same disclosure for the welcome/draft composer, whose stop
+                  button routes through the same handleCancel. */}
+              <CancelScopeDialog confirmation={cancelScopeConfirm} />
             </div>
             <div className="flex-1" />
             <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-6">

@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "Conexión fallida",
           "sendPromptFailed": "No se pudo enviar el mensaje: {error}"
+        },
+        "cancelScope": {
+          "title": "¿Detener también los subagentes?",
+          "description": "{count, plural, one {Detener este turno también detendrá # subagente en ejecución.} other {Detener este turno también detendrá # subagentes en ejecución.}}",
+          "keepRunning": "Mantener en ejecución",
+          "stopAll": "Detener todo",
+          "terminated": "{count, plural, one {Se detuvo # subagente} other {Se detuvieron # subagentes}}",
+          "scopeMoved": "Los subagentes cambiaron mientras decidías. No se detuvo nada; vuelve a intentarlo.",
+          "failed": "No se pudieron detener los subagentes. No se detuvo nada."
         }
       },
       "shared": {

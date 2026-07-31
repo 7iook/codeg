@@ -10,6 +10,7 @@ import { getCodegToken } from "./transport/web-auth"
 import { notifyWebUnauthorized } from "./transport/web-connection-store"
 import { getCurrentEffectiveAppLocale } from "./i18n"
 import { TurnBusyError, isTurnInProgressRejection } from "./turn-busy"
+import type { CancelScopePreview, CancelScopeResult } from "./cancel-scope"
 import type { SteerOutcome } from "./steering-queue"
 import type { FolderThemeColor } from "./theme-presets"
 import type {
@@ -285,6 +286,43 @@ export async function acpGoalControl(
 
 export async function acpCancel(connectionId: string): Promise<void> {
   return getTransport().call("acp_cancel", { connectionId })
+}
+
+/**
+ * Read-only: "what would stop destroy right now?" (spec R4.1/R4.2).
+ *
+ * Nothing is cancelled here, so this is safe to call on every stop click.
+ * `count` is authoritative and includes still-starting delegations that have no
+ * `task_id` yet — never derive the displayed number from `taskIds.length`.
+ * `token` is absent exactly when `count === 0`, meaning "cancel directly, no
+ * confirmation" (R4.4).
+ */
+export async function acpPreviewCancelScope(
+  connectionId: string
+): Promise<CancelScopePreview> {
+  return getTransport().call("acp_preview_cancel_scope", { connectionId })
+}
+
+/**
+ * Confirmed cancel bounded by a preview token (spec R4.3).
+ *
+ * Resolves with what was ACTUALLY terminated — report `result.count`, never the
+ * preview's original count, since delegations may have finished on their own
+ * while the dialog was open.
+ *
+ * Rejects (4xx on the web path) when the token was refused or the scope moved
+ * since the preview; **both mean nothing was cancelled**. Callers must
+ * re-preview rather than fall back to `acpCancel`, which is unbounded. See
+ * `isCancelScopeRetryable`.
+ */
+export async function acpCancelWithScopeToken(
+  connectionId: string,
+  scopeToken: string
+): Promise<CancelScopeResult> {
+  return getTransport().call("acp_cancel_with_scope_token", {
+    connectionId,
+    scopeToken,
+  })
 }
 
 /**

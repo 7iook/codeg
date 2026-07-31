@@ -25,6 +25,7 @@ import type {
   PromptInputBlock,
 } from "@/lib/types"
 import type { SteerOutcome } from "@/lib/steering-queue"
+import type { CancelScopePreview, CancelScopeResult } from "@/lib/cancel-scope"
 
 const DEFAULT_PROMPT_CAPABILITIES: PromptCapabilitiesInfo = {
   image: false,
@@ -119,6 +120,19 @@ export interface UseConnectionReturn {
   setMode: (modeId: string) => Promise<void>
   setConfigOption: (configId: string, valueId: string) => Promise<void>
   cancel: () => Promise<void>
+  /**
+   * Read-only preview of what a stop would cascade into (spec R4.1/R4.2).
+   * `null` when there is no connection for this contextKey.
+   */
+  previewCancelScope: () => Promise<CancelScopePreview | null>
+  /**
+   * Commit a cancel bounded by a preview token, resolving with what was
+   * ACTUALLY terminated. Rejects when the token was refused or the scope moved
+   * — both mean nothing was cancelled and the caller must re-preview.
+   */
+  cancelWithScopeToken: (
+    scopeToken: string
+  ) => Promise<CancelScopeResult | null>
   /**
    * Inject `blocks` into the RUNNING turn and resolve with the outcome. Never
    * rejects for a refusal — a `failed` / `unknown` outcome is returned so the
@@ -299,6 +313,17 @@ export function useConnection(contextKey: string): UseConnectionReturn {
     [actions, contextKey]
   )
 
+  const previewCancelScope = useCallback(
+    () => actions.previewCancelScope(contextKey),
+    [actions, contextKey]
+  )
+
+  const cancelWithScopeToken = useCallback(
+    (scopeToken: string) =>
+      actions.cancelWithScopeToken(contextKey, scopeToken),
+    [actions, contextKey]
+  )
+
   const steer = useCallback(
     (blocks: PromptInputBlock[], messageId: string) =>
       actions.steer(contextKey, blocks, messageId),
@@ -365,6 +390,8 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       setMode,
       setConfigOption,
       cancel,
+      previewCancelScope,
+      cancelWithScopeToken,
       steer,
       respondPermission,
       answerQuestion,
@@ -406,6 +433,8 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       setMode,
       setConfigOption,
       cancel,
+      previewCancelScope,
+      cancelWithScopeToken,
       steer,
       respondPermission,
       answerQuestion,

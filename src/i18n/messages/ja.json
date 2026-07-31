@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "接続に失敗しました",
           "sendPromptFailed": "メッセージの送信に失敗しました: {error}"
+        },
+        "cancelScope": {
+          "title": "サブエージェントも停止しますか？",
+          "description": "このターンを停止すると、実行中のサブエージェント {count} 件も停止します。",
+          "keepRunning": "実行を続ける",
+          "stopAll": "すべて停止",
+          "terminated": "サブエージェント {count} 件を停止しました",
+          "scopeMoved": "確認中にサブエージェントの構成が変わりました。今回は何も停止していません。もう一度停止してください。",
+          "failed": "サブエージェントを停止できませんでした。何も停止していません。"
         }
       },
       "shared": {

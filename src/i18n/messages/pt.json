@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "Falha na conexão",
           "sendPromptFailed": "Falha ao enviar a mensagem: {error}"
+        },
+        "cancelScope": {
+          "title": "Parar também os subagentes?",
+          "description": "{count, plural, one {Parar este turno também vai parar # subagente em execução.} other {Parar este turno também vai parar # subagentes em execução.}}",
+          "keepRunning": "Manter em execução",
+          "stopAll": "Parar tudo",
+          "terminated": "{count, plural, one {# subagente parado} other {# subagentes parados}}",
+          "scopeMoved": "Os subagentes mudaram enquanto você decidia. Nada foi parado — tente parar novamente.",
+          "failed": "Não foi possível parar os subagentes. Nada foi parado."
         }
       },
       "shared": {

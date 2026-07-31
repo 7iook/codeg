@@ -2399,6 +2399,15 @@
         "errors": {
           "connectionFailed": "Connection failed",
           "sendPromptFailed": "Failed to send the message: {error}"
+        },
+        "cancelScope": {
+          "title": "Stop sub-agents too?",
+          "description": "{count, plural, one {Stopping this turn will also stop # running sub-agent.} other {Stopping this turn will also stop # running sub-agents.}}",
+          "keepRunning": "Keep running",
+          "stopAll": "Stop everything",
+          "terminated": "{count, plural, one {Stopped # sub-agent} other {Stopped # sub-agents}}",
+          "scopeMoved": "The sub-agents changed while you were deciding. Nothing was stopped — try stopping again.",
+          "failed": "Couldn't stop the sub-agents. Nothing was stopped."
         }
       },
       "shared": {
