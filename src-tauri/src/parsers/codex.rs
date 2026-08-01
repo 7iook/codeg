@@ -558,7 +558,7 @@ fn digit_blind(text: &str) -> String {
 /// and the one exception is the check's own blind spot — that `nl` failed and
 /// printed a usage error, so there was no line number to match.
 fn call_chunk_stride(chunks: &[String], calls: usize, text_run: Option<usize>) -> Option<usize> {
-    if calls == 0 || chunks.is_empty() || chunks.len() % calls != 0 {
+    if calls == 0 || chunks.is_empty() || !chunks.len().is_multiple_of(calls) {
         return None;
     }
     let stride = chunks.len() / calls;

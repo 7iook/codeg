@@ -319,6 +319,16 @@ struct ResultsLoop {
     binds: Vec<String>,
 }
 
+/// One header as matched, before the `forEach` form has been opened up into a
+/// `ResultsLoop`: where the header sits, what it binds so far, the counter of
+/// the index form, and whether the body is still inside a callback.
+struct LoopHeader {
+    header: Range<usize>,
+    binds: Vec<String>,
+    counter: Option<String>,
+    callback: bool,
+}
+
 /// `None` when the script has no such loop, or more than one.
 ///
 /// Three headers, and nothing else: `for (const x of results)`,
@@ -339,21 +349,25 @@ fn results_loop(src: &str, results: &str) -> Option<ResultsLoop> {
     ))
     .ok()?;
 
-    // `header`, then what the loop binds, then whether it is the callback form.
-    let mut found: Option<(Range<usize>, Vec<String>, Option<String>, bool)> = None;
+    let mut found: Option<LoopHeader> = None;
     let mut hits = 0usize;
     for caps in for_of.captures_iter(src) {
         hits += 1;
-        found = Some((
-            caps.get(0)?.range(),
-            vec![caps.get(1)?.as_str().to_string()],
-            None,
-            false,
-        ));
+        found = Some(LoopHeader {
+            header: caps.get(0)?.range(),
+            binds: vec![caps.get(1)?.as_str().to_string()],
+            counter: None,
+            callback: false,
+        });
     }
     for m in for_each.find_iter(src) {
         hits += 1;
-        found = Some((m.range(), Vec::new(), None, true));
+        found = Some(LoopHeader {
+            header: m.range(),
+            binds: Vec::new(),
+            counter: None,
+            callback: true,
+        });
     }
     for caps in for_index.captures_iter(src) {
         hits += 1;
@@ -363,18 +377,23 @@ fn results_loop(src: &str, results: &str) -> Option<ResultsLoop> {
         if caps.get(2)?.as_str() != counter || caps.get(3)?.as_str() != counter {
             return None;
         }
-        found = Some((
-            caps.get(0)?.range(),
-            vec![counter.to_string()],
-            Some(counter.to_string()),
-            false,
-        ));
+        found = Some(LoopHeader {
+            header: caps.get(0)?.range(),
+            binds: vec![counter.to_string()],
+            counter: Some(counter.to_string()),
+            callback: false,
+        });
     }
     if hits != 1 {
         return None;
     }
 
-    let (header, mut binds, counter, callback) = found?;
+    let LoopHeader {
+        header,
+        mut binds,
+        counter,
+        callback,
+    } = found?;
     if callback {
         // `forEach` hands its callback the array itself as a third argument, so
         // a callback that takes one holds an alias this proof does not track:
@@ -1915,8 +1934,8 @@ mod tests {
     /// the sampled candidate scripts pass exactly this to `xmllint`.
     #[test]
     fn text_inside_a_command_string_is_not_a_call_site() {
-        let src = format!("const r = await Promise.all([tools.exec_command({{cmd: \"xmllint --html --xpath '//div//text()' -\"}}), tools.exec_command({{cmd:\"b\"}})]);\nfor (const x of r) {{ text(x.output); text(\"done\"); }}\n");
-        assert_eq!(parse_code_mode_script(&src).text_run, Some(2));
+        let src = "const r = await Promise.all([tools.exec_command({cmd: \"xmllint --html --xpath '//div//text()' -\"}), tools.exec_command({cmd:\"b\"})]);\nfor (const x of r) { text(x.output); text(\"done\"); }\n";
+        assert_eq!(parse_code_mode_script(src).text_run, Some(2));
     }
 
     #[test]
