@@ -10,6 +10,7 @@ pub mod pet;
 pub mod quick_message;
 pub mod remote_workspace_connection;
 pub mod system;
+pub mod work_task;
 
 pub use agent::AgentType;
 pub use automation::{
@@ -34,6 +35,10 @@ pub use message::{
 };
 pub use quick_message::QuickMessageInfo;
 pub use remote_workspace_connection::RemoteWorkspaceConnectionInfo;
+pub use work_task::{
+    WorkTaskChangedFile, WorkTaskConfig, WorkTaskDraft, WorkTaskEventInfo, WorkTaskFolderSettings,
+    WorkTaskInfo, WorkTaskMergeState, WorkTaskStatus,
+};
 #[cfg(feature = "tauri-runtime")]
 pub use system::SystemRenderingSettings;
 pub use system::{

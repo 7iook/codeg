@@ -1226,6 +1226,101 @@ export interface AutomationDraft {
   config: AutomationConfig
 }
 
+// ─── Work tasks ────────────────────────────────────────────────────────────
+// Mirrors src-tauri/src/models/work_task.rs. Wire form is snake_case like
+// Automations. (Named WorkTask* because `Task` is taken by task-context.tsx.)
+
+export type WorkTaskStatus =
+  | "todo"
+  | "queued"
+  | "running"
+  | "awaiting_input"
+  | "review"
+  | "merging"
+  | "done"
+  | "failed"
+  | "canceled"
+
+/** The captured composer snapshot stored in `work_task.config`. Optional
+ *  agent/mode/config fields are per-task overrides; empty = inherit the
+ *  folder's task settings at launch. */
+export interface WorkTaskConfig {
+  prompt_blocks: PromptInputBlock[]
+  display_text: string
+  agent_type?: AgentType | null
+  mode_id?: string | null
+  config_values: Record<string, string>
+  label_snapshot?: AutomationLabelSnapshot | null
+}
+
+export interface WorkTask {
+  id: number
+  folder_id: number
+  title: string
+  // Serialized from an opaque JSON column; guard against a null parse fallback.
+  config: WorkTaskConfig | null
+  status: WorkTaskStatus
+  /** agent_error | setup_error | verdict_blocked | interrupted */
+  failure_reason: string | null
+  last_error: string | null
+  run_seq: number
+  sort_order: number
+  worktree_folder_id: number | null
+  conversation_id: number | null
+  base_branch: string | null
+  base_sha: string | null
+  work_branch: string | null
+  /** null = nothing pending; "failed" = worktree cleanup failed (retryable). */
+  cleanup_state: string | null
+  verdict: string | null
+  result_summary: string | null
+  files_changed: number | null
+  additions: number | null
+  deletions: number | null
+  merge_commit: string | null
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  settled_at: string | null
+  finished_at: string | null
+}
+
+/** One append-only timeline entry ("how the task advanced"). */
+export interface WorkTaskEvent {
+  id: number
+  task_id: number
+  kind: string
+  actor: string
+  payload: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface WorkTaskDraft {
+  folder_id: number
+  title: string
+  config: WorkTaskConfig
+}
+
+/** Per-folder task defaults (work_task_settings.config). */
+export interface WorkTaskFolderSettings {
+  default_agent_type?: AgentType | null
+  mode_id?: string | null
+  config_values: Record<string, string>
+  label_snapshot?: AutomationLabelSnapshot | null
+  auto_process: boolean
+  /** 0 = unlimited. */
+  max_concurrent: number
+  merge_strategy: "squash" | "merge"
+  delete_worktree_default: boolean
+}
+
+/** Changed file of a task worktree vs its recorded base. */
+export interface WorkTaskChangedFile {
+  file: string
+  additions: number
+  deletions: number
+}
+
 export interface PlanEntryInfo {
   content: string
   priority: string

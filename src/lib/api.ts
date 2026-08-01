@@ -18,6 +18,11 @@ import type {
   Automation,
   AutomationRun,
   AutomationDraft,
+  WorkTask,
+  WorkTaskChangedFile,
+  WorkTaskDraft,
+  WorkTaskEvent,
+  WorkTaskFolderSettings,
   ConversationSummary,
   ConversationDetail,
   DbConversationDetail,
@@ -2587,6 +2592,120 @@ export async function automationRunNow(automationId: number): Promise<number> {
 /** Cancel an in-flight (or clear a wedged) run. */
 export async function automationCancelRun(runId: number): Promise<void> {
   return getTransport().call("automation_cancel_run", { runId })
+}
+
+// Work tasks
+
+export async function workTaskList(
+  folderId?: number | null
+): Promise<WorkTask[]> {
+  return getTransport().call("work_task_list", { folderId: folderId ?? null })
+}
+
+export async function workTaskGet(id: number): Promise<WorkTask> {
+  return getTransport().call("work_task_get", { id })
+}
+
+export async function workTaskEvents(
+  taskId: number,
+  limit = 500
+): Promise<WorkTaskEvent[]> {
+  return getTransport().call("work_task_events", { taskId, limit })
+}
+
+export async function workTaskCreate(draft: WorkTaskDraft): Promise<WorkTask> {
+  return getTransport().call("work_task_create", { draft })
+}
+
+export async function workTaskUpdate(
+  id: number,
+  draft: WorkTaskDraft
+): Promise<WorkTask> {
+  return getTransport().call("work_task_update", { id, draft })
+}
+
+export async function workTaskDelete(
+  id: number,
+  deleteWorktree = false
+): Promise<void> {
+  return getTransport().call("work_task_delete", { id, deleteWorktree })
+}
+
+export async function workTaskStart(id: number): Promise<void> {
+  return getTransport().call("work_task_start", { id })
+}
+
+/** Queue every todo of the folder; returns how many were claimed. */
+export async function workTaskStartAll(folderId: number): Promise<number> {
+  return getTransport().call("work_task_start_all", { folderId })
+}
+
+export async function workTaskRetry(id: number): Promise<void> {
+  return getTransport().call("work_task_retry", { id })
+}
+
+/** canceled → todo (back onto the board; started again explicitly). */
+export async function workTaskRequeue(id: number): Promise<void> {
+  return getTransport().call("work_task_requeue", { id })
+}
+
+/** Return a reviewed task to the agent with feedback. */
+export async function workTaskReturn(
+  id: number,
+  feedback: string
+): Promise<void> {
+  return getTransport().call("work_task_return", { id, feedback })
+}
+
+export async function workTaskCancel(id: number): Promise<void> {
+  return getTransport().call("work_task_cancel", { id })
+}
+
+/** Kick off the two-stage merge; the outcome rides `task://changed` events. */
+export async function workTaskMerge(
+  id: number,
+  message: string,
+  strategy: "squash" | "merge" | null,
+  deleteWorktree: boolean
+): Promise<void> {
+  return getTransport().call("work_task_merge", {
+    id,
+    message,
+    strategy,
+    deleteWorktree,
+  })
+}
+
+/** Remove the task's worktree + branch (also retries a failed cleanup). */
+export async function workTaskCleanup(id: number): Promise<void> {
+  return getTransport().call("work_task_cleanup", { id })
+}
+
+/** Unified diff of the worktree vs the task's recorded base. */
+export async function workTaskDiff(
+  id: number,
+  file?: string | null
+): Promise<string> {
+  return getTransport().call("work_task_diff", { id, file: file ?? null })
+}
+
+export async function workTaskChangedFiles(
+  id: number
+): Promise<WorkTaskChangedFile[]> {
+  return getTransport().call("work_task_changed_files", { id })
+}
+
+export async function workTaskSettingsGet(
+  folderId: number
+): Promise<WorkTaskFolderSettings> {
+  return getTransport().call("work_task_settings_get", { folderId })
+}
+
+export async function workTaskSettingsSet(
+  folderId: number,
+  settings: WorkTaskFolderSettings
+): Promise<void> {
+  return getTransport().call("work_task_settings_set", { folderId, settings })
 }
 
 // Directory browser (for web/server mode)

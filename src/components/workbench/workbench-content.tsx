@@ -6,6 +6,7 @@ import {
   type WorkbenchRouteId,
 } from "@/contexts/workbench-route-context"
 import { AutomationsPage } from "@/components/automations/automations-page"
+import { TasksPage } from "@/components/tasks/tasks-page"
 
 /**
  * Registry of full-page routes that take over the main content region. The
@@ -16,6 +17,7 @@ import { AutomationsPage } from "@/components/automations/automations-page"
  */
 const WORKBENCH_ROUTES: Partial<Record<WorkbenchRouteId, ComponentType>> = {
   automations: AutomationsPage,
+  tasks: TasksPage,
 }
 
 /**

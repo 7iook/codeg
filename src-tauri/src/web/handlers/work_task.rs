@@ -1,0 +1,285 @@
+use std::sync::Arc;
+
+use axum::{extract::Extension, Json};
+use serde::Deserialize;
+
+use crate::app_error::AppCommandError;
+use crate::app_state::AppState;
+use crate::commands::work_task as core;
+use crate::models::{
+    WorkTaskChangedFile, WorkTaskDraft, WorkTaskEventInfo, WorkTaskFolderSettings, WorkTaskInfo,
+};
+
+fn default_event_limit() -> u64 {
+    500
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListParams {
+    #[serde(default)]
+    pub folder_id: Option<i32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdParams {
+    pub id: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventsParams {
+    pub task_id: i32,
+    #[serde(default = "default_event_limit")]
+    pub limit: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateParams {
+    pub draft: WorkTaskDraft,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateParams {
+    pub id: i32,
+    pub draft: WorkTaskDraft,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteParams {
+    pub id: i32,
+    #[serde(default)]
+    pub delete_worktree: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderParams {
+    pub folder_id: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReturnParams {
+    pub id: i32,
+    pub feedback: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeParams {
+    pub id: i32,
+    pub message: String,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    pub delete_worktree: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffParams {
+    pub id: i32,
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSetParams {
+    pub folder_id: i32,
+    pub settings: WorkTaskFolderSettings,
+}
+
+pub async fn work_task_list(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<ListParams>,
+) -> Result<Json<Vec<WorkTaskInfo>>, AppCommandError> {
+    let result = core::work_task_list_core(&state.db, params.folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_get(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<IdParams>,
+) -> Result<Json<WorkTaskInfo>, AppCommandError> {
+    let result = core::work_task_get_core(&state.db, params.id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_events(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<EventsParams>,
+) -> Result<Json<Vec<WorkTaskEventInfo>>, AppCommandError> {
+    let result = core::work_task_events_core(&state.db, params.task_id, params.limit)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_attention_count(
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<u64>, AppCommandError> {
+    let result = core::work_task_attention_count_core(&state.db)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_create(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<CreateParams>,
+) -> Result<Json<WorkTaskInfo>, AppCommandError> {
+    let result = core::work_task_create_core(&state.emitter, &state.db, params.draft)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_update(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<UpdateParams>,
+) -> Result<Json<WorkTaskInfo>, AppCommandError> {
+    let result = core::work_task_update_core(&state.emitter, &state.db, params.id, params.draft)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_delete(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<DeleteParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_delete_core(&state.emitter, &state.db, params.id, params.delete_worktree)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_start(
+    Json(params): Json<IdParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_start_core(params.id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_start_all(
+    Json(params): Json<FolderParams>,
+) -> Result<Json<u32>, AppCommandError> {
+    let claimed = core::work_task_start_all_core(params.folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(claimed))
+}
+
+pub async fn work_task_retry(
+    Json(params): Json<IdParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_retry_core(params.id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_requeue(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<IdParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_requeue_core(&state.emitter, &state.db, params.id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_return(
+    Json(params): Json<ReturnParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_return_core(params.id, params.feedback)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_cancel(
+    Json(params): Json<IdParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_cancel_core(params.id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_merge(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<MergeParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_merge_core(
+        &state.db,
+        params.id,
+        params.message,
+        params.strategy,
+        params.delete_worktree,
+    )
+    .await
+    .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_cleanup(
+    Json(params): Json<IdParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_cleanup_core(params.id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_diff(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<DiffParams>,
+) -> Result<Json<String>, AppCommandError> {
+    let result = core::work_task_diff_core(&state.db, params.id, params.file).await?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_changed_files(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<IdParams>,
+) -> Result<Json<Vec<WorkTaskChangedFile>>, AppCommandError> {
+    let result = core::work_task_changed_files_core(&state.db, params.id).await?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_settings_get(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<FolderParams>,
+) -> Result<Json<WorkTaskFolderSettings>, AppCommandError> {
+    let result = core::work_task_settings_get_core(&state.db, params.folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_settings_set(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<SettingsSetParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_settings_set_core(
+        &state.emitter,
+        &state.db,
+        params.folder_id,
+        params.settings,
+    )
+    .await
+    .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}

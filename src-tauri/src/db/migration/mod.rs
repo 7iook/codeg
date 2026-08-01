@@ -30,6 +30,7 @@ mod m20260726_000001_custom_agent;
 mod m20260727_000001_custom_agent_skills;
 mod m20260728_000001_custom_agent_skills_dir;
 mod m20260728_000002_custom_agent_source;
+mod m20260801_000001_work_task;
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -66,6 +67,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260727_000001_custom_agent_skills::Migration),
             Box::new(m20260728_000001_custom_agent_skills_dir::Migration),
             Box::new(m20260728_000002_custom_agent_source::Migration),
+            Box::new(m20260801_000001_work_task::Migration),
         ]
     }
 }
