@@ -8,6 +8,7 @@ use crate::app_state::AppState;
 use crate::commands::work_task as core;
 use crate::models::{
     WorkTaskChangedFile, WorkTaskDraft, WorkTaskEventInfo, WorkTaskFolderSettings, WorkTaskInfo,
+    WorkTaskTemplateDraft, WorkTaskTemplateInfo,
 };
 
 fn default_event_limit() -> u64 {
@@ -108,6 +109,12 @@ pub struct DiffParams {
 pub struct SettingsSetParams {
     pub folder_id: i32,
     pub settings: WorkTaskFolderSettings,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateSaveParams {
+    pub draft: WorkTaskTemplateDraft,
 }
 
 pub async fn work_task_list(
@@ -323,5 +330,34 @@ pub async fn work_task_settings_set(
     )
     .await
     .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_template_list(
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<Vec<WorkTaskTemplateInfo>>, AppCommandError> {
+    let result = core::work_task_template_list_core(&state.db)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_template_save(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<TemplateSaveParams>,
+) -> Result<Json<WorkTaskTemplateInfo>, AppCommandError> {
+    let result = core::work_task_template_save_core(&state.db, params.draft)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_template_delete(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<IdParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_template_delete_core(&state.db, params.id)
+        .await
+        .map_err(AppCommandError::from)?;
     Ok(Json(()))
 }

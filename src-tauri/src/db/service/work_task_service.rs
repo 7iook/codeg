@@ -21,7 +21,7 @@ use sea_orm::{
 };
 
 use crate::db::entities::work_task::WorkTaskStatus;
-use crate::db::entities::{folder, work_task, work_task_event, work_task_settings};
+use crate::db::entities::{folder, work_task, work_task_event, work_task_settings, work_task_template};
 use crate::db::error::DbError;
 use crate::models::{
     WorkTaskConfig, WorkTaskDraft, WorkTaskEventInfo, WorkTaskFolderSettings, WorkTaskInfo,
@@ -58,6 +58,7 @@ fn to_info(m: work_task::Model) -> WorkTaskInfo {
         sort_order: m.sort_order,
         worktree_folder_id: m.worktree_folder_id,
         conversation_id: m.conversation_id,
+        connection_id: m.connection_id,
         base_branch: m.base_branch,
         base_sha: m.base_sha,
         work_branch: m.work_branch,
@@ -1485,6 +1486,81 @@ pub async fn settings_set(
     Ok(())
 }
 
+// ── Templates ───────────────────────────────────────────────────────────────
+
+fn to_template_info(m: work_task_template::Model) -> crate::models::WorkTaskTemplateInfo {
+    crate::models::WorkTaskTemplateInfo {
+        id: m.id,
+        name: m.name,
+        title: m.title,
+        config: serde_json::from_str(&m.config).unwrap_or(serde_json::Value::Null),
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+    }
+}
+
+pub async fn template_list(
+    conn: &DatabaseConnection,
+) -> Result<Vec<crate::models::WorkTaskTemplateInfo>, DbError> {
+    let rows = work_task_template::Entity::find()
+        .order_by_asc(work_task_template::Column::Name)
+        .order_by_asc(work_task_template::Column::Id)
+        .all(conn)
+        .await?;
+    Ok(rows.into_iter().map(to_template_info).collect())
+}
+
+/// Upsert by exact name: saving under an existing template's name replaces its
+/// title + config in place instead of accumulating duplicates.
+pub async fn template_save(
+    conn: &DatabaseConnection,
+    draft: &crate::models::WorkTaskTemplateDraft,
+) -> Result<crate::models::WorkTaskTemplateInfo, DbError> {
+    let name = draft.name.trim();
+    if name.is_empty() {
+        return Err(DbError::Validation("template name is required".into()));
+    }
+    if draft.title.trim().is_empty() {
+        return Err(DbError::Validation("template title is required".into()));
+    }
+    if !draft.config.is_object() {
+        return Err(DbError::Validation("template config must be an object".into()));
+    }
+    let config = serde_json::to_string(&draft.config)
+        .map_err(|e| DbError::Validation(format!("template config not serializable: {e}")))?;
+    let now = Utc::now();
+    let existing = work_task_template::Entity::find()
+        .filter(work_task_template::Column::Name.eq(name))
+        .one(conn)
+        .await?;
+    let model = match existing {
+        Some(row) => {
+            let mut active = row.into_active_model();
+            active.title = Set(draft.title.trim().to_string());
+            active.config = Set(config);
+            active.updated_at = Set(now);
+            active.update(conn).await?
+        }
+        None => {
+            let active = work_task_template::ActiveModel {
+                id: NotSet,
+                name: Set(name.to_string()),
+                title: Set(draft.title.trim().to_string()),
+                config: Set(config),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
+            active.insert(conn).await?
+        }
+    };
+    Ok(to_template_info(model))
+}
+
+pub async fn template_delete(conn: &DatabaseConnection, id: i32) -> Result<(), DbError> {
+    work_task_template::Entity::delete_by_id(id).exec(conn).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2066,5 +2142,35 @@ mod tests {
 
         // Explicit unarchive requires an archived row.
         assert!(!set_archived(&db.conn, t.id, false).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn template_save_upserts_by_name() {
+        let db = fresh_in_memory_db().await;
+        let d = |name: &str, title: &str| crate::models::WorkTaskTemplateDraft {
+            name: name.to_string(),
+            title: title.to_string(),
+            config: serde_json::json!({ "display_text": title, "prompt_blocks": [] }),
+        };
+
+        let a = template_save(&db.conn, &d("Release", "cut a release")).await.unwrap();
+        template_save(&db.conn, &d("Audit", "audit deps")).await.unwrap();
+        // Same name replaces in place instead of duplicating.
+        let a2 = template_save(&db.conn, &d("Release", "cut a patch release"))
+            .await
+            .unwrap();
+        assert_eq!(a2.id, a.id);
+
+        let listed = template_list(&db.conn).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["Audit", "Release"],
+            "name-ordered"
+        );
+        assert_eq!(listed[1].title, "cut a patch release");
+
+        assert!(template_save(&db.conn, &d("  ", "x")).await.is_err());
+        template_delete(&db.conn, a.id).await.unwrap();
+        assert_eq!(template_list(&db.conn).await.unwrap().len(), 1);
     }
 }

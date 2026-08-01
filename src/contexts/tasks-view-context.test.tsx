@@ -54,6 +54,7 @@ function sample(id: number, status: WorkTask["status"]): WorkTask {
     sort_order: id,
     worktree_folder_id: null,
     conversation_id: null,
+    connection_id: null,
     base_branch: null,
     base_sha: null,
     work_branch: null,

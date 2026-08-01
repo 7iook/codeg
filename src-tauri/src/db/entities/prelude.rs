@@ -18,3 +18,4 @@ pub use super::quick_message::Entity as QuickMessage;
 pub use super::work_task::Entity as WorkTask;
 pub use super::work_task_event::Entity as WorkTaskEvent;
 pub use super::work_task_settings::Entity as WorkTaskSettings;
+pub use super::work_task_template::Entity as WorkTaskTemplate;

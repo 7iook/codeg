@@ -20,6 +20,7 @@ import {
   Pencil,
   Play,
   RotateCw,
+  ScrollText,
   Trash2,
   Undo2,
 } from "lucide-react"
@@ -41,6 +42,7 @@ import { formatTokenCount } from "@/lib/token-format"
 import { onTransportReconnect, subscribe } from "@/lib/platform"
 import { UnifiedDiffPreview } from "@/components/diff/unified-diff-preview"
 import { StatusChip } from "./task-card"
+import { TaskTranscriptDialog } from "./task-transcript-dialog"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -70,7 +72,12 @@ import {
 } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
-import type { WorkTask, WorkTaskChangedFile, WorkTaskEvent } from "@/lib/types"
+import type {
+  AgentType,
+  WorkTask,
+  WorkTaskChangedFile,
+  WorkTaskEvent,
+} from "@/lib/types"
 
 const WORK_TASK_CHANGED_EVENT = "task://changed"
 
@@ -117,15 +124,21 @@ export function TaskDetailSheet({
   // transcript on open and re-read when the task settles (status flip), not on
   // every progress nudge (the parse is the expensive part).
   const [tokenTotal, setTokenTotal] = useState<number | null>(null)
+  // The conversation's actual agent — feeds the transcript viewer's renderer
+  // (a task without a per-task override has no agent on its own row).
+  const [convAgentType, setConvAgentType] = useState<AgentType | null>(null)
+  const [transcriptOpen, setTranscriptOpen] = useState(false)
   useEffect(() => {
     if (!open || conversationId == null) {
       setTokenTotal(null)
+      setConvAgentType(null)
       return
     }
     let cancelled = false
     getFolderConversation(conversationId)
       .then((detail) => {
         if (cancelled) return
+        setConvAgentType(detail.summary.agent_type ?? null)
         const stats = detail.session_stats
         const usage = stats?.total_usage ?? null
         const total =
@@ -527,6 +540,14 @@ export function TaskDetailSheet({
             ) : null}
             {task.conversation_id != null ? (
               <FooterAction
+                icon={ScrollText}
+                label={t("actionTranscript")}
+                busy={false}
+                onClick={() => setTranscriptOpen(true)}
+              />
+            ) : null}
+            {task.conversation_id != null ? (
+              <FooterAction
                 icon={MessageSquareText}
                 label={t("actionOpenConversation")}
                 busy={false}
@@ -559,6 +580,14 @@ export function TaskDetailSheet({
           </div>
         </SheetContent>
       </Sheet>
+
+      {/* Read-only live transcript of the task's agent session. */}
+      <TaskTranscriptDialog
+        open={transcriptOpen}
+        onOpenChange={setTranscriptOpen}
+        task={task}
+        agentType={convAgentType ?? task?.config?.agent_type ?? null}
+      />
 
       {/* Per-file / full diff viewer. */}
       <Dialog

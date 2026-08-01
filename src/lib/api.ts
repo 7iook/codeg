@@ -20,9 +20,11 @@ import type {
   AutomationDraft,
   WorkTask,
   WorkTaskChangedFile,
+  WorkTaskConfig,
   WorkTaskDraft,
   WorkTaskEvent,
   WorkTaskFolderSettings,
+  WorkTaskTemplate,
   ConversationSummary,
   ConversationDetail,
   DbConversationDetail,
@@ -2723,6 +2725,23 @@ export async function workTaskSettingsSet(
   settings: WorkTaskFolderSettings
 ): Promise<void> {
   return getTransport().call("work_task_settings_set", { folderId, settings })
+}
+
+export async function workTaskTemplateList(): Promise<WorkTaskTemplate[]> {
+  return getTransport().call("work_task_template_list", {})
+}
+
+/** Upsert by exact name: an existing template of the same name is replaced. */
+export async function workTaskTemplateSave(draft: {
+  name: string
+  title: string
+  config: WorkTaskConfig
+}): Promise<WorkTaskTemplate> {
+  return getTransport().call("work_task_template_save", { draft })
+}
+
+export async function workTaskTemplateDelete(id: number): Promise<void> {
+  return getTransport().call("work_task_template_delete", { id })
 }
 
 // Directory browser (for web/server mode)

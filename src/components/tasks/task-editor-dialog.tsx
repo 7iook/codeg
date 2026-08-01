@@ -1,8 +1,14 @@
 "use client"
 
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
-import { ChevronRight, Folder } from "lucide-react"
+import {
+  BookmarkPlus,
+  ChevronRight,
+  Folder,
+  LayoutTemplate,
+  Trash2,
+} from "lucide-react"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { AgentSelector } from "@/components/chat/agent-selector"
 import {
@@ -35,18 +41,31 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
+import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useScrollbarSafeDismiss } from "@/hooks/use-scrollbar-safe-dismiss"
+import {
+  workTaskTemplateDelete,
+  workTaskTemplateList,
+  workTaskTemplateSave,
+} from "@/lib/api"
 import { cn } from "@/lib/utils"
 import type {
   AgentType,
   PromptInputBlock,
   WorkTask,
+  WorkTaskConfig,
   WorkTaskDraft,
+  WorkTaskTemplate,
 } from "@/lib/types"
 
 interface TaskEditorDialogProps {
@@ -141,7 +160,31 @@ function TaskEditorBody({
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
+  // Saved blueprints (global). Applying one reseeds the composer via a key
+  // bump — RichComposer only reads defaultText on mount.
+  const [templates, setTemplates] = useState<WorkTaskTemplate[]>([])
+  const [templatesOpen, setTemplatesOpen] = useState(false)
+  const [templateBusy, setTemplateBusy] = useState(false)
+  const [composerSeed, setComposerSeed] = useState(() => ({
+    key: 0,
+    text: task?.config?.display_text ?? seededText,
+  }))
+  const { contentRef, onPointerDownOutside, onFocusOutside } =
+    useScrollbarSafeDismiss()
+
   const editorRef = useRef<RichComposerHandle>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    workTaskTemplateList()
+      .then((list) => {
+        if (!cancelled) setTemplates(list)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const folderPath = useMemo(
     () => folders.find((f) => f.id === folderId)?.path ?? null,
@@ -177,61 +220,109 @@ function TaskEditorBody({
   // Probe only while the override is on — no transient agent session otherwise.
   const agentOptions = useAgentOptions(agentType, folderPath, overrideAgent)
 
+  // The captured composer + agent-override state as a `WorkTaskConfig` — the
+  // shared payload of both the task draft and a saved template.
+  const buildConfig = async (): Promise<WorkTaskConfig> => {
+    const editor = editorRef.current?.getEditor()
+    const displayText = (editorRef.current?.getText() ?? prompt).trim()
+    const blocks: PromptInputBlock[] = editor
+      ? docToPromptBlocks(editor)
+      : [{ type: "text", text: displayText }]
+    if (!overrideAgent) {
+      return {
+        prompt_blocks: blocks,
+        display_text: displayText,
+        agent_type: null,
+        mode_id: null,
+        config_values: {},
+      }
+    }
+    const snapshot = await agentOptions.ensure()
+    const { mode_id, config_values } = effectiveSelections(
+      snapshot,
+      modeId,
+      configValues
+    )
+    return {
+      prompt_blocks: blocks,
+      display_text: displayText,
+      agent_type: agentType,
+      mode_id,
+      config_values,
+      label_snapshot: {
+        agent_label: getAgentLabel(agentType) ?? agentType,
+        ...snapshotLabels(snapshot, mode_id, config_values),
+      },
+    }
+  }
+
   const submit = async () => {
     setError(null)
-    const editor = editorRef.current?.getEditor()
     const displayText = (editorRef.current?.getText() ?? prompt).trim()
     if (!title.trim()) return setError(t("errorTitle"))
     if (!displayText) return setError(t("errorPrompt"))
     if (folderId == null) return setError(t("errorFolder"))
 
-    const blocks: PromptInputBlock[] = editor
-      ? docToPromptBlocks(editor)
-      : [{ type: "text", text: displayText }]
-
     setSaving(true)
     try {
-      let draft: WorkTaskDraft
-      if (overrideAgent) {
-        const snapshot = await agentOptions.ensure()
-        const { mode_id, config_values } = effectiveSelections(
-          snapshot,
-          modeId,
-          configValues
-        )
-        draft = {
-          folder_id: folderId,
-          title: title.trim(),
-          config: {
-            prompt_blocks: blocks,
-            display_text: displayText,
-            agent_type: agentType,
-            mode_id,
-            config_values,
-            label_snapshot: {
-              agent_label: getAgentLabel(agentType) ?? agentType,
-              ...snapshotLabels(snapshot, mode_id, config_values),
-            },
-          },
-        }
-      } else {
-        draft = {
-          folder_id: folderId,
-          title: title.trim(),
-          config: {
-            prompt_blocks: blocks,
-            display_text: displayText,
-            agent_type: null,
-            mode_id: null,
-            config_values: {},
-          },
-        }
+      const draft: WorkTaskDraft = {
+        folder_id: folderId,
+        title: title.trim(),
+        config: await buildConfig(),
       }
       await onSubmit(draft)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setSaving(false)
+    }
+  }
+
+  const applyTemplate = (tpl: WorkTaskTemplate) => {
+    const cfg = tpl.config
+    const text = cfg?.display_text ?? ""
+    setTitle(tpl.title)
+    setPrompt(text)
+    setComposerSeed((s) => ({ key: s.key + 1, text }))
+    if (cfg?.agent_type != null) {
+      setOverrideAgent(true)
+      setAgentType(cfg.agent_type)
+      setModeId(cfg.mode_id ?? null)
+      setConfigValues(cfg.config_values ?? {})
+    } else {
+      setOverrideAgent(false)
+    }
+    setTemplatesOpen(false)
+  }
+
+  // Saved under the current title (upsert by name) — re-saving the same title
+  // updates that template instead of piling up copies.
+  const saveTemplate = async () => {
+    setError(null)
+    const displayText = (editorRef.current?.getText() ?? prompt).trim()
+    if (!title.trim()) return setError(t("errorTitle"))
+    if (!displayText) return setError(t("errorPrompt"))
+    setTemplateBusy(true)
+    try {
+      await workTaskTemplateSave({
+        name: title.trim(),
+        title: title.trim(),
+        config: await buildConfig(),
+      })
+      setTemplates(await workTaskTemplateList())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setTemplateBusy(false)
+    }
+  }
+
+  const deleteTemplate = async (id: number) => {
+    try {
+      await workTaskTemplateDelete(id)
+      setTemplates((prev) => prev.filter((tpl) => tpl.id !== id))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -254,8 +345,9 @@ function TaskEditorBody({
 
         <div className="rounded-xl border border-input bg-background transition-colors focus-within:border-ring focus-within:ring-[3px] focus-within:ring-inset focus-within:ring-ring/50">
           <RichComposer
+            key={composerSeed.key}
             ref={editorRef}
-            defaultText={task?.config?.display_text ?? seededText}
+            defaultText={composerSeed.text}
             placeholder={t("promptPlaceholder")}
             ariaLabel={t("promptLabel")}
             referenceSearch={referenceSearch}
@@ -350,18 +442,91 @@ function TaskEditorBody({
         ) : null}
       </div>
 
-      <div className="flex shrink-0 justify-end gap-2 border-t border-border px-4 py-3">
-        <Button
-          type="button"
-          variant="ghost"
-          onClick={onCancel}
-          disabled={saving}
-        >
-          {t("cancel")}
-        </Button>
-        <Button type="button" onClick={submit} disabled={saving}>
-          {t("save")}
-        </Button>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-4 py-3">
+        <Popover open={templatesOpen} onOpenChange={setTemplatesOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-xs text-muted-foreground"
+            >
+              <LayoutTemplate className="size-3.5" aria-hidden="true" />
+              {t("templates")}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            ref={contentRef}
+            align="start"
+            side="top"
+            className="w-72 p-2"
+            onPointerDownOutside={onPointerDownOutside}
+            onFocusOutside={onFocusOutside}
+          >
+            <div className="flex max-h-64 flex-col gap-0.5 overflow-y-auto">
+              {templates.length === 0 ? (
+                <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                  {t("templatesEmpty")}
+                </p>
+              ) : (
+                templates.map((tpl) => (
+                  <div key={tpl.id} className="group flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => applyTemplate(tpl)}
+                      className="flex min-w-0 flex-1 flex-col rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent"
+                    >
+                      <span className="truncate text-sm">{tpl.name}</span>
+                      {tpl.config?.display_text ? (
+                        <span className="truncate text-xs text-muted-foreground">
+                          {tpl.config.display_text}
+                        </span>
+                      ) : null}
+                    </button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 shrink-0 text-muted-foreground opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+                      onClick={() => void deleteTemplate(tpl.id)}
+                      aria-label={t("templateDelete")}
+                      title={t("templateDelete")}
+                    >
+                      <Trash2 className="size-3.5" aria-hidden="true" />
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="mt-1 border-t border-border pt-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="w-full justify-start gap-1.5 text-xs"
+                disabled={templateBusy || !title.trim() || !prompt.trim()}
+                onClick={() => void saveTemplate()}
+              >
+                <BookmarkPlus className="size-3.5" aria-hidden="true" />
+                {t("templateSaveCurrent")}
+              </Button>
+            </div>
+          </PopoverContent>
+        </Popover>
+
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onCancel}
+            disabled={saving}
+          >
+            {t("cancel")}
+          </Button>
+          <Button type="button" onClick={submit} disabled={saving}>
+            {t("save")}
+          </Button>
+        </div>
       </div>
     </>
   )

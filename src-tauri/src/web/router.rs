@@ -1264,6 +1264,18 @@ pub fn build_router(
             "/work_task_settings_set",
             post(handlers::work_task::work_task_settings_set),
         )
+        .route(
+            "/work_task_template_list",
+            post(handlers::work_task::work_task_template_list),
+        )
+        .route(
+            "/work_task_template_save",
+            post(handlers::work_task::work_task_template_save),
+        )
+        .route(
+            "/work_task_template_delete",
+            post(handlers::work_task::work_task_template_delete),
+        )
         // ─── Workspace background ───
         .route(
             "/background_read",

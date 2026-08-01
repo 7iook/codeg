@@ -19,6 +19,7 @@ function task(
     sort_order: id,
     worktree_folder_id: null,
     conversation_id: null,
+    connection_id: null,
     base_branch: null,
     base_sha: null,
     work_branch: null,

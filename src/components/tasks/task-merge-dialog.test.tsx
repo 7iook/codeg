@@ -28,6 +28,7 @@ function task(): WorkTask {
     sort_order: 1,
     worktree_folder_id: 9,
     conversation_id: 3,
+    connection_id: null,
     base_branch: "main",
     base_sha: "abc",
     work_branch: "task/7-fix-login",

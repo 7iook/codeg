@@ -1164,10 +1164,15 @@ export interface AutomationLabelSnapshot {
   branch_label?: string
 }
 
+/** What firing the automation does. Optional in stored configs — absent means
+ *  the legacy `launch_session`. */
+export type AutomationAction = "launch_session" | "enqueue_task"
+
 /** The captured composer snapshot stored in `automation.config`. `mode_id` +
  *  `config_values` are exactly AgentDelegationDefaults; the model rides inside
  *  `config_values["model"]`, never as its own field. */
 export interface AutomationConfig {
+  action?: AutomationAction
   prompt_blocks: PromptInputBlock[]
   display_text: string
   mode_id?: string | null
@@ -1271,6 +1276,9 @@ export interface WorkTask {
   sort_order: number
   worktree_folder_id: number | null
   conversation_id: number | null
+  /** Live ACP connection of the current generation; stale after a settle —
+   *  gate on status before attaching. */
+  connection_id: string | null
   base_branch: string | null
   base_sha: string | null
   work_branch: string | null
@@ -1322,6 +1330,18 @@ export interface WorkTaskDraft {
   folder_id: number
   title: string
   config: WorkTaskConfig
+}
+
+/** A saved task blueprint (global; the folder is picked at creation time).
+ *  Saving under an existing name replaces that template. */
+export interface WorkTaskTemplate {
+  id: number
+  name: string
+  title: string
+  // Serialized from an opaque JSON column; guard against a null parse fallback.
+  config: WorkTaskConfig | null
+  created_at: string
+  updated_at: string
 }
 
 /** Per-folder task defaults (work_task_settings.config). */

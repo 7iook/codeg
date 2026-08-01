@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::db::entities::work_task::WorkTaskStatus;
 
 /// One folder-bound work task. Wire form mirrors `src/lib/types.ts`
-/// (`WorkTask`). `connection_id` is intentionally omitted (internal
-/// correlation only).
+/// (`WorkTask`).
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkTaskInfo {
     pub id: i32,
@@ -21,6 +20,10 @@ pub struct WorkTaskInfo {
     pub sort_order: i32,
     pub worktree_folder_id: Option<i32>,
     pub conversation_id: Option<i32>,
+    /// Live ACP connection of the current generation — the transcript viewer
+    /// attaches by it. Only meaningful while the task is running/awaiting;
+    /// stale after a settle (gate on status client-side).
+    pub connection_id: Option<String>,
     pub base_branch: Option<String>,
     pub base_sha: Option<String>,
     pub work_branch: Option<String>,
@@ -65,6 +68,27 @@ pub struct WorkTaskEventInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkTaskDraft {
     pub folder_id: i32,
+    pub title: String,
+    pub config: serde_json::Value,
+}
+
+/// Wire DTO for a saved task template: a display name plus the title seed and
+/// the same opaque `WorkTaskConfig` snapshot a task row stores.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkTaskTemplateInfo {
+    pub id: i32,
+    pub name: String,
+    pub title: String,
+    pub config: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Save payload for a template. Saving under an existing name updates that
+/// template in place (upsert by exact name).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkTaskTemplateDraft {
+    pub name: String,
     pub title: String,
     pub config: serde_json::Value,
 }

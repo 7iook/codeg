@@ -28,6 +28,7 @@ import {
   RotateCw,
   SlidersHorizontal,
   SquareArrowOutUpRight,
+  SquareKanban,
   Trash2,
   X,
   Zap,
@@ -942,19 +943,27 @@ function AutomationDetail({
                 {labels?.folder_label ?? folderName}
               </span>
             </StatCard>
-            <StatCard icon={<GitBranch />} label={t("isolation")}>
-              <span className="block">
-                {automation.isolation === "worktree_per_run"
-                  ? t("isolationWorktree")
-                  : t("isolationShared")}
-                {automation.isolation === "shared_in_root" &&
-                automation.branch ? (
-                  <span className="ml-1 font-mono text-xs text-muted-foreground">
-                    {automation.branch}
-                  </span>
-                ) : null}
-              </span>
-            </StatCard>
+            {config?.action === "enqueue_task" ? (
+              // Isolation/branch never apply to enqueued tasks (the work-task
+              // engine mints the worktree); show what firing does instead.
+              <StatCard icon={<SquareKanban />} label={t("sectionAction")}>
+                {t("actionEnqueueTask")}
+              </StatCard>
+            ) : (
+              <StatCard icon={<GitBranch />} label={t("isolation")}>
+                <span className="block">
+                  {automation.isolation === "worktree_per_run"
+                    ? t("isolationWorktree")
+                    : t("isolationShared")}
+                  {automation.isolation === "shared_in_root" &&
+                  automation.branch ? (
+                    <span className="ml-1 font-mono text-xs text-muted-foreground">
+                      {automation.branch}
+                    </span>
+                  ) : null}
+                </span>
+              </StatCard>
+            )}
             {isSchedule ? (
               <StatCard icon={<Clock />} label={t("nextRun")}>
                 {automation.next_run_at

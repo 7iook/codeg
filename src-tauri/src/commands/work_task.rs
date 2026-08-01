@@ -13,6 +13,7 @@ use crate::db::service::work_task_service;
 use crate::db::AppDatabase;
 use crate::models::{
     WorkTaskChangedFile, WorkTaskDraft, WorkTaskEventInfo, WorkTaskFolderSettings, WorkTaskInfo,
+    WorkTaskTemplateDraft, WorkTaskTemplateInfo,
 };
 use crate::web::event_bridge::{
     emit_event, EventEmitter, WorkTaskChange, WORK_TASK_CHANGED_EVENT,
@@ -314,6 +315,23 @@ pub async fn work_task_settings_set_core(
     Ok(())
 }
 
+pub async fn work_task_template_list_core(
+    db: &AppDatabase,
+) -> Result<Vec<WorkTaskTemplateInfo>, DbError> {
+    work_task_service::template_list(&db.conn).await
+}
+
+pub async fn work_task_template_save_core(
+    db: &AppDatabase,
+    draft: WorkTaskTemplateDraft,
+) -> Result<WorkTaskTemplateInfo, DbError> {
+    work_task_service::template_save(&db.conn, &draft).await
+}
+
+pub async fn work_task_template_delete_core(db: &AppDatabase, id: i32) -> Result<(), DbError> {
+    work_task_service::template_delete(&db.conn, id).await
+}
+
 // ── Tauri command wrappers (desktop only) ───────────────────────────────────
 
 #[cfg(feature = "tauri-runtime")]
@@ -508,4 +526,30 @@ pub async fn work_task_settings_set(
     settings: WorkTaskFolderSettings,
 ) -> Result<(), DbError> {
     work_task_settings_set_core(&EventEmitter::Tauri(app), &db, folder_id, settings).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_template_list(
+    db: tauri::State<'_, AppDatabase>,
+) -> Result<Vec<WorkTaskTemplateInfo>, DbError> {
+    work_task_template_list_core(&db).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_template_save(
+    db: tauri::State<'_, AppDatabase>,
+    draft: WorkTaskTemplateDraft,
+) -> Result<WorkTaskTemplateInfo, DbError> {
+    work_task_template_save_core(&db, draft).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_template_delete(
+    db: tauri::State<'_, AppDatabase>,
+    id: i32,
+) -> Result<(), DbError> {
+    work_task_template_delete_core(&db, id).await
 }
