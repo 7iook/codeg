@@ -25,6 +25,7 @@ pub mod registry;
 pub mod remote_registry;
 pub mod session_info;
 pub mod session_state;
+pub mod stderr_tail;
 pub mod terminal_runtime;
 pub mod types;
 pub mod work_task_tools;

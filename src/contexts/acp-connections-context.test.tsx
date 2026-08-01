@@ -42,6 +42,10 @@ const h = vi.hoisted(() => {
     acpGetSessionSnapshot: vi.fn(),
     buildDelegationSeedEnvelopes: vi.fn(() => []),
     denormalizeSnapshot: vi.fn(),
+    // Stable across renders so tests can assert on what the error handler
+    // routes to the status-bar alert vs. to the OS notification.
+    pushAlert: vi.fn(),
+    sendSystemNotification: vi.fn(async () => undefined),
   }
 })
 
@@ -59,7 +63,7 @@ vi.mock("@/lib/delegation-seed", () => ({
 }))
 
 vi.mock("@/contexts/alert-context", () => ({
-  useAlertContext: () => ({ pushAlert: vi.fn() }),
+  useAlertContext: () => ({ pushAlert: h.pushAlert }),
 }))
 
 vi.mock("@/contexts/active-folder-context", () => ({
@@ -67,7 +71,7 @@ vi.mock("@/contexts/active-folder-context", () => ({
 }))
 
 vi.mock("@/lib/notification", () => ({
-  sendSystemNotification: vi.fn(async () => undefined),
+  sendSystemNotification: h.sendSystemNotification,
 }))
 
 vi.mock("@/lib/selector-prefs-storage", () => ({
@@ -1201,6 +1205,92 @@ describe("AcpConnectionsProvider Grok cross-agent-type model switch", () => {
   })
 })
 
+describe("empty-turn error diagnostics", () => {
+  async function connectOwner(): Promise<AttachHandlers> {
+    await mountProvider()
+    await act(async () => {
+      await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+    })
+    return latestAttachHandlers()
+  }
+
+  it("localizes each empty-turn code", async () => {
+    const handlers = await connectOwner()
+
+    const cases = [
+      ["turn_failed_empty", "backendErrors.turnFailedEmpty"],
+      ["turn_failed_empty_protocol", "backendErrors.turnFailedEmptyProtocol"],
+      ["turn_failed_empty_metadata", "backendErrors.turnFailedEmptyMetadata"],
+    ] as const
+
+    // Sequence numbers must advance — the store's seq guard drops replays.
+    cases.forEach(([code, key], i) => {
+      emitAcpEvent(handlers, {
+        seq: i + 1,
+        connection_id: "spawned-conn",
+        type: "error",
+        message: "raw english fallback",
+        agent_type: "claude_code",
+        code,
+      })
+      expect(h.store!.getConnection(TAB)!.error).toBe(key)
+    })
+  })
+
+  it("appends details to the alert but keeps them out of conn.error and the OS notification", async () => {
+    const handlers = await connectOwner()
+    h.pushAlert.mockClear()
+    h.sendSystemNotification.mockClear()
+
+    const details =
+      "dropped 1 update(s) (0 decode, 1 dispatch)\nstderr (this turn, last 1 lines):\n  Error: 401 Unauthorized"
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "error",
+      message: "raw english fallback",
+      agent_type: "claude_code",
+      code: "turn_failed_empty_protocol",
+      details,
+    })
+
+    // The alert's detail slot carries the localized line AND the evidence.
+    const alertCalls = h.pushAlert.mock.calls
+    const [, , alertDetail] = alertCalls[alertCalls.length - 1]!
+    expect(alertDetail).toContain("backendErrors.turnFailedEmptyProtocol")
+    expect(alertDetail).toContain("Error: 401 Unauthorized")
+
+    // `conn.error` feeds the composer tooltip — one line only.
+    expect(h.store!.getConnection(TAB)!.error).toBe(
+      "backendErrors.turnFailedEmptyProtocol"
+    )
+
+    // Notification centers persist their payload outside the app.
+    const notifyCalls = h.sendSystemNotification.mock.calls
+    const notificationArgs = notifyCalls[notifyCalls.length - 1]!
+    expect(JSON.stringify(notificationArgs)).not.toContain("401 Unauthorized")
+  })
+
+  it("omits blank details rather than rendering an empty block", async () => {
+    const handlers = await connectOwner()
+    h.pushAlert.mockClear()
+
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "error",
+      message: "raw english fallback",
+      agent_type: "claude_code",
+      code: "turn_failed_empty",
+      details: "   \n  ",
+    })
+
+    const alertCalls = h.pushAlert.mock.calls
+    const [, , alertDetail] = alertCalls[alertCalls.length - 1]!
+    expect(alertDetail).toBe("backendErrors.turnFailedEmpty")
+  })
+})
+
 describe("HYDRATE_FROM_SNAPSHOT last_error recovery", () => {
   // Full SnapshotPatch fixture; per-test overrides set connectionId / eventSeq /
   // lastError. `denormalizeSnapshot` is mocked, so onSnapshot dispatches exactly
@@ -1208,6 +1298,7 @@ describe("HYDRATE_FROM_SNAPSHOT last_error recovery", () => {
   function snapshotPatch(overrides: {
     eventSeq: number
     lastError: string | null
+    lastErrorDetails?: string | null
     connectionId?: string
   }) {
     return {
@@ -1229,6 +1320,7 @@ describe("HYDRATE_FROM_SNAPSHOT last_error recovery", () => {
       configStaleKind: null,
       backgroundOutstanding: 0,
       activeDelegations: [],
+      lastErrorDetails: null,
       ...overrides,
     }
   }
@@ -1293,6 +1385,75 @@ describe("HYDRATE_FROM_SNAPSHOT last_error recovery", () => {
       event_seq: 1,
     } as unknown as LiveSessionSnapshot)
     expect(h.store!.getConnection(TAB)!.error).toBeNull()
+  })
+
+  // Alerts are live-only, so a client that attached after the empty turn has
+  // the snapshot as its ONLY channel for the diagnosis.
+  it("raises an alert for snapshot-carried details without touching conn.error or notifications", async () => {
+    const handlers = await connectOwner()
+    h.pushAlert.mockClear()
+    h.sendSystemNotification.mockClear()
+
+    const details =
+      "stderr (this turn, last 1 lines):\n  Error: 401 Unauthorized"
+    h.denormalizeSnapshot.mockReturnValue(
+      snapshotPatch({
+        eventSeq: 5,
+        lastError: "agent ended the turn without producing any response.",
+        lastErrorDetails: details,
+      })
+    )
+    hydrateSnapshot(handlers, {
+      event_seq: 5,
+    } as unknown as LiveSessionSnapshot)
+
+    const alertCalls = h.pushAlert.mock.calls
+    const [, , alertDetail] = alertCalls[alertCalls.length - 1]!
+    expect(alertDetail).toContain("Error: 401 Unauthorized")
+    // The tooltip string stays the single-line message.
+    expect(h.store!.getConnection(TAB)!.error).toBe(
+      "agent ended the turn without producing any response."
+    )
+    expect(h.sendSystemNotification).not.toHaveBeenCalled()
+  })
+
+  it("does not re-alert the same details on every re-attach", async () => {
+    const handlers = await connectOwner()
+    h.pushAlert.mockClear()
+
+    const patch = snapshotPatch({
+      eventSeq: 5,
+      lastError: "boom",
+      lastErrorDetails: "stderr (this turn, last 1 lines):\n  same evidence",
+    })
+    h.denormalizeSnapshot.mockReturnValue(patch)
+    hydrateSnapshot(handlers, {
+      event_seq: 5,
+    } as unknown as LiveSessionSnapshot)
+    const afterFirst = h.pushAlert.mock.calls.length
+    expect(afterFirst).toBe(1)
+
+    // A reconnect replays the same snapshot.
+    hydrateSnapshot(handlers, {
+      event_seq: 6,
+    } as unknown as LiveSessionSnapshot)
+    expect(h.pushAlert.mock.calls.length).toBe(afterFirst)
+  })
+
+  it("stays silent for snapshot errors that carry no details", async () => {
+    const handlers = await connectOwner()
+    h.pushAlert.mockClear()
+
+    h.denormalizeSnapshot.mockReturnValue(
+      snapshotPatch({ eventSeq: 5, lastError: "some older error" })
+    )
+    hydrateSnapshot(handlers, {
+      event_seq: 5,
+    } as unknown as LiveSessionSnapshot)
+
+    // Attaching to a connection with an ordinary past error must not start
+    // raising alerts it never used to.
+    expect(h.pushAlert).not.toHaveBeenCalled()
   })
 })
 

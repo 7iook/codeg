@@ -2335,7 +2335,9 @@
           "turnFailedMaxTurnRequests": "بلغ {agent} الحد الأقصى لعدد الطلبات المسموح بها في هذه الجولة.",
           "turnFailedUnknown": "أنهى {agent} الجولة بسبب توقف غير معروف.",
           "grokModelSwitchIncompatibleAgent": "لا يمكن لـ {agent} التبديل إلى هذا النموذج في محادثة قائمة. ابدأ جلسة جديدة لاستخدامه.",
-          "turnFailedEmpty": "أنهى {agent} الجولة دون إنتاج أي رد. يرجى التحقق من إعدادات الوكيل."
+          "turnFailedEmpty": "أنهى {agent} الجولة دون إنتاج أي رد. وسّع التفاصيل لعرض مخرجات الوكيل.",
+          "turnFailedEmptyProtocol": "أنتج {agent} مخرجات تعذّر على codeg تحليلها — قد لا يتوافق إصدار الوكيل مع البروتوكول. وسّع التفاصيل لمعرفة المزيد.",
+          "turnFailedEmptyMetadata": "أرسل {agent} تحديثات حالة فقط في هذه الجولة (الخطة / الوضع / الاستخدام) دون أي رد. وسّع التفاصيل لمعرفة المزيد."
         },
         "unableReadAgentConfig": "تعذر قراءة إعدادات الوكيل: {message}",
         "connectFailedTitle": "فشل اتصال {agent}",

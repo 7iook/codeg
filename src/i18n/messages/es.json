@@ -2335,7 +2335,9 @@
           "turnFailedMaxTurnRequests": "{agent} alcanzó el número máximo de solicitudes permitidas para este turno.",
           "turnFailedUnknown": "{agent} finalizó el turno con un motivo de parada no reconocido.",
           "grokModelSwitchIncompatibleAgent": "{agent} no puede cambiar a ese modelo en una conversación existente. Inicia una nueva sesión para usarlo.",
-          "turnFailedEmpty": "{agent} finalizó el turno sin producir ninguna respuesta. Revisa la configuración del agente."
+          "turnFailedEmpty": "{agent} finalizó el turno sin producir ninguna respuesta. Despliega los detalles para ver la salida del agente.",
+          "turnFailedEmptyProtocol": "{agent} produjo una salida que codeg no pudo analizar; la versión del agente podría no coincidir con el protocolo. Despliega los detalles para ver más.",
+          "turnFailedEmptyMetadata": "{agent} solo envió actualizaciones de estado en este turno (plan / modo / uso) y ninguna respuesta. Despliega los detalles para ver más."
         },
         "unableReadAgentConfig": "No se puede leer la configuración del agente: {message}",
         "connectFailedTitle": "Falló la conexión de {agent}",

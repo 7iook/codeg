@@ -197,6 +197,22 @@ pub enum AcpEvent {
         /// When present, the frontend renders a localized message keyed on
         /// this code; otherwise it falls back to `message`.
         code: Option<String>,
+        /// Out-of-band diagnostic evidence for errors codeg *inferred* rather
+        /// than received — currently the `turn_failed_empty*` family, where the
+        /// agent reported success and the wire carried no error at all. Holds
+        /// the turn's agent stderr tail and a summary of updates codeg failed
+        /// to parse.
+        ///
+        /// **Already redacted and length-bounded at the source**
+        /// ([`crate::acp::stderr_tail`]): it is rendered in the UI and, in
+        /// server mode, pushed over the WebSocket, so it must never carry a
+        /// credential or a `session/update` payload fragment. Deliberately kept
+        /// out of the OS notification and out of the frontend's `conn.error`
+        /// tooltip — see the frontend `case "error"` handler.
+        ///
+        /// Omitted from the wire when absent, so old clients are unaffected.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        details: Option<String>,
         /// Whether this Error signals connection-level death — i.e. the
         /// `run_connection` task is about to emit `Disconnected` and tear
         /// the session down. Non-terminal Errors (turn failure, `SetMode`

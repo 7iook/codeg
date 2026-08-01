@@ -2335,7 +2335,9 @@
           "turnFailedMaxTurnRequests": "{agent} 已达到本轮回复允许的最大请求次数。",
           "turnFailedUnknown": "{agent} 以未知的停止原因结束了本轮回复。",
           "grokModelSwitchIncompatibleAgent": "{agent} 无法在已有对话中切换到该模型，请新建会话以使用它。",
-          "turnFailedEmpty": "{agent} 本轮没有产生任何回复就结束了，请检查代理配置。"
+          "turnFailedEmpty": "{agent} 本轮没有产生任何回复就结束了。展开详情查看代理输出。",
+          "turnFailedEmptyProtocol": "{agent} 本轮的输出 codeg 无法解析，可能是代理版本与协议不匹配。展开详情查看。",
+          "turnFailedEmptyMetadata": "{agent} 本轮只收到状态更新（计划 / 模式 / 用量），没有收到任何回复。展开详情查看。"
         },
         "unableReadAgentConfig": "无法读取 Agent 配置：{message}",
         "connectFailedTitle": "{agent} 连接失败",

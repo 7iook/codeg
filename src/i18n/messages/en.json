@@ -2335,7 +2335,9 @@
           "turnFailedMaxTurnRequests": "{agent} reached the maximum number of allowed requests for this turn.",
           "turnFailedUnknown": "{agent} ended the turn with an unrecognized stop reason.",
           "grokModelSwitchIncompatibleAgent": "{agent} can't switch to that model in an existing conversation. Start a new session to use it.",
-          "turnFailedEmpty": "{agent} ended the turn without producing any response. Please check the agent's configuration."
+          "turnFailedEmpty": "{agent} ended the turn without producing any response. Expand the details to see the agent's output.",
+          "turnFailedEmptyProtocol": "{agent} produced output that codeg could not parse — the agent version may not match the protocol. Expand the details to see more.",
+          "turnFailedEmptyMetadata": "{agent} sent only status updates this turn (plan / mode / usage) and no reply. Expand the details to see more."
         },
         "unableReadAgentConfig": "Unable to read Agent config: {message}",
         "connectFailedTitle": "{agent} connection failed",

@@ -1550,6 +1550,17 @@ export type AcpEvent =
       agent_type: string
       /** Stable backend error identifier for localization (e.g. "initialize_timeout"). */
       code: string | null
+      /**
+       * Diagnostic evidence for errors the backend *inferred* rather than
+       * received — the `turn_failed_empty*` family, where the agent reported
+       * success and the wire carried no error. Agent stderr tail plus a
+       * summary of updates the backend could not parse.
+       *
+       * Already redacted and length-bounded by the backend. Render it in the
+       * alert detail only: it must not reach the OS notification or the
+       * connection-status tooltip.
+       */
+      details?: string | null
     }
   | {
       // codex-acp #289: a retryable turn error that keeps the turn alive (codex
@@ -1867,6 +1878,8 @@ export interface FeedbackItem {
 export interface SessionLastError {
   message: string
   code?: string | null
+  /** Mirrors `AcpEvent` error `details`; already redacted by the backend. */
+  details?: string | null
 }
 
 export interface LiveSessionSnapshot {
