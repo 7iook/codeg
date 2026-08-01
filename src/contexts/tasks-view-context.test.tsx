@@ -3,11 +3,26 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkTask } from "@/lib/types"
 
 const listMock = vi.fn()
+const notifyMock = vi.fn()
 let changedHandler: (() => void) | null = null
 let reconnectHandler: (() => void) | null = null
 
 vi.mock("@/lib/api", () => ({
   workTaskList: (...args: unknown[]) => listMock(...args),
+}))
+vi.mock("@/lib/notification", () => ({
+  sendSystemNotification: (...args: unknown[]) => notifyMock(...args),
+}))
+// Stable t — a fresh function per render loops the notification effect.
+const stableT = (key: string, values?: Record<string, unknown>) =>
+  values ? `${key}:${JSON.stringify(values)}` : key
+vi.mock("next-intl", () => ({
+  useTranslations: () => stableT,
+}))
+vi.mock("@/stores/app-workspace-store", () => ({
+  useAppWorkspaceStore: {
+    getState: () => ({ folders: [{ id: 1, name: "proj", alias: null }] }),
+  },
 }))
 vi.mock("@/lib/platform", () => ({
   subscribe: vi.fn((channel: string, cb: () => void) => {
@@ -69,6 +84,7 @@ function Probe() {
 
 beforeEach(() => {
   listMock.mockReset()
+  notifyMock.mockReset()
   changedHandler = null
   reconnectHandler = null
 })
@@ -120,5 +136,29 @@ describe("TasksViewProvider", () => {
     })
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2))
     expect(screen.getByTestId("count").textContent).toBe("1")
+  })
+
+  it("notifies on review/failed flips but never for the initial load", async () => {
+    listMock.mockResolvedValueOnce([sample(1, "review"), sample(2, "running")])
+    render(
+      <TasksViewProvider>
+        <Probe />
+      </TasksViewProvider>
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId("count").textContent).toBe("2")
+    )
+    // Pre-existing review task = history, not news.
+    expect(notifyMock).not.toHaveBeenCalled()
+
+    listMock.mockResolvedValueOnce([sample(1, "review"), sample(2, "failed")])
+    await act(async () => {
+      changedHandler?.()
+    })
+    await waitFor(() => expect(notifyMock).toHaveBeenCalledTimes(1))
+    expect(notifyMock).toHaveBeenCalledWith(
+      "proj - Codeg",
+      expect.stringContaining("notifyFailed")
+    )
   })
 })

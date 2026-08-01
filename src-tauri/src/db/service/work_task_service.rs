@@ -65,6 +65,7 @@ fn to_info(m: work_task::Model) -> WorkTaskInfo {
         additions: m.additions,
         deletions: m.deletions,
         merge_commit: m.merge_commit,
+        latest_progress: None,
         created_at: m.created_at,
         updated_at: m.updated_at,
         started_at: m.started_at,
@@ -148,7 +149,45 @@ pub async fn list(
         .order_by_asc(work_task::Column::Id)
         .all(conn)
         .await?;
-    Ok(rows.into_iter().map(to_info).collect())
+    let mut infos: Vec<WorkTaskInfo> = rows.into_iter().map(to_info).collect();
+
+    // Realtime progress line for live cards: the latest `agent_progress`
+    // milestone of each running/awaiting task, fetched in one sweep.
+    let live_ids: Vec<i32> = infos
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.status,
+                WorkTaskStatus::Running | WorkTaskStatus::AwaitingInput
+            )
+        })
+        .map(|t| t.id)
+        .collect();
+    if !live_ids.is_empty() {
+        let events = work_task_event::Entity::find()
+            .filter(work_task_event::Column::TaskId.is_in(live_ids))
+            .filter(work_task_event::Column::Kind.eq("agent_progress"))
+            .order_by_asc(work_task_event::Column::Id)
+            .all(conn)
+            .await?;
+        let mut latest: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
+        for e in events {
+            let message = e
+                .payload
+                .as_deref()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from));
+            if let Some(message) = message {
+                latest.insert(e.task_id, message); // ascending id — last wins
+            }
+        }
+        for t in &mut infos {
+            if let Some(m) = latest.get(&t.id) {
+                t.latest_progress = Some(m.clone());
+            }
+        }
+    }
+    Ok(infos)
 }
 
 pub async fn get(conn: &DatabaseConnection, id: i32) -> Result<WorkTaskInfo, DbError> {
@@ -235,12 +274,16 @@ pub async fn next_queued(
         .await?)
 }
 
-/// Distinct folder ids that currently have queued tasks (live folders only) —
-/// drives the reconcile tick's launch pump.
-pub async fn folders_with_queued(conn: &DatabaseConnection) -> Result<Vec<i32>, DbError> {
+/// Distinct folder ids that currently have pending (todo or queued) tasks over
+/// live folders — drives the reconcile tick's pump sweep. Todo is included so
+/// auto_process folders get their scheduler pass even when nothing is queued;
+/// the pump itself checks the folder's auto flag.
+pub async fn folders_with_pending(conn: &DatabaseConnection) -> Result<Vec<i32>, DbError> {
     let rows = work_task::Entity::find()
         .filter(work_task::Column::DeletedAt.is_null())
-        .filter(work_task::Column::Status.eq(WorkTaskStatus::Queued))
+        .filter(
+            work_task::Column::Status.is_in([WorkTaskStatus::Todo, WorkTaskStatus::Queued]),
+        )
         .inner_join(folder::Entity)
         .filter(folder::Column::DeletedAt.is_null())
         .all(conn)
@@ -460,6 +503,9 @@ pub async fn claim_for_run(
         )
         .col_expr(work_task::Column::FailureReason, Expr::value(None::<String>))
         .col_expr(work_task::Column::LastError, Expr::value(None::<String>))
+        // A fresh generation invalidates the previous run's self-reported
+        // verdict (result_summary stays visible until the next settle).
+        .col_expr(work_task::Column::Verdict, Expr::value(None::<String>))
         .col_expr(work_task::Column::FinishedAt, Expr::value(None::<chrono::DateTime<Utc>>))
         .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
         .filter(work_task::Column::Id.eq(id))
@@ -479,6 +525,122 @@ pub async fn claim_for_run(
     status_changed_event(&txn, id, actor, Some(from), WorkTaskStatus::Queued, None).await?;
     txn.commit().await?;
     Ok(Some(run_seq))
+}
+
+/// Persist the board's new pending-column order: each id gets its index as its
+/// `sort_order`. Scoped to the folder (an id from another folder simply
+/// doesn't match the WHERE) — sort_order is a pure ordering field, so a task
+/// that advanced mid-drag is harmless to renumber.
+pub async fn reorder(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+    ordered_ids: &[i32],
+) -> Result<(), DbError> {
+    let now = Utc::now();
+    let txn = conn.begin().await?;
+    for (index, id) in ordered_ids.iter().enumerate() {
+        work_task::Entity::update_many()
+            .col_expr(work_task::Column::SortOrder, Expr::value(index as i32))
+            .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
+            .filter(work_task::Column::Id.eq(*id))
+            .filter(work_task::Column::FolderId.eq(folder_id))
+            .filter(work_task::Column::DeletedAt.is_null())
+            .exec(&txn)
+            .await?;
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+/// Scheduler arm of an auto_process folder: claim the head todo task (board
+/// order) into the queue — todo → queued, `run_seq + 1` — but only while the
+/// folder's concurrency budget has room. Unlike the launch pump's count, the
+/// budget here INCLUDES queued tasks (manual or auto), so the auto arm never
+/// piles up a queue beyond `max_concurrent`; the rest stay visible in todo.
+///
+/// The CAS UPDATE is the transaction's first statement (write lock up front);
+/// the budget is then re-checked INSIDE the same transaction and the claim is
+/// rolled back when over — that in-transaction recheck is what makes the
+/// reservation safe against concurrent manual starts. `max_concurrent <= 0`
+/// means unlimited. Returns the claimed task id, or `None` when the folder has
+/// no todo task or the budget is spent.
+pub async fn auto_claim_next(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+    max_concurrent: i32,
+) -> Result<Option<i32>, DbError> {
+    loop {
+        // Head lookup runs outside the transaction so the write stays first;
+        // the CAS below re-checks the status and simply retries on a miss.
+        let head = work_task::Entity::find()
+            .filter(work_task::Column::DeletedAt.is_null())
+            .filter(work_task::Column::FolderId.eq(folder_id))
+            .filter(work_task::Column::Status.eq(WorkTaskStatus::Todo))
+            .inner_join(folder::Entity)
+            .filter(folder::Column::DeletedAt.is_null())
+            .order_by_asc(work_task::Column::SortOrder)
+            .order_by_asc(work_task::Column::Id)
+            .one(conn)
+            .await?;
+        let Some(head) = head else {
+            return Ok(None);
+        };
+
+        let now = Utc::now();
+        let txn = conn.begin().await?;
+        let res = work_task::Entity::update_many()
+            .col_expr(
+                work_task::Column::Status,
+                Expr::value(status_str(WorkTaskStatus::Queued)),
+            )
+            .col_expr(
+                work_task::Column::RunSeq,
+                Expr::col(work_task::Column::RunSeq).add(1),
+            )
+            .col_expr(work_task::Column::FailureReason, Expr::value(None::<String>))
+            .col_expr(work_task::Column::LastError, Expr::value(None::<String>))
+            .col_expr(work_task::Column::FinishedAt, Expr::value(None::<chrono::DateTime<Utc>>))
+            .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
+            .filter(work_task::Column::Id.eq(head.id))
+            .filter(work_task::Column::Status.eq(WorkTaskStatus::Todo))
+            .filter(work_task::Column::DeletedAt.is_null())
+            .exec(&txn)
+            .await?;
+        if res.rows_affected != 1 {
+            // Someone moved the head (manual start, edit, delete) — retry with
+            // the fresh head.
+            txn.rollback().await?;
+            continue;
+        }
+        if max_concurrent > 0 {
+            let active = work_task::Entity::find()
+                .filter(work_task::Column::DeletedAt.is_null())
+                .filter(work_task::Column::FolderId.eq(folder_id))
+                .filter(work_task::Column::Status.is_in([
+                    WorkTaskStatus::Queued,
+                    WorkTaskStatus::Running,
+                    WorkTaskStatus::AwaitingInput,
+                    WorkTaskStatus::Merging,
+                ]))
+                .count(&txn)
+                .await?;
+            if active > max_concurrent as u64 {
+                txn.rollback().await?;
+                return Ok(None);
+            }
+        }
+        status_changed_event(
+            &txn,
+            head.id,
+            "engine",
+            Some(WorkTaskStatus::Todo),
+            WorkTaskStatus::Queued,
+            Some(serde_json::json!({ "auto": true })),
+        )
+        .await?;
+        txn.commit().await?;
+        return Ok(Some(head.id));
+    }
 }
 
 /// canceled → todo ("requeue"): back to the board, worktree (if any) reused at
@@ -651,6 +813,56 @@ pub async fn fail(
 /// running/awaiting_input → review for the given generation. Captures the
 /// agent's summary and the diff-stat snapshot; also writes a `diff_stat` event
 /// when stats are present.
+/// Record the agent's self-reported verdict (`task_complete` MCP tool) on the
+/// current generation while it is still executing. `result_summary` is written
+/// unconditionally (NULL when the report carried none), so a present verdict
+/// always means the summary column reflects THIS generation's report — the
+/// settle path relies on that to prefer it over the captured assistant text.
+/// Same-transaction `agent_verdict` event.
+pub async fn set_verdict(
+    conn: &DatabaseConnection,
+    id: i32,
+    run_seq: i32,
+    verdict: &str,
+    summary: Option<&str>,
+) -> Result<bool, DbError> {
+    let now = Utc::now();
+    let txn = conn.begin().await?;
+    let res = work_task::Entity::update_many()
+        .col_expr(
+            work_task::Column::Verdict,
+            Expr::value(Some(verdict.to_string())),
+        )
+        .col_expr(
+            work_task::Column::ResultSummary,
+            Expr::value(summary.map(str::to_string)),
+        )
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
+        .filter(work_task::Column::Id.eq(id))
+        .filter(work_task::Column::RunSeq.eq(run_seq))
+        .filter(
+            work_task::Column::Status
+                .is_in([WorkTaskStatus::Running, WorkTaskStatus::AwaitingInput]),
+        )
+        .filter(work_task::Column::DeletedAt.is_null())
+        .exec(&txn)
+        .await?;
+    if res.rows_affected != 1 {
+        txn.rollback().await?;
+        return Ok(false);
+    }
+    record_event(
+        &txn,
+        id,
+        "agent_verdict",
+        "agent",
+        Some(serde_json::json!({ "verdict": verdict, "summary": summary })),
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(true)
+}
+
 pub async fn settle_review(
     conn: &DatabaseConnection,
     id: i32,
@@ -1127,6 +1339,104 @@ mod tests {
             None
         );
         assert_eq!(get(&db.conn, t.id).await.unwrap().status, WorkTaskStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn auto_claim_counts_queued_against_the_budget() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-auto-budget").await;
+
+        // Budget 2, spent by one running + one manually queued task.
+        let running = create(&db.conn, draft(folder_id, "running")).await.unwrap();
+        let seq = claim_for_run(&db.conn, running.id, WorkTaskStatus::Todo, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mark_running(&db.conn, running.id, seq, 1, "c1").await.unwrap());
+        let queued = create(&db.conn, draft(folder_id, "queued")).await.unwrap();
+        claim_for_run(&db.conn, queued.id, WorkTaskStatus::Todo, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        let todo = create(&db.conn, draft(folder_id, "todo")).await.unwrap();
+
+        assert_eq!(auto_claim_next(&db.conn, folder_id, 2).await.unwrap(), None);
+        assert_eq!(
+            get(&db.conn, todo.id).await.unwrap().status,
+            WorkTaskStatus::Todo
+        );
+
+        // The running task settles → a slot frees → the head is claimed with a
+        // fresh generation and an engine-actor event.
+        assert!(settle_review(&db.conn, running.id, seq, None, None).await.unwrap());
+        assert_eq!(
+            auto_claim_next(&db.conn, folder_id, 2).await.unwrap(),
+            Some(todo.id)
+        );
+        let claimed = get(&db.conn, todo.id).await.unwrap();
+        assert_eq!(claimed.status, WorkTaskStatus::Queued);
+        assert_eq!(claimed.run_seq, 1);
+        let events = list_events(&db.conn, todo.id, 10).await.unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "status_changed" && e.actor == "engine"));
+
+        // Budget full again; nothing left to claim either way.
+        assert_eq!(auto_claim_next(&db.conn, folder_id, 2).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn auto_claim_drains_in_board_order_and_zero_is_unlimited() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-auto-order").await;
+        let a = create(&db.conn, draft(folder_id, "a")).await.unwrap();
+        let b = create(&db.conn, draft(folder_id, "b")).await.unwrap();
+        let c = create(&db.conn, draft(folder_id, "c")).await.unwrap();
+
+        assert_eq!(auto_claim_next(&db.conn, folder_id, 2).await.unwrap(), Some(a.id));
+        assert_eq!(auto_claim_next(&db.conn, folder_id, 2).await.unwrap(), Some(b.id));
+        // Two queued spend the budget; c stays visible in todo.
+        assert_eq!(auto_claim_next(&db.conn, folder_id, 2).await.unwrap(), None);
+        assert_eq!(get(&db.conn, c.id).await.unwrap().status, WorkTaskStatus::Todo);
+        // 0 = unlimited.
+        assert_eq!(auto_claim_next(&db.conn, folder_id, 0).await.unwrap(), Some(c.id));
+        assert_eq!(auto_claim_next(&db.conn, folder_id, 0).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn agent_verdict_is_generation_guarded_and_cleared_on_claim() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-verdict").await;
+        let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
+        let seq = claim_for_run(&db.conn, t.id, WorkTaskStatus::Todo, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mark_running(&db.conn, t.id, seq, 1, "c1").await.unwrap());
+
+        // Wrong generation → rejected; current one records verdict + summary
+        // (+ the agent_verdict event).
+        assert!(!set_verdict(&db.conn, t.id, seq + 1, "success", None).await.unwrap());
+        assert!(
+            set_verdict(&db.conn, t.id, seq, "needs_review", Some("check the tests"))
+                .await
+                .unwrap()
+        );
+        let m = get_model(&db.conn, t.id).await.unwrap();
+        assert_eq!(m.verdict.as_deref(), Some("needs_review"));
+        assert_eq!(m.result_summary.as_deref(), Some("check the tests"));
+        let events = list_events(&db.conn, t.id, 20).await.unwrap();
+        assert!(events.iter().any(|e| e.kind == "agent_verdict"));
+
+        // Settled tasks reject further reports; the next claim (a return from
+        // review) invalidates the stale verdict.
+        assert!(settle_review(&db.conn, t.id, seq, None, None).await.unwrap());
+        assert!(!set_verdict(&db.conn, t.id, seq, "success", None).await.unwrap());
+        claim_for_run(&db.conn, t.id, WorkTaskStatus::Review, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(get_model(&db.conn, t.id).await.unwrap().verdict, None);
     }
 
     #[tokio::test]

@@ -28,6 +28,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::acp::manager::ConnectionManager;
 use crate::acp::types::{AcpEvent, EventEnvelope, PromptInputBlock};
+use crate::acp::work_task_tools::{TaskReportAck, WorkTaskToolAccess};
 use crate::acp::InternalEventBus;
 use crate::commands::acp::{build_session_runtime_env, verify_agent_installed};
 use crate::commands::conversations::{create_conversation_core, emit_conversation_upsert};
@@ -347,7 +348,7 @@ impl TaskEngine {
 
     /// Cancel a task from any non-terminal state except merging. Worktree is
     /// kept (the card offers cleanup separately).
-    pub async fn cancel(&self, task_id: i32) -> Result<(), String> {
+    pub async fn cancel(self: &Arc<Self>, task_id: i32) -> Result<(), String> {
         let won = work_task_service::cancel(&self.db.conn, task_id)
             .await
             .map_err(|e| e.to_string())?;
@@ -380,14 +381,15 @@ impl TaskEngine {
         self.awaiting.lock().await.remove(&task_id);
 
         // Converge a stranded InProgress conversation.
-        let conversation_id = work_task_service::get_model(&self.db.conn, task_id)
-            .await
-            .ok()
-            .and_then(|t| t.conversation_id);
-        if let Some(conv_id) = conversation_id {
+        let task = work_task_service::get_model(&self.db.conn, task_id).await.ok();
+        if let Some(conv_id) = task.as_ref().and_then(|t| t.conversation_id) {
             if self.conversation_status(conv_id).await == Some(ConversationStatus::InProgress) {
                 self.cancel_conversation(conv_id).await;
             }
+        }
+        // The slot freed — refill from the queue (and an auto folder's todo).
+        if let Some(folder_id) = task.map(|t| t.folder_id) {
+            self.pump_folder(folder_id).await;
         }
         Ok(())
     }
@@ -410,6 +412,28 @@ impl TaskEngine {
             .await
             .unwrap_or_default();
         let max = settings.max_concurrent.max(0) as u64;
+
+        // Scheduler arm: an auto_process folder claims todo heads into the
+        // queue until the budget (which counts queued) is spent; the drain
+        // loop below then launches them like any manually queued task.
+        if settings.auto_process {
+            loop {
+                match work_task_service::auto_claim_next(
+                    &self.db.conn,
+                    folder_id,
+                    settings.max_concurrent,
+                )
+                .await
+                {
+                    Ok(Some(id)) => self.emit_upsert(id),
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!("[work_task] auto claim error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
 
         loop {
             // Only THIS folder's in-flight launches count against its limit.
@@ -825,10 +849,49 @@ impl TaskEngine {
 
         let changed = match stop_reason {
             "end_turn" => {
-                let stats = self.snapshot_diff_stats(task_id).await;
-                work_task_service::settle_review(&self.db.conn, task_id, run_seq, summary, stats)
+                // A `task_complete` report from this generation decides the
+                // settle: blocked → failed(verdict_blocked); success /
+                // needs_review → review. The verdict column is cleared on every
+                // claim, so a present verdict is always this generation's — and
+                // its summary (written with it) outranks the captured
+                // last-assistant text.
+                let task = work_task_service::get_model(&self.db.conn, task_id).await.ok();
+                let verdict = task
+                    .as_ref()
+                    .filter(|t| t.run_seq == run_seq)
+                    .and_then(|t| t.verdict.clone());
+                if verdict.as_deref() == Some("blocked") {
+                    let error = task
+                        .as_ref()
+                        .and_then(|t| t.result_summary.clone())
+                        .unwrap_or_else(|| "agent reported the task as blocked".to_string());
+                    work_task_service::fail(
+                        &self.db.conn,
+                        task_id,
+                        &[WorkTaskStatus::Running, WorkTaskStatus::AwaitingInput],
+                        Some(run_seq),
+                        "verdict_blocked",
+                        Some(error),
+                    )
                     .await
                     .unwrap_or(false)
+                } else {
+                    let own_summary = if verdict.is_some() {
+                        task.as_ref().and_then(|t| t.result_summary.clone())
+                    } else {
+                        None
+                    };
+                    let stats = self.snapshot_diff_stats(task_id).await;
+                    work_task_service::settle_review(
+                        &self.db.conn,
+                        task_id,
+                        run_seq,
+                        own_summary.or(summary),
+                        stats,
+                    )
+                    .await
+                    .unwrap_or(false)
+                }
             }
             "cancelled" => {
                 // The user stopped the agent from the conversation UI — that is
@@ -891,6 +954,59 @@ impl TaskEngine {
         }
     }
 
+    // ── codeg-mcp task reporting tools ──────────────────────────────────────
+
+    /// `task_progress`: attribute the report through the connection index and
+    /// append an `agent_progress` event (the card/timeline milestone).
+    pub async fn record_progress(&self, conn_id: &str, message: &str) -> TaskReportAck {
+        let entry = { self.index.lock().await.get(conn_id).copied() };
+        let Some((task_id, run_seq)) = entry else {
+            return TaskReportAck::rejected("this session is not executing a work task");
+        };
+        // Generation guard: a stale connection's report is a no-op.
+        match work_task_service::get_model(&self.db.conn, task_id).await {
+            Ok(task) if task.run_seq == run_seq => {}
+            _ => return TaskReportAck::rejected("the task moved on to a new run"),
+        }
+        if let Err(e) = work_task_service::record_event(
+            &self.db.conn,
+            task_id,
+            "agent_progress",
+            "agent",
+            Some(serde_json::json!({ "message": message })),
+        )
+        .await
+        {
+            return TaskReportAck::rejected(&format!("could not record progress: {e}"));
+        }
+        self.emit_upsert(task_id);
+        TaskReportAck::recorded()
+    }
+
+    /// `task_complete`: stash the verdict + summary on the current generation;
+    /// the TurnComplete settle reads them to decide review vs failed.
+    pub async fn record_complete(
+        &self,
+        conn_id: &str,
+        verdict: &str,
+        summary: Option<&str>,
+    ) -> TaskReportAck {
+        let entry = { self.index.lock().await.get(conn_id).copied() };
+        let Some((task_id, run_seq)) = entry else {
+            return TaskReportAck::rejected("this session is not executing a work task");
+        };
+        match work_task_service::set_verdict(&self.db.conn, task_id, run_seq, verdict, summary)
+            .await
+        {
+            Ok(true) => {
+                self.emit_upsert(task_id);
+                TaskReportAck::recorded()
+            }
+            Ok(false) => TaskReportAck::rejected("the task is not running anymore"),
+            Err(e) => TaskReportAck::rejected(&format!("could not record verdict: {e}")),
+        }
+    }
+
     /// Best-effort diff-stat snapshot of the task worktree vs its base.
     async fn snapshot_diff_stats(&self, task_id: i32) -> Option<(i32, i32, i32)> {
         let task = work_task_service::get_model(&self.db.conn, task_id).await.ok()?;
@@ -917,7 +1033,7 @@ impl TaskEngine {
     /// pipeline; on any failure the task returns to review with a readable
     /// error. Optionally removes the worktree after landing.
     pub async fn merge_task(
-        &self,
+        self: &Arc<Self>,
         task_id: i32,
         message: String,
         strategy: Option<String>,
@@ -953,6 +1069,9 @@ impl TaskEngine {
             .await;
         self.merging.lock().await.remove(&task_id);
         self.emit_upsert(task_id);
+        // Merging left the active count either way (done, or back to review) —
+        // refill the slot.
+        self.pump_folder(task.folder_id).await;
         result
     }
 
@@ -1501,11 +1620,13 @@ impl TaskEngine {
             let engine = self.clone();
             tokio::spawn(async move {
                 engine.recover_merging(task.id).await;
+                engine.pump_folder(task.folder_id).await;
             });
         }
 
-        // Queued backlog (e.g. a slot freed while no event fired).
-        for folder_id in work_task_service::folders_with_queued(&self.db.conn)
+        // Pending backlog: queued tasks whose slot freed while no event fired,
+        // plus todo tasks of auto_process folders (the pump checks the flag).
+        for folder_id in work_task_service::folders_with_pending(&self.db.conn)
             .await
             .unwrap_or_default()
         {
@@ -1691,7 +1812,10 @@ async fn compose_prompt(
             "—— Work task context ——\nYou are working inside a dedicated git worktree for \
              this task{}. Commit to the current branch as you like, but do NOT merge into, \
              rebase onto, or push the base branch{} — the user lands the result after review. \
-             Finish with a short summary of what you did.",
+             Finish with a short summary of what you did.\nIf the `task_progress` and \
+             `task_complete` tools are available to you, report milestones with \
+             `task_progress` as you go, and call `task_complete` once right before you \
+             finish (verdict `success`, `needs_review`, or `blocked`, plus a short summary).",
             task.work_branch
                 .as_deref()
                 .map(|b| format!(" (branch `{b}`)"))
@@ -1777,6 +1901,36 @@ fn slug(title: &str) -> String {
         "task".to_string()
     } else {
         out
+    }
+}
+
+/// codeg-mcp `task_progress` / `task_complete` access handed to the delegation
+/// listener at boot. Resolves the process-global engine at CALL time — the
+/// listener is constructed before the engine, and a process that never wins the
+/// engine lock cleanly rejects every report.
+pub struct EngineWorkTaskTools;
+
+#[async_trait::async_trait]
+impl WorkTaskToolAccess for EngineWorkTaskTools {
+    async fn report_progress(&self, parent_connection_id: &str, message: &str) -> TaskReportAck {
+        let Some(engine) = engine() else {
+            return TaskReportAck::rejected("no task engine running in this process");
+        };
+        engine.record_progress(parent_connection_id, message).await
+    }
+
+    async fn complete(
+        &self,
+        parent_connection_id: &str,
+        verdict: &str,
+        summary: Option<&str>,
+    ) -> TaskReportAck {
+        let Some(engine) = engine() else {
+            return TaskReportAck::rejected("no task engine running in this process");
+        };
+        engine
+            .record_complete(parent_connection_id, verdict, summary)
+            .await
     }
 }
 

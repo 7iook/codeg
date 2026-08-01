@@ -593,6 +593,7 @@ mod tauri_app {
                                 }),
                             ),
                         ),
+                        std::sync::Arc::new(crate::work_task::EngineWorkTaskTools),
                     );
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = listener.run(socket_path).await {
@@ -1240,6 +1241,7 @@ mod tauri_app {
                 work_task_commands::work_task_attention_count,
                 work_task_commands::work_task_create,
                 work_task_commands::work_task_update,
+                work_task_commands::work_task_reorder,
                 work_task_commands::work_task_delete,
                 work_task_commands::work_task_start,
                 work_task_commands::work_task_start_all,

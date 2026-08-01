@@ -10,8 +10,11 @@ import {
   useState,
   type ReactNode,
 } from "react"
+import { useTranslations } from "next-intl"
 import { workTaskList } from "@/lib/api"
+import { sendSystemNotification } from "@/lib/notification"
 import { onTransportReconnect, subscribe } from "@/lib/platform"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import type { WorkTask } from "@/lib/types"
 
 const WORK_TASK_CHANGED_EVENT = "task://changed"
@@ -45,8 +48,19 @@ export function useTasksView() {
 }
 
 export function TasksViewProvider({ children }: { children: ReactNode }) {
+  const t = useTranslations("Tasks")
+  // Latest-ref so `refetch` stays referentially stable across locale changes
+  // (its identity re-subscribes the event channel). Synced in an effect —
+  // writing during render trips react-hooks/refs.
+  const tRef = useRef(t)
+  useEffect(() => {
+    tRef.current = t
+  }, [t])
   const [tasks, setTasks] = useState<WorkTask[]>([])
   const reqRef = useRef(0)
+  // Statuses as of the last successful fetch; null until then, so the first
+  // load (pure history) never notifies.
+  const prevStatusRef = useRef<Map<number, WorkTask["status"]> | null>(null)
 
   const refetch = useCallback(async () => {
     const id = ++reqRef.current
@@ -54,7 +68,12 @@ export function TasksViewProvider({ children }: { children: ReactNode }) {
       const list = await workTaskList(null)
       // Drop stale responses; keep the previous list on transient error rather
       // than blanking the board (same idiom as automations-view-context).
-      if (id === reqRef.current) setTasks(list)
+      if (id !== reqRef.current) return
+      notifyFlips(prevStatusRef.current, list, tRef.current)
+      prevStatusRef.current = new Map(
+        list.map((task) => [task.id, task.status])
+      )
+      setTasks(list)
     } catch {
       // ignore — a later event/refetch recovers
     }
@@ -102,4 +121,32 @@ export function TasksViewProvider({ children }: { children: ReactNode }) {
       {children}
     </TasksViewContext.Provider>
   )
+}
+
+/**
+ * System notification when a task flips into review (ready for acceptance) or
+ * failed. The engine runs headless, so this fetch-to-fetch diff is the only
+ * place that sees the transition; `sendSystemNotification` itself stays silent
+ * while the window is visible.
+ */
+function notifyFlips(
+  prev: Map<number, WorkTask["status"]> | null,
+  list: WorkTask[],
+  t: (key: "notifyReview" | "notifyFailed", values: { title: string }) => string
+) {
+  if (prev == null) return
+  for (const task of list) {
+    if (prev.get(task.id) === task.status) continue
+    if (task.status !== "review" && task.status !== "failed") continue
+    const folder = useAppWorkspaceStore
+      .getState()
+      .folders.find((f) => f.id === task.folder_id)
+    const folderName = folder ? (folder.alias ?? folder.name) : null
+    const title = folderName ? `${folderName} - Codeg` : "Codeg"
+    const body =
+      task.status === "review"
+        ? t("notifyReview", { title: task.title })
+        : t("notifyFailed", { title: task.title })
+    void sendSystemNotification(title, body)
+  }
 }

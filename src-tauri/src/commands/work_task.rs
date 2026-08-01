@@ -23,6 +23,16 @@ fn engine() -> Result<std::sync::Arc<crate::work_task::TaskEngine>, DbError> {
         .ok_or_else(|| DbError::Validation("task engine not running".to_string()))
 }
 
+/// Best-effort pump nudge so an auto_process folder reacts to creates, edits,
+/// requeues and settings changes without waiting for the reconcile tick. A
+/// process not holding the engine lock skips it — the owning process's tick
+/// picks the change up from the DB.
+fn nudge_pump(folder_id: i32) {
+    if let Some(engine) = crate::work_task::engine() {
+        tokio::spawn(async move { engine.pump_folder(folder_id).await });
+    }
+}
+
 // ── shared business logic (both modes) ──────────────────────────────────────
 
 pub async fn work_task_list_core(
@@ -59,6 +69,7 @@ pub async fn work_task_create_core(
         WORK_TASK_CHANGED_EVENT,
         WorkTaskChange::Upsert { id: info.id },
     );
+    nudge_pump(info.folder_id);
     Ok(info)
 }
 
@@ -74,6 +85,7 @@ pub async fn work_task_update_core(
         WORK_TASK_CHANGED_EVENT,
         WorkTaskChange::Upsert { id },
     );
+    nudge_pump(info.folder_id);
     Ok(info)
 }
 
@@ -112,6 +124,20 @@ pub async fn work_task_delete_core(
     Ok(())
 }
 
+/// Persist the pending column's drag order. `sort_order` also drives the
+/// engine's claim/launch order, so reordering queued tasks re-prioritizes them.
+pub async fn work_task_reorder_core(
+    emitter: &EventEmitter,
+    db: &AppDatabase,
+    folder_id: i32,
+    ordered_ids: Vec<i32>,
+) -> Result<(), DbError> {
+    work_task_service::reorder(&db.conn, folder_id, &ordered_ids).await?;
+    emit_event(emitter, WORK_TASK_CHANGED_EVENT, WorkTaskChange::Refresh);
+    nudge_pump(folder_id);
+    Ok(())
+}
+
 pub async fn work_task_start_core(id: i32) -> Result<(), DbError> {
     engine()?.start(id).await.map_err(DbError::Validation)
 }
@@ -142,6 +168,9 @@ pub async fn work_task_requeue_core(
         WORK_TASK_CHANGED_EVENT,
         WorkTaskChange::Upsert { id },
     );
+    if let Ok(task) = work_task_service::get_model(&db.conn, id).await {
+        nudge_pump(task.folder_id);
+    }
     Ok(())
 }
 
@@ -253,6 +282,7 @@ pub async fn work_task_settings_set_core(
         WORK_TASK_CHANGED_EVENT,
         WorkTaskChange::Settings { folder_id },
     );
+    nudge_pump(folder_id);
     Ok(())
 }
 
@@ -313,6 +343,17 @@ pub async fn work_task_update(
     draft: WorkTaskDraft,
 ) -> Result<WorkTaskInfo, DbError> {
     work_task_update_core(&EventEmitter::Tauri(app), &db, id, draft).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_reorder(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+    ordered_ids: Vec<i32>,
+) -> Result<(), DbError> {
+    work_task_reorder_core(&EventEmitter::Tauri(app), &db, folder_id, ordered_ids).await
 }
 
 #[cfg(feature = "tauri-runtime")]

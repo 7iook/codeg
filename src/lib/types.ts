@@ -405,6 +405,10 @@ export interface DbConversationSummary {
   parent_id?: number | null
   parent_tool_use_id?: string | null
   delegation_call_id?: string | null
+  /** Set when the conversation was re-parented out of a removed worktree: the
+   *  worktree path it originally ran in. Drives the "source worktree removed"
+   *  badge. */
+  origin_cwd?: string | null
 }
 
 /** Payload for the global `conversation://changed` side-channel that keeps
@@ -1278,6 +1282,8 @@ export interface WorkTask {
   additions: number | null
   deletions: number | null
   merge_commit: string | null
+  /** Latest agent_progress milestone — present on live (running/awaiting) rows only. */
+  latest_progress?: string | null
   created_at: string
   updated_at: string
   started_at: string | null

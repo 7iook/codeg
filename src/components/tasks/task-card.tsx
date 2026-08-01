@@ -255,6 +255,12 @@ export function TaskCard({
           {task.result_summary}
         </p>
       ) : null}
+      {(task.status === "running" || task.status === "awaiting_input") &&
+      task.latest_progress ? (
+        <p className="line-clamp-2 text-[0.6875rem] leading-snug text-muted-foreground italic">
+          {task.latest_progress}
+        </p>
+      ) : null}
 
       {quickAction ? (
         <div className="flex items-center gap-1 pt-0.5">{quickAction}</div>

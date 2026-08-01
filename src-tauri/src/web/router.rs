@@ -1208,6 +1208,10 @@ pub fn build_router(
             post(handlers::work_task::work_task_update),
         )
         .route(
+            "/work_task_reorder",
+            post(handlers::work_task::work_task_reorder),
+        )
+        .route(
             "/work_task_delete",
             post(handlers::work_task::work_task_delete),
         )

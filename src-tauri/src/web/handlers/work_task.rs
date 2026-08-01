@@ -50,6 +50,13 @@ pub struct UpdateParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReorderParams {
+    pub folder_id: i32,
+    pub ordered_ids: Vec<i32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeleteParams {
     pub id: i32,
     #[serde(default)]
@@ -151,6 +158,21 @@ pub async fn work_task_update(
         .await
         .map_err(AppCommandError::from)?;
     Ok(Json(result))
+}
+
+pub async fn work_task_reorder(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<ReorderParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_reorder_core(
+        &state.emitter,
+        &state.db,
+        params.folder_id,
+        params.ordered_ids,
+    )
+    .await
+    .map_err(AppCommandError::from)?;
+    Ok(Json(()))
 }
 
 pub async fn work_task_delete(

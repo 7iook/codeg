@@ -7,6 +7,7 @@ import {
   Ban,
   Bot,
   CircleAlert,
+  Coins,
   FileDiff,
   Folder,
   GitBranch,
@@ -22,6 +23,7 @@ import {
 } from "lucide-react"
 import {
   workTaskCancel,
+  getFolderConversation,
   workTaskChangedFiles,
   workTaskCleanup,
   workTaskDelete,
@@ -33,6 +35,7 @@ import {
   workTaskStart,
 } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
+import { formatTokenCount } from "@/lib/token-format"
 import { onTransportReconnect, subscribe } from "@/lib/platform"
 import { UnifiedDiffPreview } from "@/components/diff/unified-diff-preview"
 import { StatusChip } from "./task-card"
@@ -106,6 +109,40 @@ export function TaskDetailSheet({
 
   const taskId = task?.id ?? null
   const hasWorktree = task?.worktree_folder_id != null
+  const conversationId = task?.conversation_id ?? null
+  const taskStatus = task?.status ?? null
+  // Total token usage of the task's conversation — parsed from the agent's own
+  // transcript on open and re-read when the task settles (status flip), not on
+  // every progress nudge (the parse is the expensive part).
+  const [tokenTotal, setTokenTotal] = useState<number | null>(null)
+  useEffect(() => {
+    if (!open || conversationId == null) {
+      setTokenTotal(null)
+      return
+    }
+    let cancelled = false
+    getFolderConversation(conversationId)
+      .then((detail) => {
+        if (cancelled) return
+        const stats = detail.session_stats
+        const usage = stats?.total_usage ?? null
+        const total =
+          stats?.total_tokens ??
+          (usage
+            ? usage.input_tokens +
+              usage.output_tokens +
+              usage.cache_creation_input_tokens +
+              usage.cache_read_input_tokens
+            : null)
+        setTokenTotal(total ?? null)
+      })
+      .catch(() => {
+        // Transcript may be unreadable (agent gone, file pruned) — no chip.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, conversationId, taskStatus])
 
   const reload = useCallback(async () => {
     if (taskId == null) return
@@ -222,6 +259,15 @@ export function TaskDetailSheet({
                 <span className="inline-flex items-center gap-1 font-mono text-[0.6875rem]">
                   <GitCommitHorizontal className="size-3" aria-hidden="true" />
                   {task.merge_commit.slice(0, 8)}
+                </span>
+              ) : null}
+              {tokenTotal != null && tokenTotal > 0 ? (
+                <span
+                  className="inline-flex items-center gap-1 tabular-nums"
+                  title={t("detailTokens")}
+                >
+                  <Coins className="size-3" aria-hidden="true" />
+                  {formatTokenCount(tokenTotal)}
                 </span>
               ) : null}
             </div>

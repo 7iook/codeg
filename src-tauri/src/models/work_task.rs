@@ -31,6 +31,10 @@ pub struct WorkTaskInfo {
     pub additions: Option<i32>,
     pub deletions: Option<i32>,
     pub merge_commit: Option<String>,
+    /// Latest `agent_progress` milestone (filled by `list` for live tasks only
+    /// — the card's realtime progress line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_progress: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,

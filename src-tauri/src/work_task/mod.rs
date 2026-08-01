@@ -5,4 +5,4 @@
 pub mod engine;
 pub mod git;
 
-pub use engine::{build_task_engine, engine, run_task_engine, TaskEngine};
+pub use engine::{build_task_engine, engine, run_task_engine, EngineWorkTaskTools, TaskEngine};

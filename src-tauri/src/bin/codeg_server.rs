@@ -347,6 +347,7 @@ async fn async_main() -> ExitCode {
                     conn: state.db.conn.clone(),
                 }),
             )),
+            Arc::new(codeg_lib::work_task::EngineWorkTaskTools),
         );
         let socket = delegation_socket_path.clone();
         tokio::spawn(async move {

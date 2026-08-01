@@ -2624,6 +2624,14 @@ export async function workTaskUpdate(
   return getTransport().call("work_task_update", { id, draft })
 }
 
+/** Persist the pending column's drag order (index → sort_order). */
+export async function workTaskReorder(
+  folderId: number,
+  orderedIds: number[]
+): Promise<void> {
+  return getTransport().call("work_task_reorder", { folderId, orderedIds })
+}
+
 export async function workTaskDelete(
   id: number,
   deleteWorktree = false

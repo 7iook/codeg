@@ -2608,17 +2608,25 @@ fn is_executable_file(path: &Path) -> bool {
 /// delegate tool silently. Skipping leaves the agent fully functional minus
 /// `delegate_to_agent`, which is the right degradation when codeg-mcp didn't
 /// make it into the install.
-/// The `--features` value for a companion launch given the four feature flags,
+/// The `--features` value for a companion launch given the five feature flags,
 /// or `None` when none is enabled (the companion isn't injected at all).
 /// Pulled out as a pure function so the inject/skip decision is unit-testable
-/// without a real binary on disk or a live broker.
+/// without a real binary on disk or a live broker. `tasks` is per-spawn (task
+/// engine launches only), not a settings toggle — on its own it still injects
+/// the companion so a task session always has its reporting tools.
 fn companion_features_arg(
     delegation_enabled: bool,
     feedback_enabled: bool,
     ask_enabled: bool,
     sessions_enabled: bool,
+    tasks_enabled: bool,
 ) -> Option<String> {
-    if !delegation_enabled && !feedback_enabled && !ask_enabled && !sessions_enabled {
+    if !delegation_enabled
+        && !feedback_enabled
+        && !ask_enabled
+        && !sessions_enabled
+        && !tasks_enabled
+    {
         return None;
     }
     let mut features: Vec<&str> = Vec::new();
@@ -2633,6 +2641,9 @@ fn companion_features_arg(
     }
     if sessions_enabled {
         features.push("sessions");
+    }
+    if tasks_enabled {
+        features.push("tasks");
     }
     Some(features.join(","))
 }
@@ -2650,11 +2661,14 @@ async fn inject_codeg_mcp(
     injection: &DelegationInjection,
     parent_connection_id: &str,
     working_dir: &Path,
+    tasks_enabled: bool,
 ) -> Option<CompanionInjection> {
     // codeg-mcp carries BOTH the delegation tools and the live-feedback tool.
     // Inject it when EITHER feature is enabled; the `--features` arg tells the
     // companion which tool groups to expose so a disabled feature's tools never
     // surface to the LLM. (Historically this was gated on delegation alone.)
+    // `tasks_enabled` is per-spawn: true only for task-engine launches, which
+    // must get their reporting tools regardless of the settings toggles.
     let delegation_enabled = injection.broker.config_snapshot().await.enabled;
     let feedback_enabled = injection.feedback.is_enabled().await;
     let ask_enabled = injection.ask.is_enabled().await;
@@ -2665,6 +2679,7 @@ async fn inject_codeg_mcp(
         feedback_enabled,
         ask_enabled,
         sessions_enabled,
+        tasks_enabled,
     )?;
     let Some(binary_path) = locate_codeg_mcp_binary() else {
         tracing::warn!(
@@ -3286,7 +3301,11 @@ async fn run_connection(
             // for agents that don't accept MCP over the wire (above).
             let delegate_injection = if agent_supports_mcp && agent_delivers_wire_mcp(agent_type) {
                 if let Some(inj) = delegation_injection.as_ref() {
-                    inject_codeg_mcp(&mut mcp_servers, inj, &conn_id, &cwd).await
+                    // Task-engine launches (owner label "work_task") carry the
+                    // task_progress / task_complete tool group.
+                    let tasks_enabled =
+                        { state.read().await.owner_window_label == "work_task" };
+                    inject_codeg_mcp(&mut mcp_servers, inj, &conn_id, &cwd, tasks_enabled).await
                 } else {
                     None
                 }
@@ -10667,6 +10686,7 @@ mod tests {
             &injection,
             "parent-conn",
             std::path::Path::new("/tmp"),
+            false,
         )
         .await;
 
@@ -10754,32 +10774,41 @@ mod tests {
     #[test]
     fn companion_features_arg_inject_skip_decision() {
         // All off → no companion at all.
-        assert_eq!(companion_features_arg(false, false, false, false), None);
+        assert_eq!(companion_features_arg(false, false, false, false, false), None);
         // Delegation only.
         assert_eq!(
-            companion_features_arg(true, false, false, false),
+            companion_features_arg(true, false, false, false, false),
             Some("delegation".to_string())
         );
         // Feedback only — the decoupling: companion injected for feedback even
         // when delegation is off.
         assert_eq!(
-            companion_features_arg(false, true, false, false),
+            companion_features_arg(false, true, false, false, false),
             Some("feedback".to_string())
         );
         // Ask only — likewise injects the companion on its own.
         assert_eq!(
-            companion_features_arg(false, false, true, false),
+            companion_features_arg(false, false, true, false, false),
             Some("ask".to_string())
         );
         // Sessions only — likewise injects the companion on its own.
         assert_eq!(
-            companion_features_arg(false, false, false, true),
+            companion_features_arg(false, false, false, true, false),
             Some("sessions".to_string())
         );
         // All on → comma-joined, in declaration order.
         assert_eq!(
-            companion_features_arg(true, true, true, true),
+            companion_features_arg(true, true, true, true, false),
             Some("delegation,feedback,ask,sessions".to_string())
+        );
+        // Per-spawn tasks group: injects alone, and rides along with the rest.
+        assert_eq!(
+            companion_features_arg(false, false, false, false, true),
+            Some("tasks".to_string())
+        );
+        assert_eq!(
+            companion_features_arg(true, true, true, true, true),
+            Some("delegation,feedback,ask,sessions,tasks".to_string())
         );
     }
 }

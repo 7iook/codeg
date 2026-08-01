@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import {
   Select,
   SelectContent,
@@ -43,8 +44,8 @@ interface TaskSettingsDialogProps {
 
 /**
  * Per-folder task defaults: the default processing agent + its ACP-probed
- * mode/model options (same surface as the sub-agent settings), max concurrency,
- * and merge defaults. The auto-process toggle is P1 and not surfaced yet.
+ * mode/model options (same surface as the sub-agent settings), auto-process,
+ * max concurrency, and merge defaults.
  */
 export function TaskSettingsDialog({
   open,
@@ -83,6 +84,7 @@ function TaskSettingsBody({
   const [agentType, setAgentType] = useState<AgentType>("claude_code")
   const [modeId, setModeId] = useState<string | null>(null)
   const [configValues, setConfigValues] = useState<Record<string, string>>({})
+  const [autoProcess, setAutoProcess] = useState(false)
   const [maxConcurrent, setMaxConcurrent] = useState("2")
   const [mergeStrategy, setMergeStrategy] = useState<"squash" | "merge">(
     "squash"
@@ -102,6 +104,7 @@ function TaskSettingsBody({
         )
         setModeId(s.mode_id ?? null)
         setConfigValues(s.config_values ?? {})
+        setAutoProcess(s.auto_process)
         setMaxConcurrent(String(s.max_concurrent))
         setMergeStrategy(s.merge_strategy === "merge" ? "merge" : "squash")
         setDeleteWorktreeDefault(s.delete_worktree_default)
@@ -138,7 +141,7 @@ function TaskSettingsBody({
           agent_label: getAgentLabel(agentType) ?? agentType,
           ...snapshotLabels(snapshot, mode_id, config_values),
         },
-        auto_process: loaded?.auto_process ?? false,
+        auto_process: autoProcess,
         max_concurrent: Number.isFinite(parsed) && parsed >= 0 ? parsed : 2,
         merge_strategy: mergeStrategy,
         delete_worktree_default: deleteWorktreeDefault,
@@ -192,6 +195,22 @@ function TaskSettingsBody({
                 return next
               })
             }
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-col">
+            <Label htmlFor="task-auto-process" className="text-sm">
+              {t("settingsAutoProcess")}
+            </Label>
+            <span className="text-xs text-muted-foreground">
+              {t("settingsAutoProcessHint")}
+            </span>
+          </div>
+          <Switch
+            id="task-auto-process"
+            checked={autoProcess}
+            onCheckedChange={setAutoProcess}
           />
         </div>
 

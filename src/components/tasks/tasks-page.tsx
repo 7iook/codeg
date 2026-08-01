@@ -1,6 +1,7 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Reorder, type PanInfo } from "motion/react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import {
@@ -18,6 +19,7 @@ import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import {
   workTaskCancel,
   workTaskCreate,
+  workTaskReorder,
   workTaskRequeue,
   workTaskRetry,
   workTaskStart,
@@ -25,6 +27,11 @@ import {
   workTaskUpdate,
 } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
+import {
+  consumePendingTaskDraft,
+  CREATE_TASK_FROM_TEXT_EVENT,
+  type CreateTaskFromTextDetail,
+} from "@/lib/task-compose-events"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
@@ -80,8 +87,33 @@ export function TasksPage() {
 
   const [folderFilter, setFolderFilter] = useState<number | null>(null)
   const [showCanceled, setShowCanceled] = useState(false)
+  // Drag state for the pending column (enabled only with a folder selected —
+  // sort_order is per folder, so a mixed-folder列 has no persistable order).
+  const [dragOrder, setDragOrder] = useState<number[] | null>(null)
+  const dragOrderRef = useRef<number[] | null>(null)
+  dragOrderRef.current = dragOrder
+  const [draggingTodo, setDraggingTodo] = useState(false)
+  const inProgressColRef = useRef<HTMLDivElement | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
   const [editorTask, setEditorTask] = useState<WorkTask | null>(null)
+  const [editorPrefill, setEditorPrefill] =
+    useState<CreateTaskFromTextDetail | null>(null)
+
+  // "Task from message" hand-off: consume the parked draft on mount (this page
+  // is unmounted while other routes are active) and on the live event.
+  useEffect(() => {
+    const consume = () => {
+      const draft = consumePendingTaskDraft()
+      if (!draft) return
+      setEditorTask(null)
+      setEditorPrefill(draft)
+      setEditorOpen(true)
+    }
+    consume()
+    window.addEventListener(CREATE_TASK_FROM_TEXT_EVENT, consume)
+    return () =>
+      window.removeEventListener(CREATE_TASK_FROM_TEXT_EVENT, consume)
+  }, [])
   const [detailTaskId, setDetailTaskId] = useState<number | null>(null)
   const [mergeTask, setMergeTask] = useState<WorkTask | null>(null)
   const [mergeOpen, setMergeOpen] = useState(false)
@@ -98,6 +130,18 @@ export function TasksPage() {
     () => groupTasksByColumn(visibleTasks, showCanceled),
     [visibleTasks, showCanceled]
   )
+  const dragEnabled = folderFilter != null
+  // Optimistic order while a drag is live; server order otherwise.
+  const todoTasks = useMemo(() => {
+    const base = columns.todo
+    if (!dragEnabled || dragOrder == null) return base
+    const byId = new Map(base.map((task) => [task.id, task]))
+    const ordered = dragOrder.flatMap((id) => byId.get(id) ?? [])
+    for (const task of base) {
+      if (!dragOrder.includes(task.id)) ordered.push(task)
+    }
+    return ordered
+  }, [columns.todo, dragEnabled, dragOrder])
   // The sheet renders the LIVE row from the provider so status flips (e.g.
   // merging → done) update in place while it is open.
   const detailTask = useMemo(
@@ -141,6 +185,7 @@ export function TasksPage() {
       if (editorTask) await workTaskUpdate(editorTask.id, draft)
       else await workTaskCreate(draft)
       setEditorOpen(false)
+      setEditorPrefill(null)
       void refetch()
     },
     [editorTask, refetch]
@@ -150,6 +195,40 @@ export function TasksPage() {
     setMergeTask(task)
     setMergeOpen(true)
   }, [])
+
+  // Drop on the In-progress column = start (the pending column drags on the y
+  // axis, but the POINTER is free — droppedness is judged by its position).
+  // Anywhere else = persist the reorder.
+  const handleTodoDragEnd = useCallback(
+    (task: WorkTask, info: PanInfo) => {
+      setDraggingTodo(false)
+      const rect = inProgressColRef.current?.getBoundingClientRect()
+      const droppedOnInProgress =
+        rect != null &&
+        info.point.x >= rect.left &&
+        info.point.x <= rect.right &&
+        info.point.y >= rect.top &&
+        info.point.y <= rect.bottom
+      if (droppedOnInProgress && task.status === "todo") {
+        setDragOrder(null)
+        void act(() => workTaskStart(task.id))
+        return
+      }
+      const order = dragOrderRef.current
+      if (folderFilter != null && order != null) {
+        void (async () => {
+          try {
+            await workTaskReorder(folderFilter, order)
+          } catch (e) {
+            toast.error(toErrorMessage(e))
+          }
+          await refetch()
+          setDragOrder(null)
+        })()
+      }
+    },
+    [act, folderFilter, refetch]
+  )
 
   const startAll = useCallback(() => {
     if (folderFilter == null) return
@@ -283,57 +362,101 @@ export function TasksPage() {
       ) : (
         <div className="min-h-0 flex-1 overflow-x-auto">
           <div className="grid h-full min-w-[56rem] grid-cols-4 gap-3 p-4">
-            {BOARD_COLUMN_IDS.map((col) => (
-              <div key={col} className="flex min-h-0 flex-col gap-2">
-                <div className="flex shrink-0 items-center gap-1.5 px-1">
-                  <span
-                    className={cn(
-                      "size-1.5 rounded-full",
-                      col === "todo" && "bg-muted-foreground/50",
-                      col === "inProgress" && "bg-primary",
-                      col === "attention" && "bg-amber-500",
-                      col === "done" && "bg-emerald-500"
-                    )}
-                    aria-hidden="true"
-                  />
-                  <h2 className="text-xs font-medium text-muted-foreground">
-                    {t(COLUMN_LABEL_KEYS[col])}
-                  </h2>
-                  <span className="text-[0.6875rem] text-muted-foreground/60">
-                    {columns[col].length}
-                  </span>
-                </div>
-                <ScrollArea className="min-h-0 flex-1 rounded-xl bg-muted/30 p-1.5">
-                  <div className="flex flex-col gap-1.5">
-                    {columns[col].map((task) => (
-                      <TaskCard
-                        key={task.id}
-                        task={task}
-                        folderName={folderNames.get(task.folder_id) ?? null}
-                        onOpen={() => setDetailTaskId(task.id)}
-                        onStart={() => void act(() => workTaskStart(task.id))}
-                        onCancel={() => void act(() => workTaskCancel(task.id))}
-                        onRetry={() => void act(() => workTaskRetry(task.id))}
-                        onRequeue={() =>
-                          void act(() => workTaskRequeue(task.id))
-                        }
-                        onOpenConversation={() => openConversation(task)}
-                        onMerge={() => openMerge(task)}
-                      />
-                    ))}
+            {BOARD_COLUMN_IDS.map((col) => {
+              const cardFor = (task: WorkTask) => (
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  folderName={folderNames.get(task.folder_id) ?? null}
+                  onOpen={() => setDetailTaskId(task.id)}
+                  onStart={() => void act(() => workTaskStart(task.id))}
+                  onCancel={() => void act(() => workTaskCancel(task.id))}
+                  onRetry={() => void act(() => workTaskRetry(task.id))}
+                  onRequeue={() => void act(() => workTaskRequeue(task.id))}
+                  onOpenConversation={() => openConversation(task)}
+                  onMerge={() => openMerge(task)}
+                />
+              )
+              return (
+                <div
+                  key={col}
+                  ref={col === "inProgress" ? inProgressColRef : undefined}
+                  className="flex min-h-0 flex-col gap-2"
+                >
+                  <div className="flex shrink-0 items-center gap-1.5 px-1">
+                    <span
+                      className={cn(
+                        "size-1.5 rounded-full",
+                        col === "todo" && "bg-muted-foreground/50",
+                        col === "inProgress" && "bg-primary",
+                        col === "attention" && "bg-amber-500",
+                        col === "done" && "bg-emerald-500"
+                      )}
+                      aria-hidden="true"
+                    />
+                    <h2 className="text-xs font-medium text-muted-foreground">
+                      {t(COLUMN_LABEL_KEYS[col])}
+                    </h2>
+                    <span className="text-[0.6875rem] text-muted-foreground/60">
+                      {columns[col].length}
+                    </span>
                   </div>
-                </ScrollArea>
-              </div>
-            ))}
+                  <ScrollArea
+                    className={cn(
+                      "min-h-0 flex-1 rounded-xl bg-muted/30 p-1.5",
+                      // Drop target hint while a pending card is being dragged.
+                      col === "inProgress" &&
+                        draggingTodo &&
+                        "ring-2 ring-primary/40"
+                    )}
+                  >
+                    {col === "todo" && dragEnabled ? (
+                      <Reorder.Group
+                        as="div"
+                        axis="y"
+                        values={todoTasks.map((task) => task.id)}
+                        onReorder={(ids: number[]) => setDragOrder(ids)}
+                        className="flex flex-col gap-1.5"
+                      >
+                        {todoTasks.map((task) => (
+                          <Reorder.Item
+                            key={task.id}
+                            value={task.id}
+                            as="div"
+                            onDragStart={() => setDraggingTodo(true)}
+                            onDragEnd={(_e: unknown, info: PanInfo) =>
+                              handleTodoDragEnd(task, info)
+                            }
+                            className="cursor-grab active:cursor-grabbing"
+                          >
+                            {cardFor(task)}
+                          </Reorder.Item>
+                        ))}
+                      </Reorder.Group>
+                    ) : (
+                      <div className="flex flex-col gap-1.5">
+                        {(col === "todo" ? todoTasks : columns[col]).map(
+                          cardFor
+                        )}
+                      </div>
+                    )}
+                  </ScrollArea>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
 
       <TaskEditorDialog
         open={editorOpen}
-        onOpenChange={setEditorOpen}
+        onOpenChange={(o) => {
+          setEditorOpen(o)
+          if (!o) setEditorPrefill(null)
+        }}
         task={editorTask}
-        defaultFolderId={folderFilter}
+        defaultFolderId={editorPrefill?.folderId ?? folderFilter}
+        prefillText={editorPrefill?.text ?? null}
         onSubmit={submitEditor}
       />
       <TaskDetailSheet

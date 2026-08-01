@@ -50,7 +50,9 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  SquareKanban,
 } from "lucide-react"
+import { useCreateTaskFromMessage } from "./use-create-task-from-message"
 import { Button } from "@/components/ui/button"
 import { useTranslations } from "next-intl"
 import {
@@ -523,6 +525,29 @@ const UserMessageCopyButton = memo(function UserMessageCopyButton({
   )
 })
 
+const UserMessageTaskButton = memo(function UserMessageTaskButton({
+  parts,
+}: {
+  parts: AdaptedContentPart[]
+}) {
+  const t = useTranslations("Tasks")
+  const getText = useCallback(
+    () => unescapeComposerText(extractTextFromParts(parts)),
+    [parts]
+  )
+  const createTask = useCreateTaskFromMessage(getText)
+  return (
+    <MessageAction
+      tooltip={t("createFromMessage")}
+      className="opacity-0 group-hover/user-msg:opacity-100 transition-opacity self-end"
+      onClick={createTask}
+      size="icon-xs"
+    >
+      <SquareKanban size={12} />
+    </MessageAction>
+  )
+})
+
 const HistoricalMessageGroup = memo(function HistoricalMessageGroup({
   group,
   dimmed = false,
@@ -550,6 +575,7 @@ const HistoricalMessageGroup = memo(function HistoricalMessageGroup({
         ) : null}
         {group.role === "user" ? (
           <div className="group/user-msg flex w-fit ml-auto max-w-full items-start gap-1">
+            <UserMessageTaskButton parts={group.parts} />
             <UserMessageCopyButton parts={group.parts} />
             <MessageContent>
               <CollapsibleUserMessage parts={group.parts} />

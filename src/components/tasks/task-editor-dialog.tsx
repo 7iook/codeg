@@ -56,6 +56,8 @@ interface TaskEditorDialogProps {
   task: WorkTask | null
   /** Preselected folder for a create (the board's folder filter). */
   defaultFolderId: number | null
+  /** Seed text for a create (the "task from message" hand-off). */
+  prefillText?: string | null
   onSubmit: (draft: WorkTaskDraft) => Promise<void>
 }
 
@@ -71,6 +73,7 @@ export function TaskEditorDialog({
   onOpenChange,
   task,
   defaultFolderId,
+  prefillText,
   onSubmit,
 }: TaskEditorDialogProps) {
   return (
@@ -81,6 +84,7 @@ export function TaskEditorDialog({
           <TaskEditorBody
             task={task}
             defaultFolderId={defaultFolderId}
+            prefillText={prefillText ?? null}
             onSubmit={onSubmit}
             onCancel={() => onOpenChange(false)}
           />
@@ -93,11 +97,13 @@ export function TaskEditorDialog({
 function TaskEditorBody({
   task,
   defaultFolderId,
+  prefillText,
   onSubmit,
   onCancel,
 }: {
   task: WorkTask | null
   defaultFolderId: number | null
+  prefillText: string | null
   onSubmit: (draft: WorkTaskDraft) => Promise<void>
   onCancel: () => void
 }) {
@@ -110,8 +116,13 @@ function TaskEditorBody({
     [folders]
   )
 
-  const [title, setTitle] = useState(task?.title ?? "")
-  const [prompt, setPrompt] = useState(task?.config?.display_text ?? "")
+  // A create seeded from a chat message: the text becomes the description and
+  // its first line (trimmed) the suggested title.
+  const seededText = task == null ? (prefillText ?? "") : ""
+  const [title, setTitle] = useState(
+    task?.title ?? seededText.split("\n")[0]?.trim().slice(0, 80) ?? ""
+  )
+  const [prompt, setPrompt] = useState(task?.config?.display_text ?? seededText)
   const [folderId, setFolderId] = useState<number | null>(
     task?.folder_id ?? defaultFolderId ?? projectFolders[0]?.id ?? null
   )
@@ -244,7 +255,7 @@ function TaskEditorBody({
         <div className="rounded-xl border border-input bg-background transition-colors focus-within:border-ring focus-within:ring-[3px] focus-within:ring-inset focus-within:ring-ring/50">
           <RichComposer
             ref={editorRef}
-            defaultText={task?.config?.display_text ?? ""}
+            defaultText={task?.config?.display_text ?? seededText}
             placeholder={t("promptPlaceholder")}
             ariaLabel={t("promptLabel")}
             referenceSearch={referenceSearch}
