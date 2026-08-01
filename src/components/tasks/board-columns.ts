@@ -35,11 +35,13 @@ export function columnForStatus(status: WorkTaskStatus): BoardColumnId {
 /**
  * Bucket tasks into the four columns, preserving list order (backend returns
  * board order: sort_order, id). Canceled tasks are dropped unless
- * `showCanceled`; done tasks sort before canceled within the Done column.
+ * `showCanceled`, archived ones unless `showArchived` (archived is always
+ * terminal); done tasks sort before canceled within the Done column.
  */
 export function groupTasksByColumn(
   tasks: WorkTask[],
-  showCanceled: boolean
+  showCanceled: boolean,
+  showArchived = false
 ): Record<BoardColumnId, WorkTask[]> {
   const grouped: Record<BoardColumnId, WorkTask[]> = {
     todo: [],
@@ -49,6 +51,7 @@ export function groupTasksByColumn(
   }
   for (const task of tasks) {
     if (task.status === "canceled" && !showCanceled) continue
+    if (task.archived_at != null && !showArchived) continue
     grouped[columnForStatus(task.status)].push(task)
   }
   grouped.done.sort((a, b) => {

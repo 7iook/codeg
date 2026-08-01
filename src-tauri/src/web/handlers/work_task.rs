@@ -84,6 +84,15 @@ pub struct MergeParams {
     #[serde(default)]
     pub strategy: Option<String>,
     pub delete_worktree: bool,
+    #[serde(default)]
+    pub auto_resolve: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveParams {
+    pub id: i32,
+    pub archived: bool,
 }
 
 #[derive(Deserialize)]
@@ -250,9 +259,20 @@ pub async fn work_task_merge(
         params.message,
         params.strategy,
         params.delete_worktree,
+        params.auto_resolve,
     )
     .await
     .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_archive(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<ArchiveParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_archive_core(&state.emitter, &state.db, params.id, params.archived)
+        .await
+        .map_err(AppCommandError::from)?;
     Ok(Json(()))
 }
 

@@ -29,6 +29,9 @@ function task(
     additions: null,
     deletions: null,
     merge_commit: null,
+    repairing: false,
+    preflight: null,
+    archived_at: null,
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-01T00:00:00Z",
     started_at: null,
@@ -77,5 +80,19 @@ describe("groupTasksByColumn", () => {
     expect(grouped.todo.map((t) => t.id)).toEqual([1, 2])
     // done first (freshest first), canceled last even though it finished later.
     expect(grouped.done.map((t) => t.id)).toEqual([5, 4, 3])
+  })
+
+  it("hides archived tasks unless the archive toggle is on", () => {
+    const tasks = [
+      task(1, "done", { archived_at: "2026-08-01T01:00:00Z" }),
+      task(2, "failed", { archived_at: "2026-08-01T01:00:00Z" }),
+      task(3, "done"),
+    ]
+    const hidden = groupTasksByColumn(tasks, false)
+    expect(hidden.done.map((t) => t.id)).toEqual([3])
+    expect(hidden.attention).toHaveLength(0)
+    const shown = groupTasksByColumn(tasks, false, true)
+    expect(shown.done.map((t) => t.id)).toEqual([1, 3])
+    expect(shown.attention.map((t) => t.id)).toEqual([2])
   })
 })

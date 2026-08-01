@@ -5,6 +5,7 @@ import { Reorder, type PanInfo } from "motion/react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import {
+  Archive,
   CirclePlay,
   Eye,
   EyeOff,
@@ -17,6 +18,7 @@ import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useTabActions } from "@/contexts/tab-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import {
+  workTaskArchive,
   workTaskCancel,
   workTaskCreate,
   workTaskReorder,
@@ -87,6 +89,7 @@ export function TasksPage() {
 
   const [folderFilter, setFolderFilter] = useState<number | null>(null)
   const [showCanceled, setShowCanceled] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
   // Drag state for the pending column (enabled only with a folder selected —
   // sort_order is per folder, so a mixed-folder列 has no persistable order).
   const [dragOrder, setDragOrder] = useState<number[] | null>(null)
@@ -127,8 +130,8 @@ export function TasksPage() {
     [tasks, folderFilter]
   )
   const columns = useMemo(
-    () => groupTasksByColumn(visibleTasks, showCanceled),
-    [visibleTasks, showCanceled]
+    () => groupTasksByColumn(visibleTasks, showCanceled, showArchived),
+    [visibleTasks, showCanceled, showArchived]
   )
   const dragEnabled = folderFilter != null
   // Optimistic order while a drag is live; server order otherwise.
@@ -291,6 +294,18 @@ export function TasksPage() {
           {t("showCanceled")}
         </Button>
 
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-7 gap-1.5 px-2 text-xs text-muted-foreground"
+          onClick={() => setShowArchived((v) => !v)}
+          aria-pressed={showArchived}
+        >
+          <Archive className="size-3.5" aria-hidden="true" />
+          {t("showArchived")}
+        </Button>
+
         <div className="flex-1" />
 
         {folderFilter != null ? (
@@ -375,6 +390,11 @@ export function TasksPage() {
                   onRequeue={() => void act(() => workTaskRequeue(task.id))}
                   onOpenConversation={() => openConversation(task)}
                   onMerge={() => openMerge(task)}
+                  onArchive={() =>
+                    void act(() =>
+                      workTaskArchive(task.id, task.archived_at == null)
+                    )
+                  }
                 />
               )
               return (

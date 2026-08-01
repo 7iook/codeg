@@ -48,6 +48,7 @@ export function TaskMergeDialog({
   const [message, setMessage] = useState("")
   const [strategy, setStrategy] = useState<"squash" | "merge">("squash")
   const [deleteWorktree, setDeleteWorktree] = useState(true)
+  const [autoResolve, setAutoResolve] = useState(true)
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
@@ -56,6 +57,7 @@ export function TaskMergeDialog({
     // the folder's task settings.
     /* eslint-disable react-hooks/set-state-in-effect */
     setMessage(task.title)
+    setAutoResolve(true)
     setSubmitting(false)
     let cancelled = false
     workTaskSettingsGet(task.folder_id)
@@ -79,7 +81,13 @@ export function TaskMergeDialog({
     if (!task || !message.trim()) return
     setSubmitting(true)
     try {
-      await workTaskMerge(task.id, message.trim(), strategy, deleteWorktree)
+      await workTaskMerge(
+        task.id,
+        message.trim(),
+        strategy,
+        deleteWorktree,
+        autoResolve
+      )
       onOpenChange(false)
     } catch (e) {
       toast.error(toErrorMessage(e))
@@ -138,6 +146,14 @@ export function TaskMergeDialog({
               onCheckedChange={(v) => setDeleteWorktree(v === true)}
             />
             {t("mergeDeleteWorktree")}
+          </Label>
+
+          <Label className="text-sm font-normal">
+            <Checkbox
+              checked={autoResolve}
+              onCheckedChange={(v) => setAutoResolve(v === true)}
+            />
+            {t("mergeAutoResolve")}
           </Label>
         </div>
 

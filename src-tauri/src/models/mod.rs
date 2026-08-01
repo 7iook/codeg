@@ -37,7 +37,7 @@ pub use quick_message::QuickMessageInfo;
 pub use remote_workspace_connection::RemoteWorkspaceConnectionInfo;
 pub use work_task::{
     WorkTaskChangedFile, WorkTaskConfig, WorkTaskDraft, WorkTaskEventInfo, WorkTaskFolderSettings,
-    WorkTaskInfo, WorkTaskMergeState, WorkTaskStatus,
+    WorkTaskInfo, WorkTaskMergeState, WorkTaskPendingMerge, WorkTaskPreflight, WorkTaskStatus,
 };
 #[cfg(feature = "tauri-runtime")]
 pub use system::SystemRenderingSettings;

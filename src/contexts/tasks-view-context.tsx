@@ -107,7 +107,10 @@ export function TasksViewProvider({ children }: { children: ReactNode }) {
   }, [refetch])
 
   const attentionCount = useMemo(
-    () => tasks.filter((t) => ATTENTION_STATUSES.has(t.status)).length,
+    () =>
+      tasks.filter(
+        (t) => ATTENTION_STATUSES.has(t.status) && t.archived_at == null
+      ).length,
     [tasks]
   )
 
@@ -138,6 +141,7 @@ function notifyFlips(
   for (const task of list) {
     if (prev.get(task.id) === task.status) continue
     if (task.status !== "review" && task.status !== "failed") continue
+    if (task.archived_at != null) continue
     const folder = useAppWorkspaceStore
       .getState()
       .folders.find((f) => f.id === task.folder_id)

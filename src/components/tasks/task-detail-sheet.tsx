@@ -7,6 +7,8 @@ import {
   Ban,
   Bot,
   CircleAlert,
+  CircleCheck,
+  CircleX,
   Coins,
   FileDiff,
   Folder,
@@ -301,6 +303,54 @@ export function TaskDetailSheet({
               {/* Acceptance panel — review only. */}
               {task.status === "review" ? (
                 <section className="flex flex-col gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-2.5">
+                  {task.preflight ? (
+                    <div className="flex flex-col gap-1.5">
+                      <div
+                        className={cn(
+                          "flex items-center gap-1.5 text-xs",
+                          task.preflight.status === "passed" &&
+                            "text-emerald-600 dark:text-emerald-400",
+                          task.preflight.status === "failed" &&
+                            "text-destructive",
+                          task.preflight.status === "running" &&
+                            "text-muted-foreground"
+                        )}
+                      >
+                        {task.preflight.status === "running" ? (
+                          <Loader2
+                            className="size-3.5 animate-spin"
+                            aria-hidden="true"
+                          />
+                        ) : task.preflight.status === "passed" ? (
+                          <CircleCheck
+                            className="size-3.5"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <CircleX className="size-3.5" aria-hidden="true" />
+                        )}
+                        <span>
+                          {task.preflight.status === "passed"
+                            ? t("preflightPassed", {
+                                name: task.preflight.command,
+                              })
+                            : task.preflight.status === "failed"
+                              ? t("preflightFailed", {
+                                  name: task.preflight.command,
+                                })
+                              : t("preflightRunning", {
+                                  name: task.preflight.command,
+                                })}
+                        </span>
+                      </div>
+                      {task.preflight.status === "failed" &&
+                      task.preflight.output_tail ? (
+                        <pre className="max-h-40 overflow-auto rounded-md border border-border bg-card/60 p-2 font-mono text-[0.625rem] leading-relaxed whitespace-pre-wrap break-words text-muted-foreground">
+                          {task.preflight.output_tail}
+                        </pre>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       type="button"
@@ -662,6 +712,7 @@ const EVENT_KIND_KEYS = {
   agent_verdict: "eventAgentVerdict",
   merge_attempt: "eventMergeAttempt",
   merge_conflict: "eventMergeConflict",
+  preflight_result: "eventPreflight",
   cleanup_failed: "eventCleanupFailed",
   resume_fallback: "eventResumeFallback",
   user_action: "eventUserAction",
@@ -728,6 +779,11 @@ function timelineDetail(event: WorkTaskEvent): string | null {
     case "merge_conflict": {
       const files = Array.isArray(p.files) ? (p.files as string[]) : []
       return files.join(", ") || null
+    }
+    case "preflight_result": {
+      const status = str("status")
+      const command = str("command")
+      return [command, status].filter(Boolean).join(" · ") || null
     }
     case "cleanup_failed":
       return str("error")

@@ -2674,14 +2674,23 @@ export async function workTaskMerge(
   id: number,
   message: string,
   strategy: "squash" | "merge" | null,
-  deleteWorktree: boolean
+  deleteWorktree: boolean,
+  autoResolve = true
 ): Promise<void> {
   return getTransport().call("work_task_merge", {
     id,
     message,
     strategy,
     deleteWorktree,
+    autoResolve,
   })
+}
+
+export async function workTaskArchive(
+  id: number,
+  archived: boolean
+): Promise<void> {
+  return getTransport().call("work_task_archive", { id, archived })
 }
 
 /** Remove the task's worktree + branch (also retries a failed cleanup). */

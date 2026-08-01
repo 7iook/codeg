@@ -28,6 +28,9 @@ use crate::models::{
     WorkTaskMergeState,
 };
 
+// `WorkTaskPendingMerge` / `WorkTaskPreflight` are referenced via `crate::models::`
+// in their fns to keep this import list stable.
+
 pub fn status_str(s: WorkTaskStatus) -> &'static str {
     match s {
         WorkTaskStatus::Todo => "todo",
@@ -65,6 +68,12 @@ fn to_info(m: work_task::Model) -> WorkTaskInfo {
         additions: m.additions,
         deletions: m.deletions,
         merge_commit: m.merge_commit,
+        repairing: m.pending_merge.is_some(),
+        preflight: m
+            .preflight
+            .as_deref()
+            .and_then(|p| serde_json::from_str(p).ok()),
+        archived_at: m.archived_at,
         latest_progress: None,
         created_at: m.created_at,
         updated_at: m.updated_at,
@@ -323,6 +332,7 @@ pub async fn attention_count(conn: &DatabaseConnection) -> Result<u64, DbError> 
             WorkTaskStatus::Review,
             WorkTaskStatus::Failed,
         ]))
+        .filter(work_task::Column::ArchivedAt.is_null())
         .inner_join(folder::Entity)
         .filter(folder::Column::DeletedAt.is_null())
         .count(conn)
@@ -393,6 +403,7 @@ pub async fn create(
         base_sha: Set(None),
         work_branch: Set(None),
         merge_state: Set(None),
+        pending_merge: Set(None),
         cleanup_state: Set(None),
         verdict: Set(None),
         result_summary: Set(None),
@@ -400,6 +411,8 @@ pub async fn create(
         additions: Set(None),
         deletions: Set(None),
         merge_commit: Set(None),
+        preflight: Set(None),
+        archived_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
         started_at: Set(None),
@@ -506,6 +519,14 @@ pub async fn claim_for_run(
         // A fresh generation invalidates the previous run's self-reported
         // verdict (result_summary stays visible until the next settle).
         .col_expr(work_task::Column::Verdict, Expr::value(None::<String>))
+        // A user-driven claim supersedes any auto-remerge intent and stale
+        // preflight light, and resurrects an archived terminal task.
+        .col_expr(work_task::Column::PendingMerge, Expr::value(None::<String>))
+        .col_expr(work_task::Column::Preflight, Expr::value(None::<String>))
+        .col_expr(
+            work_task::Column::ArchivedAt,
+            Expr::value(None::<chrono::DateTime<Utc>>),
+        )
         .col_expr(work_task::Column::FinishedAt, Expr::value(None::<chrono::DateTime<Utc>>))
         .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
         .filter(work_task::Column::Id.eq(id))
@@ -655,6 +676,11 @@ pub async fn requeue_canceled(conn: &DatabaseConnection, id: i32) -> Result<bool
         )
         .col_expr(work_task::Column::FailureReason, Expr::value(None::<String>))
         .col_expr(work_task::Column::LastError, Expr::value(None::<String>))
+        .col_expr(work_task::Column::PendingMerge, Expr::value(None::<String>))
+        .col_expr(
+            work_task::Column::ArchivedAt,
+            Expr::value(None::<chrono::DateTime<Utc>>),
+        )
         .col_expr(work_task::Column::FinishedAt, Expr::value(None::<chrono::DateTime<Utc>>))
         .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
         .filter(work_task::Column::Id.eq(id))
@@ -784,6 +810,9 @@ pub async fn fail(
         )
         .col_expr(work_task::Column::LastError, Expr::value(error.clone()))
         .col_expr(work_task::Column::ConnectionId, Expr::value(None::<String>))
+        // Any failure abandons a pending auto-remerge — the user restarts the
+        // cycle explicitly.
+        .col_expr(work_task::Column::PendingMerge, Expr::value(None::<String>))
         .col_expr(work_task::Column::SettledAt, Expr::value(Some(now)))
         .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
         .filter(work_task::Column::Id.eq(id))
@@ -888,6 +917,9 @@ pub async fn settle_review(
         .col_expr(work_task::Column::Additions, Expr::value(stats.map(|s| s.1)))
         .col_expr(work_task::Column::Deletions, Expr::value(stats.map(|s| s.2)))
         .col_expr(work_task::Column::ConnectionId, Expr::value(None::<String>))
+        // A fresh review starts with a fresh light; the preflight runner
+        // rewrites it right after when one is configured.
+        .col_expr(work_task::Column::Preflight, Expr::value(None::<String>))
         .col_expr(work_task::Column::SettledAt, Expr::value(Some(now)))
         .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
         .filter(work_task::Column::Id.eq(id))
@@ -1117,6 +1149,174 @@ pub async fn merge_back_to_review(
     Ok(true)
 }
 
+/// merging → queued for a conflict-repair cycle (P2 merge train): the stage-A
+/// merge was aborted, the agent is dispatched to resolve the conflicts, and
+/// the merge intent moves from `merge_state` (crash anchor of an in-flight
+/// merge) into `pending_merge` (auto-remerge on settle). Bumps `run_seq` like
+/// every claim; records the conflict + transition in the same transaction.
+pub async fn merge_to_repair(
+    conn: &DatabaseConnection,
+    id: i32,
+    pending: &crate::models::WorkTaskPendingMerge,
+) -> Result<Option<i32>, DbError> {
+    let pending_json = serde_json::to_string(pending)
+        .map_err(|e| DbError::Validation(format!("pending merge not serializable: {e}")))?;
+    let now = Utc::now();
+    let txn = conn.begin().await?;
+    let res = work_task::Entity::update_many()
+        .col_expr(
+            work_task::Column::Status,
+            Expr::value(status_str(WorkTaskStatus::Queued)),
+        )
+        .col_expr(
+            work_task::Column::RunSeq,
+            Expr::col(work_task::Column::RunSeq).add(1),
+        )
+        .col_expr(work_task::Column::MergeState, Expr::value(None::<String>))
+        .col_expr(
+            work_task::Column::PendingMerge,
+            Expr::value(Some(pending_json)),
+        )
+        .col_expr(work_task::Column::FailureReason, Expr::value(None::<String>))
+        .col_expr(work_task::Column::LastError, Expr::value(None::<String>))
+        .col_expr(work_task::Column::Verdict, Expr::value(None::<String>))
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
+        .filter(work_task::Column::Id.eq(id))
+        .filter(work_task::Column::Status.eq(WorkTaskStatus::Merging))
+        .filter(work_task::Column::DeletedAt.is_null())
+        .exec(&txn)
+        .await?;
+    if res.rows_affected != 1 {
+        txn.rollback().await?;
+        return Ok(None);
+    }
+    let run_seq = work_task::Entity::find_by_id(id)
+        .one(&txn)
+        .await?
+        .map(|m| m.run_seq)
+        .ok_or_else(|| DbError::NotFound(format!("work task {id}")))?;
+    record_event(
+        &txn,
+        id,
+        "merge_conflict",
+        "engine",
+        Some(serde_json::json!({ "files": pending.conflict_files })),
+    )
+    .await?;
+    status_changed_event(
+        &txn,
+        id,
+        "engine",
+        Some(WorkTaskStatus::Merging),
+        WorkTaskStatus::Queued,
+        Some(serde_json::json!({ "reason": "conflict_repair", "attempt": pending.attempts })),
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(Some(run_seq))
+}
+
+/// Consume the auto-remerge intent (right before firing the merge).
+pub async fn clear_pending_merge(conn: &DatabaseConnection, id: i32) -> Result<(), DbError> {
+    work_task::Entity::update_many()
+        .col_expr(work_task::Column::PendingMerge, Expr::value(None::<String>))
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(work_task::Column::Id.eq(id))
+        .exec(conn)
+        .await?;
+    Ok(())
+}
+
+/// Write the preflight light for the CURRENT review generation. Guarded on
+/// review + run_seq so a slow command finishing after the task moved on is a
+/// no-op. Records a `preflight_result` event for terminal statuses.
+pub async fn set_preflight(
+    conn: &DatabaseConnection,
+    id: i32,
+    run_seq: i32,
+    preflight: &crate::models::WorkTaskPreflight,
+) -> Result<bool, DbError> {
+    let json = serde_json::to_string(preflight)
+        .map_err(|e| DbError::Validation(format!("preflight not serializable: {e}")))?;
+    let now = Utc::now();
+    let txn = conn.begin().await?;
+    let res = work_task::Entity::update_many()
+        .col_expr(work_task::Column::Preflight, Expr::value(Some(json)))
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
+        .filter(work_task::Column::Id.eq(id))
+        .filter(work_task::Column::Status.eq(WorkTaskStatus::Review))
+        .filter(work_task::Column::RunSeq.eq(run_seq))
+        .filter(work_task::Column::DeletedAt.is_null())
+        .exec(&txn)
+        .await?;
+    if res.rows_affected != 1 {
+        txn.rollback().await?;
+        return Ok(false);
+    }
+    if preflight.status != "running" {
+        record_event(
+            &txn,
+            id,
+            "preflight_result",
+            "engine",
+            Some(serde_json::json!({
+                "status": preflight.status,
+                "command": preflight.command,
+                "exit_code": preflight.exit_code,
+            })),
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    Ok(true)
+}
+
+/// Archive / unarchive. Only terminal tasks (done / failed / canceled) can be
+/// archived — active ones stay on the board by construction; unarchiving is
+/// status-agnostic. Records the user action.
+pub async fn set_archived(
+    conn: &DatabaseConnection,
+    id: i32,
+    archived: bool,
+) -> Result<bool, DbError> {
+    let now = Utc::now();
+    let txn = conn.begin().await?;
+    let mut update = work_task::Entity::update_many()
+        .col_expr(
+            work_task::Column::ArchivedAt,
+            Expr::value(archived.then_some(now)),
+        )
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
+        .filter(work_task::Column::Id.eq(id))
+        .filter(work_task::Column::DeletedAt.is_null());
+    if archived {
+        update = update
+            .filter(work_task::Column::Status.is_in([
+                WorkTaskStatus::Done,
+                WorkTaskStatus::Failed,
+                WorkTaskStatus::Canceled,
+            ]))
+            .filter(work_task::Column::ArchivedAt.is_null());
+    } else {
+        update = update.filter(work_task::Column::ArchivedAt.is_not_null());
+    }
+    let res = update.exec(&txn).await?;
+    if res.rows_affected != 1 {
+        txn.rollback().await?;
+        return Ok(false);
+    }
+    record_event(
+        &txn,
+        id,
+        "user_action",
+        "user",
+        Some(serde_json::json!({ "action": if archived { "archive" } else { "unarchive" } })),
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(true)
+}
+
 /// Any non-terminal state EXCEPT merging → canceled. Returns whether the CAS
 /// won (the engine tears the connection down only when it did).
 pub async fn cancel(conn: &DatabaseConnection, id: i32) -> Result<bool, DbError> {
@@ -1128,6 +1328,9 @@ pub async fn cancel(conn: &DatabaseConnection, id: i32) -> Result<bool, DbError>
             Expr::value(status_str(WorkTaskStatus::Canceled)),
         )
         .col_expr(work_task::Column::ConnectionId, Expr::value(None::<String>))
+        // A cancel mid-repair abandons the auto-remerge; a later requeue must
+        // not re-fire a stale merge.
+        .col_expr(work_task::Column::PendingMerge, Expr::value(None::<String>))
         .col_expr(work_task::Column::FinishedAt, Expr::value(Some(now)))
         .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
         .filter(work_task::Column::Id.eq(id))
@@ -1657,5 +1860,211 @@ mod tests {
         assert!(list(&db.conn, Some(folder_id)).await.unwrap().is_empty());
         // Double delete errors cleanly.
         assert!(soft_delete(&db.conn, t.id).await.is_err());
+    }
+
+    /// Drive a task to review and return its current run_seq.
+    async fn to_review(db: &crate::db::AppDatabase, id: i32) -> i32 {
+        let seq = claim_for_run(&db.conn, id, WorkTaskStatus::Todo, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mark_running(&db.conn, id, seq, 1, "c").await.unwrap());
+        assert!(settle_review(&db.conn, id, seq, None, None).await.unwrap());
+        seq
+    }
+
+    fn pending(attempts: i32) -> crate::models::WorkTaskPendingMerge {
+        crate::models::WorkTaskPendingMerge {
+            message: "feat: t".into(),
+            strategy: "squash".into(),
+            delete_worktree: true,
+            attempts,
+            conflict_files: vec!["a.rs".into()],
+        }
+    }
+
+    #[tokio::test]
+    async fn conflict_repair_moves_the_intent_and_every_exit_clears_it() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-repair").await;
+        let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
+        let seq = to_review(&db, t.id).await;
+
+        let state = WorkTaskMergeState {
+            pre_merge_head: "abc".into(),
+            synced_base_sha: None,
+            message: "feat: t".into(),
+            strategy: "squash".into(),
+            delete_worktree: true,
+        };
+        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
+
+        // merging → queued: intent moves from merge_state to pending_merge,
+        // run_seq bumps like every claim.
+        let repair_seq = merge_to_repair(&db.conn, t.id, &pending(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repair_seq, seq + 1);
+        let row = get_model(&db.conn, t.id).await.unwrap();
+        assert_eq!(row.status, WorkTaskStatus::Queued);
+        assert!(row.merge_state.is_none());
+        assert!(row.pending_merge.is_some());
+        assert!(get(&db.conn, t.id).await.unwrap().repairing);
+        // A second repair claim loses (no longer merging).
+        assert!(merge_to_repair(&db.conn, t.id, &pending(2))
+            .await
+            .unwrap()
+            .is_none());
+        let events = list_events(&db.conn, t.id, 100).await.unwrap();
+        assert!(events.iter().any(|e| e.kind == "merge_conflict"));
+
+        // The repaired run settles into review with the intent still attached
+        // (the engine consumes it explicitly before re-firing the merge).
+        assert!(mark_running(&db.conn, t.id, repair_seq, 1, "c2").await.unwrap());
+        assert!(settle_review(&db.conn, t.id, repair_seq, None, None)
+            .await
+            .unwrap());
+        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_some());
+        clear_pending_merge(&db.conn, t.id).await.unwrap();
+        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_none());
+
+        // Every other exit clears a lingering intent: a user claim (return)…
+        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
+        assert!(merge_to_repair(&db.conn, t.id, &pending(1))
+            .await
+            .unwrap()
+            .is_some());
+        let seq = claim_for_run(&db.conn, t.id, WorkTaskStatus::Queued, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_none());
+
+        // …a failure…
+        assert!(mark_running(&db.conn, t.id, seq, 1, "c3").await.unwrap());
+        assert!(settle_review(&db.conn, t.id, seq, None, None).await.unwrap());
+        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
+        assert!(merge_to_repair(&db.conn, t.id, &pending(1))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(fail(
+            &db.conn,
+            t.id,
+            &[WorkTaskStatus::Queued],
+            None,
+            "setup_error",
+            None
+        )
+        .await
+        .unwrap());
+        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_none());
+
+        // …and a cancel.
+        let seq = claim_for_run(&db.conn, t.id, WorkTaskStatus::Failed, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mark_running(&db.conn, t.id, seq, 1, "c4").await.unwrap());
+        assert!(settle_review(&db.conn, t.id, seq, None, None).await.unwrap());
+        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
+        assert!(merge_to_repair(&db.conn, t.id, &pending(1))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(cancel(&db.conn, t.id).await.unwrap());
+        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_none());
+    }
+
+    #[tokio::test]
+    async fn preflight_is_generation_guarded_and_reset_by_claim_and_settle() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-preflight").await;
+        let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
+        let seq = to_review(&db, t.id).await;
+
+        let mut light = crate::models::WorkTaskPreflight {
+            status: "running".into(),
+            command: "tests".into(),
+            exit_code: None,
+            output_tail: None,
+        };
+        // Stale generation / wrong status writes are no-ops.
+        assert!(!set_preflight(&db.conn, t.id, seq + 1, &light).await.unwrap());
+        assert!(set_preflight(&db.conn, t.id, seq, &light).await.unwrap());
+        light.status = "failed".into();
+        light.exit_code = Some(2);
+        light.output_tail = Some("boom".into());
+        assert!(set_preflight(&db.conn, t.id, seq, &light).await.unwrap());
+        let info = get(&db.conn, t.id).await.unwrap();
+        assert_eq!(
+            info.preflight.as_ref().and_then(|p| p.get("status")).and_then(|s| s.as_str()),
+            Some("failed")
+        );
+        let events = list_events(&db.conn, t.id, 100).await.unwrap();
+        assert!(events.iter().any(|e| e.kind == "preflight_result"));
+
+        // A return claim wipes the stale light; the next settle starts clean
+        // (and a slow old-generation finish can no longer write).
+        let seq2 = claim_for_run(&db.conn, t.id, WorkTaskStatus::Review, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(get_model(&db.conn, t.id).await.unwrap().preflight.is_none());
+        assert!(mark_running(&db.conn, t.id, seq2, 1, "c2").await.unwrap());
+        assert!(settle_review(&db.conn, t.id, seq2, None, None).await.unwrap());
+        assert!(!set_preflight(&db.conn, t.id, seq, &light).await.unwrap());
+        assert!(get_model(&db.conn, t.id).await.unwrap().preflight.is_none());
+    }
+
+    #[tokio::test]
+    async fn archive_is_terminal_only_and_resurrection_unarchives() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-archive").await;
+        let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
+
+        // Active tasks cannot be archived.
+        assert!(!set_archived(&db.conn, t.id, true).await.unwrap());
+
+        // failed → archived leaves the attention badge…
+        let seq = claim_for_run(&db.conn, t.id, WorkTaskStatus::Todo, "user")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mark_running(&db.conn, t.id, seq, 1, "c").await.unwrap());
+        assert!(fail(
+            &db.conn,
+            t.id,
+            &[WorkTaskStatus::Running],
+            Some(seq),
+            "agent_error",
+            None
+        )
+        .await
+        .unwrap());
+        assert_eq!(attention_count(&db.conn).await.unwrap(), 1);
+        assert!(set_archived(&db.conn, t.id, true).await.unwrap());
+        assert!(!set_archived(&db.conn, t.id, true).await.unwrap()); // already archived
+        assert_eq!(attention_count(&db.conn).await.unwrap(), 0);
+        assert!(get(&db.conn, t.id).await.unwrap().archived_at.is_some());
+
+        // …a retry claim resurrects it out of the archive…
+        assert!(claim_for_run(&db.conn, t.id, WorkTaskStatus::Failed, "user")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(get(&db.conn, t.id).await.unwrap().archived_at.is_none());
+
+        // …and so does requeueing an archived canceled task.
+        assert!(cancel(&db.conn, t.id).await.unwrap());
+        assert!(set_archived(&db.conn, t.id, true).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id).await.unwrap());
+        let row = get(&db.conn, t.id).await.unwrap();
+        assert_eq!(row.status, WorkTaskStatus::Todo);
+        assert!(row.archived_at.is_none());
+
+        // Explicit unarchive requires an archived row.
+        assert!(!set_archived(&db.conn, t.id, false).await.unwrap());
     }
 }

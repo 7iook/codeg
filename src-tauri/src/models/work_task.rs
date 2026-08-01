@@ -31,6 +31,13 @@ pub struct WorkTaskInfo {
     pub additions: Option<i32>,
     pub deletions: Option<i32>,
     pub merge_commit: Option<String>,
+    /// A conflict-repair cycle is in flight: the agent is resolving merge
+    /// conflicts and the merge re-runs automatically when it finishes.
+    pub repairing: bool,
+    /// `WorkTaskPreflight` snapshot (acceptance red/green light), if a
+    /// preflight command ran for this review.
+    pub preflight: Option<serde_json::Value>,
+    pub archived_at: Option<DateTime<Utc>>,
     /// Latest `agent_progress` milestone (filled by `list` for live tasks only
     /// — the card's realtime progress line).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +116,10 @@ pub struct WorkTaskFolderSettings {
     /// Merge dialog's "delete worktree after merge" default.
     #[serde(default = "default_true")]
     pub delete_worktree_default: bool,
+    /// P2: `folder_command` id run in the worktree when a task settles into
+    /// review — the acceptance red/green light. `None` = no preflight.
+    #[serde(default)]
+    pub preflight_command_id: Option<i32>,
 }
 
 impl Default for WorkTaskFolderSettings {
@@ -122,6 +133,7 @@ impl Default for WorkTaskFolderSettings {
             max_concurrent: default_max_concurrent(),
             merge_strategy: default_merge_strategy(),
             delete_worktree_default: true,
+            preflight_command_id: None,
         }
     }
 }
@@ -156,6 +168,41 @@ pub struct WorkTaskMergeState {
     /// so crash recovery can honor the choice when it back-fills `done`.
     #[serde(default)]
     pub delete_worktree: bool,
+}
+
+/// The auto-remerge intent persisted in `work_task.pending_merge` while a
+/// conflict-repair cycle is in flight: a stage-A merge conflict dispatched the
+/// agent to resolve it, and when that run settles into review the merge re-runs
+/// with these parameters. `attempts` counts repair dispatches for this user
+/// merge request and caps the loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkTaskPendingMerge {
+    pub message: String,
+    /// "squash" | "merge"
+    pub strategy: String,
+    pub delete_worktree: bool,
+    /// Repair dispatches so far (including the one this intent rode on).
+    #[serde(default)]
+    pub attempts: i32,
+    /// Conflicted files from the aborted merge — replayed into the repair
+    /// prompt (also by a pump-driven relaunch that never saw the conflict).
+    #[serde(default)]
+    pub conflict_files: Vec<String>,
+}
+
+/// Outcome of the folder's preflight command for one review generation,
+/// serialized into `work_task.preflight` (and mirrored on the wire verbatim).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkTaskPreflight {
+    /// "running" | "passed" | "failed"
+    pub status: String,
+    /// Display name of the folder command that ran.
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Trailing combined output (capped) — shown when the light is red.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tail: Option<String>,
 }
 
 /// Changed file of a task worktree vs. its recorded base (`git diff --numstat`).

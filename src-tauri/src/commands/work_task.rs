@@ -199,6 +199,7 @@ pub async fn work_task_merge_core(
     message: String,
     strategy: Option<String>,
     delete_worktree: bool,
+    auto_resolve: Option<bool>,
 ) -> Result<(), DbError> {
     let engine = engine()?;
     let task = work_task_service::get_model(&db.conn, id).await?;
@@ -208,11 +209,38 @@ pub async fn work_task_merge_core(
     if message.trim().is_empty() {
         return Err(DbError::Validation("commit message is required".to_string()));
     }
+    let auto_resolve = auto_resolve.unwrap_or(true);
     tokio::spawn(async move {
-        if let Err(e) = engine.merge_task(id, message, strategy, delete_worktree).await {
+        if let Err(e) = engine
+            .merge_task(id, message, strategy, delete_worktree, auto_resolve, 0)
+            .await
+        {
             tracing::info!("[work_task] merge {id}: {e}");
         }
     });
+    Ok(())
+}
+
+/// Archive / unarchive a terminal task (pure DB; no engine needed). Archived
+/// tasks leave the default board view and the attention badge.
+pub async fn work_task_archive_core(
+    emitter: &EventEmitter,
+    db: &AppDatabase,
+    id: i32,
+    archived: bool,
+) -> Result<(), DbError> {
+    if !work_task_service::set_archived(&db.conn, id, archived).await? {
+        return Err(DbError::Validation(if archived {
+            "only finished tasks can be archived".to_string()
+        } else {
+            "task is not archived".to_string()
+        }));
+    }
+    emit_event(
+        emitter,
+        WORK_TASK_CHANGED_EVENT,
+        WorkTaskChange::Upsert { id },
+    );
     Ok(())
 }
 
@@ -421,8 +449,20 @@ pub async fn work_task_merge(
     message: String,
     strategy: Option<String>,
     delete_worktree: bool,
+    auto_resolve: Option<bool>,
 ) -> Result<(), DbError> {
-    work_task_merge_core(&db, id, message, strategy, delete_worktree).await
+    work_task_merge_core(&db, id, message, strategy, delete_worktree, auto_resolve).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_archive(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, AppDatabase>,
+    id: i32,
+    archived: bool,
+) -> Result<(), DbError> {
+    work_task_archive_core(&EventEmitter::Tauri(app), &db, id, archived).await
 }
 
 #[cfg(feature = "tauri-runtime")]

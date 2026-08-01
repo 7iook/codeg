@@ -2,13 +2,18 @@
 
 import { useTranslations } from "next-intl"
 import {
+  Archive,
+  ArchiveRestore,
   Ban,
+  CircleCheck,
+  CircleX,
   GitBranch,
   GitMerge,
   Loader2,
   MessageSquareText,
   Play,
   RotateCw,
+  Wrench,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -93,6 +98,45 @@ interface TaskCardProps {
   onRequeue: () => void
   onOpenConversation: () => void
   onMerge: () => void
+  /** Toggles by `task.archived_at` (archive ⇄ unarchive). */
+  onArchive: () => void
+}
+
+/** The acceptance red/green light for a reviewed card. */
+export function PreflightChip({ task }: { task: WorkTask }) {
+  const t = useTranslations("Tasks")
+  const light = task.preflight
+  if (!light || task.status !== "review") return null
+  const tone =
+    light.status === "passed"
+      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+      : light.status === "failed"
+        ? "bg-destructive/10 text-destructive"
+        : "bg-muted text-muted-foreground"
+  return (
+    <span
+      className={cn(
+        "inline-flex min-w-0 shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium leading-none",
+        tone
+      )}
+      title={
+        light.status === "passed"
+          ? t("preflightPassed", { name: light.command })
+          : light.status === "failed"
+            ? t("preflightFailed", { name: light.command })
+            : t("preflightRunning", { name: light.command })
+      }
+    >
+      {light.status === "running" ? (
+        <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
+      ) : light.status === "passed" ? (
+        <CircleCheck className="size-2.5" aria-hidden="true" />
+      ) : (
+        <CircleX className="size-2.5" aria-hidden="true" />
+      )}
+      <span className="truncate">{light.command}</span>
+    </span>
+  )
 }
 
 /**
@@ -110,8 +154,14 @@ export function TaskCard({
   onRequeue,
   onOpenConversation,
   onMerge,
+  onArchive,
 }: TaskCardProps) {
   const t = useTranslations("Tasks")
+  const archived = task.archived_at != null
+  const terminal =
+    task.status === "done" ||
+    task.status === "failed" ||
+    task.status === "canceled"
 
   const stat =
     task.files_changed != null && task.files_changed > 0 ? (
@@ -125,6 +175,16 @@ export function TaskCard({
     ) : null
 
   const quickAction = (() => {
+    // An archived card offers exactly one way back.
+    if (archived) {
+      return (
+        <CardAction
+          icon={ArchiveRestore}
+          label={t("actionUnarchive")}
+          onClick={onArchive}
+        />
+      )
+    }
     switch (task.status) {
       case "todo":
         return (
@@ -209,7 +269,8 @@ export function TaskCard({
       className={cn(
         "group/card flex cursor-pointer flex-col gap-1.5 rounded-lg border border-border bg-card/60 p-2.5 text-left",
         "transition-colors hover:border-ring/40 hover:bg-card",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        archived && "opacity-60"
       )}
     >
       <div className="flex items-start justify-between gap-2">
@@ -232,6 +293,13 @@ export function TaskCard({
           </span>
         ) : null}
         {stat}
+        {task.repairing ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[0.625rem] text-amber-600 dark:text-amber-400">
+            <Wrench className="size-2.5" aria-hidden="true" />
+            {t("badgeRepairing")}
+          </span>
+        ) : null}
+        <PreflightChip task={task} />
         {task.cleanup_state === "failed" ? (
           <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[0.625rem] text-amber-600 dark:text-amber-400">
             {t("badgeCleanupFailed")}
@@ -262,8 +330,17 @@ export function TaskCard({
         </p>
       ) : null}
 
-      {quickAction ? (
-        <div className="flex items-center gap-1 pt-0.5">{quickAction}</div>
+      {quickAction || (terminal && !archived) ? (
+        <div className="flex items-center gap-1 pt-0.5">
+          {quickAction}
+          {terminal && !archived ? (
+            <CardAction
+              icon={Archive}
+              label={t("actionArchive")}
+              onClick={onArchive}
+            />
+          ) : null}
+        </div>
       ) : null}
     </div>
   )

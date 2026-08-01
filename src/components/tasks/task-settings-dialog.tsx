@@ -12,7 +12,11 @@ import {
 } from "@/components/automations/agent-config-section"
 import { useAgentOptions } from "@/components/automations/use-agent-options"
 import { getAgentLabel } from "@/lib/custom-agents"
-import { workTaskSettingsGet, workTaskSettingsSet } from "@/lib/api"
+import {
+  listFolderCommands,
+  workTaskSettingsGet,
+  workTaskSettingsSet,
+} from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -34,7 +38,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import type { AgentType, WorkTaskFolderSettings } from "@/lib/types"
+import type {
+  AgentType,
+  FolderCommand,
+  WorkTaskFolderSettings,
+} from "@/lib/types"
+
+const PREFLIGHT_NONE = "__none__"
 
 interface TaskSettingsDialogProps {
   open: boolean
@@ -90,6 +100,10 @@ function TaskSettingsBody({
     "squash"
   )
   const [deleteWorktreeDefault, setDeleteWorktreeDefault] = useState(true)
+  const [preflightCommandId, setPreflightCommandId] = useState<number | null>(
+    null
+  )
+  const [folderCommands, setFolderCommands] = useState<FolderCommand[]>([])
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -108,9 +122,18 @@ function TaskSettingsBody({
         setMaxConcurrent(String(s.max_concurrent))
         setMergeStrategy(s.merge_strategy === "merge" ? "merge" : "squash")
         setDeleteWorktreeDefault(s.delete_worktree_default)
+        setPreflightCommandId(s.preflight_command_id ?? null)
       })
       .catch((e) => {
         if (!cancelled) toast.error(toErrorMessage(e))
+      })
+    // Preflight candidates: the folder's saved commands.
+    listFolderCommands(folderId)
+      .then((commands) => {
+        if (!cancelled) setFolderCommands(commands)
+      })
+      .catch(() => {
+        if (!cancelled) setFolderCommands([])
       })
     return () => {
       cancelled = true
@@ -145,6 +168,7 @@ function TaskSettingsBody({
         max_concurrent: Number.isFinite(parsed) && parsed >= 0 ? parsed : 2,
         merge_strategy: mergeStrategy,
         delete_worktree_default: deleteWorktreeDefault,
+        preflight_command_id: preflightCommandId,
       }
       await workTaskSettingsSet(folderId, settings)
       onClose()
@@ -248,6 +272,42 @@ function TaskSettingsBody({
             <SelectContent>
               <SelectItem value="squash">{t("strategySquash")}</SelectItem>
               <SelectItem value="merge">{t("strategyMerge")}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-col">
+            <Label className="text-sm">{t("settingsPreflight")}</Label>
+            <span className="text-xs text-muted-foreground">
+              {t("settingsPreflightHint")}
+            </span>
+          </div>
+          <Select
+            value={
+              preflightCommandId != null &&
+              folderCommands.some((c) => c.id === preflightCommandId)
+                ? String(preflightCommandId)
+                : PREFLIGHT_NONE
+            }
+            onValueChange={(v) =>
+              setPreflightCommandId(
+                v === PREFLIGHT_NONE ? null : Number.parseInt(v, 10)
+              )
+            }
+          >
+            <SelectTrigger size="sm" className="w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={PREFLIGHT_NONE}>
+                {t("settingsPreflightNone")}
+              </SelectItem>
+              {folderCommands.map((c) => (
+                <SelectItem key={c.id} value={String(c.id)}>
+                  {c.name}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>

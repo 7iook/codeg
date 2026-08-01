@@ -1244,6 +1244,10 @@ pub fn build_router(
             post(handlers::work_task::work_task_merge),
         )
         .route(
+            "/work_task_archive",
+            post(handlers::work_task::work_task_archive),
+        )
+        .route(
             "/work_task_cleanup",
             post(handlers::work_task::work_task_cleanup),
         )

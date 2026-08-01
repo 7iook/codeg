@@ -38,6 +38,9 @@ function task(): WorkTask {
     additions: 10,
     deletions: 3,
     merge_commit: null,
+    repairing: false,
+    preflight: null,
+    archived_at: null,
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-01T00:00:00Z",
     started_at: null,
@@ -87,9 +90,22 @@ describe("TaskMergeDialog", () => {
       ).toBeChecked()
     )
 
+    // Conflict auto-resolve is on unless unchecked.
+    expect(
+      screen.getByRole("checkbox", {
+        name: /resolve conflicts and retry the merge/,
+      })
+    ).toBeChecked()
+
     await userEvent.click(screen.getByRole("button", { name: "Merge" }))
     await waitFor(() =>
-      expect(mergeMock).toHaveBeenCalledWith(7, "Fix login", "squash", true)
+      expect(mergeMock).toHaveBeenCalledWith(
+        7,
+        "Fix login",
+        "squash",
+        true,
+        true
+      )
     )
   })
 
@@ -104,9 +120,20 @@ describe("TaskMergeDialog", () => {
         screen.getByRole("checkbox", { name: /Delete worktree after merge/ })
       ).not.toBeChecked()
     )
+    await userEvent.click(
+      screen.getByRole("checkbox", {
+        name: /resolve conflicts and retry the merge/,
+      })
+    )
     await userEvent.click(screen.getByRole("button", { name: "Merge" }))
     await waitFor(() =>
-      expect(mergeMock).toHaveBeenCalledWith(7, "Fix login", "merge", false)
+      expect(mergeMock).toHaveBeenCalledWith(
+        7,
+        "Fix login",
+        "merge",
+        false,
+        false
+      )
     )
   })
 })

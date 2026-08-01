@@ -37,13 +37,14 @@ use crate::commands::folders::{
     resolve_git_head,
 };
 use crate::db::entities::conversation::{self, ConversationStatus};
-use crate::db::entities::folder;
 use crate::db::entities::work_task::WorkTaskStatus;
+use crate::db::entities::{folder, folder_command};
 use crate::db::service::{conversation_service, tab_service, work_task_service};
 use crate::db::AppDatabase;
 use crate::logging::throttle::{LagLogThrottle, LAG_LOG_WINDOW};
 use crate::models::{
-    AgentType, WorkTaskConfig, WorkTaskFolderSettings, WorkTaskMergeState,
+    AgentType, WorkTaskConfig, WorkTaskFolderSettings, WorkTaskMergeState, WorkTaskPendingMerge,
+    WorkTaskPreflight,
 };
 use crate::web::event_bridge::{
     emit_event, EventEmitter, WorkTaskChange, WORK_TASK_CHANGED_EVENT,
@@ -52,6 +53,13 @@ use crate::work_task::git as task_git;
 
 /// Reconcile sweep cadence.
 const RECONCILE_INTERVAL_SECS: u64 = 30;
+
+/// Agent dispatches per user merge request before a conflict parks the task in
+/// review with the conflict marker (P2 merge train).
+const MAX_CONFLICT_REPAIRS: i32 = 2;
+
+/// Cap on the preflight output tail persisted with a red light.
+const PREFLIGHT_TAIL_CHARS: usize = 4000;
 
 static ENGINE: OnceLock<Arc<TaskEngine>> = OnceLock::new();
 
@@ -243,6 +251,12 @@ enum LaunchMode {
     Retry,
     /// Returned from review with feedback.
     Return(String),
+    /// Conflict-repair cycle: a stage-A merge conflict dispatched the agent to
+    /// resolve it in the worktree; the merge re-fires when the run settles.
+    Repair {
+        base_branch: String,
+        files: Vec<String>,
+    },
 }
 
 impl TaskEngine {
@@ -568,15 +582,17 @@ impl TaskEngine {
         // Resume the previous session for retry/return when we have one.
         let resume_session_id = match mode {
             LaunchMode::Fresh => None,
-            LaunchMode::Retry | LaunchMode::Return(_) => match task.conversation_id {
-                Some(conv_id) => conversation::Entity::find_by_id(conv_id)
-                    .one(&self.db.conn)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|c| c.external_id),
-                None => None,
-            },
+            LaunchMode::Retry | LaunchMode::Return(_) | LaunchMode::Repair { .. } => {
+                match task.conversation_id {
+                    Some(conv_id) => conversation::Entity::find_by_id(conv_id)
+                        .one(&self.db.conn)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|c| c.external_id),
+                    None => None,
+                }
+            }
         };
 
         let runtime_env =
@@ -882,7 +898,7 @@ impl TaskEngine {
                         None
                     };
                     let stats = self.snapshot_diff_stats(task_id).await;
-                    work_task_service::settle_review(
+                    let settled = work_task_service::settle_review(
                         &self.db.conn,
                         task_id,
                         run_seq,
@@ -890,7 +906,21 @@ impl TaskEngine {
                         stats,
                     )
                     .await
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                    if settled {
+                        // A settled conflict-repair run re-fires its merge; a
+                        // plain settle runs the folder's preflight light.
+                        let pending = task.as_ref().and_then(|t| {
+                            t.pending_merge
+                                .as_deref()
+                                .and_then(|s| serde_json::from_str::<WorkTaskPendingMerge>(s).ok())
+                        });
+                        match pending {
+                            Some(pending) => self.spawn_auto_remerge(task_id, pending),
+                            None => self.spawn_preflight(task_id, run_seq),
+                        }
+                    }
+                    settled
                 }
             }
             "cancelled" => {
@@ -1007,6 +1037,80 @@ impl TaskEngine {
         }
     }
 
+    // ── preflight (acceptance red/green light) ──────────────────────────────
+
+    /// Run the folder's configured preflight command against the task worktree
+    /// after a settle into review. Fire-and-forget: the result is written CAS
+    /// (review + run_seq), so a task that moved on ignores a slow finish.
+    fn spawn_preflight(self: &Arc<Self>, task_id: i32, run_seq: i32) {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            engine.run_preflight(task_id, run_seq).await;
+        });
+    }
+
+    async fn run_preflight(&self, task_id: i32, run_seq: i32) {
+        let Ok(task) = work_task_service::get_model(&self.db.conn, task_id).await else {
+            return;
+        };
+        let settings = work_task_service::settings_get(&self.db.conn, task.folder_id)
+            .await
+            .unwrap_or_default();
+        let Some(command_id) = settings.preflight_command_id else {
+            return;
+        };
+        // The command must still exist and belong to this project folder.
+        let Ok(Some(command)) = folder_command::Entity::find_by_id(command_id)
+            .one(&self.db.conn)
+            .await
+        else {
+            return;
+        };
+        if command.folder_id != task.folder_id {
+            return;
+        }
+        let Some(wt_id) = task.worktree_folder_id else {
+            return;
+        };
+        let Ok(wt) = get_folder_core(&self.db, wt_id).await else {
+            return;
+        };
+        if !Path::new(&wt.path).exists() {
+            return;
+        }
+
+        let mut light = WorkTaskPreflight {
+            status: "running".to_string(),
+            command: command.name.clone(),
+            exit_code: None,
+            output_tail: None,
+        };
+        match work_task_service::set_preflight(&self.db.conn, task_id, run_seq, &light).await {
+            Ok(true) => self.emit_upsert(task_id),
+            _ => return, // task already moved on
+        }
+
+        match run_shell_capture(&command.command, &wt.path).await {
+            Ok((code, tail)) => {
+                let passed = code == Some(0);
+                light.status = if passed { "passed" } else { "failed" }.to_string();
+                light.exit_code = code;
+                // The tail only matters when the light is red.
+                light.output_tail = (!passed && !tail.is_empty()).then_some(tail);
+            }
+            Err(e) => {
+                light.status = "failed".to_string();
+                light.output_tail = Some(format!("could not run the command: {e}"));
+            }
+        }
+        if work_task_service::set_preflight(&self.db.conn, task_id, run_seq, &light)
+            .await
+            .unwrap_or(false)
+        {
+            self.emit_upsert(task_id);
+        }
+    }
+
     /// Best-effort diff-stat snapshot of the task worktree vs its base.
     async fn snapshot_diff_stats(&self, task_id: i32) -> Option<(i32, i32, i32)> {
         let task = work_task_service::get_model(&self.db.conn, task_id).await.ok()?;
@@ -1038,6 +1142,8 @@ impl TaskEngine {
         message: String,
         strategy: Option<String>,
         delete_worktree: bool,
+        auto_resolve: bool,
+        repair_attempts: i32,
     ) -> Result<(), String> {
         let task = work_task_service::get_model(&self.db.conn, task_id)
             .await
@@ -1063,21 +1169,29 @@ impl TaskEngine {
         self.merging.lock().await.insert(task_id);
         let result = self
             .merge_locked(
-                &task, &root, &wt, &base_branch, &work_branch, &message, &strategy,
+                &task,
+                &root,
+                &wt,
+                &base_branch,
+                &work_branch,
+                &message,
+                &strategy,
                 delete_worktree,
+                auto_resolve,
+                repair_attempts,
             )
             .await;
         self.merging.lock().await.remove(&task_id);
         self.emit_upsert(task_id);
-        // Merging left the active count either way (done, or back to review) —
-        // refill the slot.
+        // Merging left the active count either way (done, back to review, or a
+        // repair run now owning the slot) — refill.
         self.pump_folder(task.folder_id).await;
         result
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn merge_locked(
-        &self,
+        self: &Arc<Self>,
         task: &crate::db::entities::work_task::Model,
         root: &crate::models::FolderDetail,
         wt: &crate::models::FolderDetail,
@@ -1086,6 +1200,8 @@ impl TaskEngine {
         message: &str,
         strategy: &str,
         delete_worktree: bool,
+        auto_resolve: bool,
+        repair_attempts: i32,
     ) -> Result<(), String> {
         let task_id = task.id;
 
@@ -1121,6 +1237,25 @@ impl TaskEngine {
             match task_git::merge_base_into_worktree(&wt.path, base_branch).await {
                 Ok(task_git::MergeAttempt::Ok) => {}
                 Ok(task_git::MergeAttempt::Conflict(files)) => {
+                    // Merge train: dispatch the agent to resolve the conflicts
+                    // (they live in the worktree by construction) and re-fire
+                    // this merge when it settles — until the repair budget is
+                    // spent, then park in review with the conflict marker.
+                    if auto_resolve
+                        && repair_attempts < MAX_CONFLICT_REPAIRS
+                        && self
+                            .dispatch_conflict_repair(
+                                task,
+                                message,
+                                strategy,
+                                delete_worktree,
+                                repair_attempts,
+                                files.clone(),
+                            )
+                            .await
+                    {
+                        return Ok(());
+                    }
                     self.back_to_review(
                         task_id,
                         format!(
@@ -1264,6 +1399,70 @@ impl TaskEngine {
         )
         .await;
         self.emit_upsert(task_id);
+    }
+
+    /// Turn an aborted stage-A conflict into a repair run: merging → queued
+    /// with the auto-remerge intent persisted, then launch the agent with the
+    /// conflict context. Returns false when the CAS lost (caller falls back to
+    /// parking in review).
+    async fn dispatch_conflict_repair(
+        self: &Arc<Self>,
+        task: &crate::db::entities::work_task::Model,
+        message: &str,
+        strategy: &str,
+        delete_worktree: bool,
+        repair_attempts: i32,
+        files: Vec<String>,
+    ) -> bool {
+        let pending = WorkTaskPendingMerge {
+            message: message.to_string(),
+            strategy: strategy.to_string(),
+            delete_worktree,
+            attempts: repair_attempts + 1,
+            conflict_files: files.clone(),
+        };
+        match work_task_service::merge_to_repair(&self.db.conn, task.id, &pending).await {
+            Ok(Some(_)) => {
+                self.emit_upsert(task.id);
+                self.spawn_launch(
+                    task.id,
+                    task.folder_id,
+                    LaunchMode::Repair {
+                        base_branch: task.base_branch.clone().unwrap_or_default(),
+                        files,
+                    },
+                );
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!("[work_task] repair dispatch {}: {e}", task.id);
+                false
+            }
+        }
+    }
+
+    /// Consume a settled repair run's auto-remerge intent: clear it and re-fire
+    /// the merge with the persisted parameters (attempt count included, so the
+    /// budget carries across cycles).
+    fn spawn_auto_remerge(self: &Arc<Self>, task_id: i32, pending: WorkTaskPendingMerge) {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let _ = work_task_service::clear_pending_merge(&engine.db.conn, task_id).await;
+            if let Err(e) = engine
+                .merge_task(
+                    task_id,
+                    pending.message,
+                    Some(pending.strategy),
+                    pending.delete_worktree,
+                    true,
+                    pending.attempts,
+                )
+                .await
+            {
+                tracing::info!("[work_task] auto remerge {task_id}: {e}");
+            }
+        });
     }
 
     /// Resolve (project folder, worktree folder, base branch, work branch) or
@@ -1700,6 +1899,20 @@ struct WorktreeRef {
 /// task with a prior conversation continues (retry semantics); a pristine one
 /// starts fresh. Explicit returns launch directly with `LaunchMode::Return`.
 fn launch_mode_for(task: &crate::db::entities::work_task::Model) -> LaunchMode {
+    // A pending auto-remerge intent marks a conflict-repair run — matched here
+    // (not just at the dispatch site) so even a pump-driven relaunch that never
+    // saw the conflict composes the repair prompt, whichever racer wins the
+    // queued→running CAS.
+    if let Some(pending) = task
+        .pending_merge
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<WorkTaskPendingMerge>(s).ok())
+    {
+        return LaunchMode::Repair {
+            base_branch: task.base_branch.clone().unwrap_or_default(),
+            files: pending.conflict_files,
+        };
+    }
     if task.conversation_id.is_some() {
         LaunchMode::Retry
     } else {
@@ -1805,6 +2018,39 @@ async fn compose_prompt(
                 ),
             });
         }
+        LaunchMode::Repair { base_branch, files } => {
+            if !resumed {
+                blocks.push(PromptInputBlock::Text {
+                    text: "You are picking up a task whose previous session could not be \
+                           resumed. The worktree already contains that session's work. \
+                           The original task was:"
+                        .to_string(),
+                });
+                blocks.extend(original);
+            }
+            let file_list = if files.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\nConflicted files:\n{}",
+                    files
+                        .iter()
+                        .map(|f| format!("- {f}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+            blocks.push(PromptInputBlock::Text {
+                text: format!(
+                    "Landing this task hit merge conflicts with the base branch \
+                     `{base_branch}`. In this worktree, run `git merge {base_branch}`, \
+                     resolve every conflict so both the base's changes and this task's \
+                     intent survive, and complete the merge commit. Do not rebase, and do \
+                     not touch the base branch itself. The merge into the base is retried \
+                     automatically when you finish this turn.{file_list}"
+                ),
+            });
+        }
     }
 
     blocks.push(PromptInputBlock::Text {
@@ -1853,6 +2099,41 @@ async fn still_queued(conn: &sea_orm::DatabaseConnection, task_id: i32, run_seq:
         work_task_service::get_model(conn, task_id).await,
         Ok(t) if t.status == WorkTaskStatus::Queued && t.run_seq == run_seq
     )
+}
+
+/// Run one shell command line in `cwd`, capturing combined output. stdin is
+/// null (a command waiting on input sees EOF); no timeout by design — the
+/// result write is generation-guarded, so a runaway command can only waste its
+/// own process. Returns (exit code, trailing output capped to
+/// `PREFLIGHT_TAIL_CHARS`).
+async fn run_shell_capture(line: &str, cwd: &str) -> Result<(Option<i32>, String), String> {
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut c = crate::process::tokio_command("/bin/sh");
+        c.arg("-c").arg(line);
+        c
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut c = crate::process::tokio_command(comspec);
+        c.arg("/C").arg(line);
+        c
+    };
+    command.current_dir(cwd);
+    let out = command.output().await.map_err(|e| e.to_string())?;
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok((out.status.code(), tail_chars(&combined, PREFLIGHT_TAIL_CHARS)))
+}
+
+fn tail_chars(s: &str, n: usize) -> String {
+    let trimmed = s.trim_end();
+    let count = trimmed.chars().count();
+    if count <= n {
+        return trimmed.to_string();
+    }
+    trimmed.chars().skip(count - n).collect()
 }
 
 fn parse_agent_type(s: &str) -> Result<AgentType, String> {

@@ -74,6 +74,12 @@ pub struct Model {
     /// against it.
     #[sea_orm(column_type = "Text")]
     pub merge_state: Option<String>,
+    /// JSON `WorkTaskPendingMerge` — the auto-remerge intent carried across a
+    /// conflict-repair cycle (P2). Set when a stage-A conflict dispatches the
+    /// agent, consumed when the repaired run settles into review; cleared by
+    /// every user-driven claim / cancel / failure.
+    #[sea_orm(column_type = "Text")]
+    pub pending_merge: Option<String>,
     /// NULL = nothing pending; 'failed' = worktree cleanup failed (retryable).
     pub cleanup_state: Option<String>,
     /// success | needs_review | blocked (P1, agent self-report via MCP).
@@ -83,6 +89,13 @@ pub struct Model {
     pub additions: Option<i32>,
     pub deletions: Option<i32>,
     pub merge_commit: Option<String>,
+    /// JSON `WorkTaskPreflight` — result of the folder's preflight command run
+    /// when this generation settled into review (P2 acceptance light).
+    #[sea_orm(column_type = "Text")]
+    pub preflight: Option<String>,
+    /// Archived (hidden from the default board view); terminal statuses only.
+    /// Cleared by any resurrection (retry / requeue / return).
+    pub archived_at: Option<DateTimeUtc>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub started_at: Option<DateTimeUtc>,
