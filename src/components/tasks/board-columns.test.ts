@@ -30,7 +30,6 @@ function task(
     additions: null,
     deletions: null,
     merge_commit: null,
-    repairing: false,
     preflight: null,
     archived_at: null,
     created_at: "2026-08-01T00:00:00Z",
@@ -47,12 +46,13 @@ describe("columnForStatus", () => {
     // 待办 = todo + queued
     expect(columnForStatus("todo")).toBe("todo")
     expect(columnForStatus("queued")).toBe("todo")
-    // 进行中 = running + merging
+    // 进行中 = running
     expect(columnForStatus("running")).toBe("inProgress")
-    expect(columnForStatus("merging")).toBe("inProgress")
-    // 等你处理 = awaiting_input + review + failed
+    // 等你处理 = awaiting_input + review + merging + failed — a merge is an
+    // agent turn but the card stays in the review column until it lands.
     expect(columnForStatus("awaiting_input")).toBe("attention")
     expect(columnForStatus("review")).toBe("attention")
+    expect(columnForStatus("merging")).toBe("attention")
     expect(columnForStatus("failed")).toBe("attention")
     // 已完成 = done (+ canceled behind the toggle)
     expect(columnForStatus("done")).toBe("done")

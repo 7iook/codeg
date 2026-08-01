@@ -20,10 +20,13 @@ export function columnForStatus(status: WorkTaskStatus): BoardColumnId {
     case "queued":
       return "todo"
     case "running":
-    case "merging":
       return "inProgress"
     case "awaiting_input":
     case "review":
+    // A merge is an agent turn, but the card must not bounce across the
+    // board when the user clicks merge — it stays in the review column and
+    // moves straight to Done when the merge lands.
+    case "merging":
     case "failed":
       return "attention"
     case "done":

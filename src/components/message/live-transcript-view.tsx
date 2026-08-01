@@ -24,7 +24,10 @@
 
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react"
 
-import { MessageListView } from "@/components/message/message-list-view"
+import {
+  MessageListView,
+  type ResolvedMessageGroup,
+} from "@/components/message/message-list-view"
 import { useConversationDetail } from "@/hooks/use-conversation-detail"
 import { useConversationRuntimeActions } from "@/stores/conversation-runtime-store"
 import {
@@ -208,6 +211,8 @@ interface LiveTranscriptViewProps {
    * still lags the live stream (agent CLIs write their JSONL asynchronously).
    */
   kickoffText?: string | null
+  /** Pure per-user-turn phase label (see `MessageListView.userTurnHeader`). */
+  userTurnHeader?: ((group: ResolvedMessageGroup) => string | null) | null
 }
 
 export function LiveTranscriptView({
@@ -215,6 +220,7 @@ export function LiveTranscriptView({
   connectionId,
   agentType,
   kickoffText,
+  userTurnHeader = null,
 }: LiveTranscriptViewProps) {
   const conn = useConnectionStateById(connectionId)
   const connStatus = conn?.status ?? null
@@ -336,6 +342,7 @@ export function LiveTranscriptView({
           acpLoadError={acpLoadError}
           hideEmptyState={false}
           showMessageNav={false}
+          userTurnHeader={userTurnHeader}
         />
       </div>
     </div>

@@ -16,11 +16,12 @@
  * gone; we skip the attach and the viewer renders the persisted transcript.
  */
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useTranslations } from "next-intl"
 
 import { AgentIcon } from "@/components/agent-icon"
 import { LiveTranscriptView } from "@/components/message/live-transcript-view"
+import { type ResolvedMessageGroup } from "@/components/message/message-list-view"
 import { StatusChip } from "./task-card"
 import {
   Dialog,
@@ -29,6 +30,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useAcpActions } from "@/contexts/acp-connections-context"
+import { workTaskEvents } from "@/lib/api"
+import {
+  extractRounds,
+  firstTextOfParts,
+  matchRoundKind,
+  type TaskRound,
+} from "@/lib/task-rounds"
 import { type AgentType, type WorkTask } from "@/lib/types"
 
 interface TaskTranscriptDialogProps {
@@ -39,9 +47,14 @@ interface TaskTranscriptDialogProps {
   agentType: AgentType | null
 }
 
-/** Statuses in which the engine holds a live connection worth attaching. */
+/** Statuses in which the engine holds a live connection worth attaching
+ *  (`merging` included — the merge is an agent turn too). */
 function isLive(task: WorkTask): boolean {
-  return task.status === "running" || task.status === "awaiting_input"
+  return (
+    task.status === "running" ||
+    task.status === "awaiting_input" ||
+    task.status === "merging"
+  )
 }
 
 export function TaskTranscriptDialog({
@@ -77,7 +90,42 @@ function TaskTranscriptBody({
   task: WorkTask
   agentType: AgentType | null
 }) {
+  const t = useTranslations("Tasks")
   const { attachDelegationChild, detachDelegationChild } = useAcpActions()
+
+  // Round markers → phase dividers above the matching user turns. Refetched
+  // when a new generation dispatches (run_seq moves) so a merge started while
+  // watching gets its divider too.
+  const [rounds, setRounds] = useState<TaskRound[]>([])
+  const runSeq = task.run_seq
+  useEffect(() => {
+    let cancelled = false
+    workTaskEvents(task.id, 500)
+      .then((events) => {
+        if (!cancelled) setRounds(extractRounds(events))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [task.id, runSeq])
+  const userTurnHeader = useCallback(
+    (group: ResolvedMessageGroup) => {
+      switch (matchRoundKind(rounds, firstTextOfParts(group.parts))) {
+        case "work":
+          return t("phaseWork")
+        case "retry":
+          return t("phaseRetry")
+        case "return":
+          return t("phaseReturn")
+        case "merge":
+          return t("phaseMerge")
+        default:
+          return null
+      }
+    },
+    [rounds, t]
+  )
 
   // Latched at mount: attach only when the task is live *now*, and keep the
   // attach until the dialog closes. Re-deriving per render would detach the
@@ -125,6 +173,7 @@ function TaskTranscriptBody({
         connectionId={attachId}
         agentType={agentType}
         kickoffText={task.config?.display_text ?? null}
+        userTurnHeader={userTurnHeader}
       />
     </div>
   )

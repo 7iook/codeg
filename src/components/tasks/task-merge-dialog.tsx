@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
-import { workTaskMerge, workTaskSettingsGet } from "@/lib/api"
+import { workTaskMerge, workTaskSettingsEffective } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -16,13 +16,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import type { WorkTask } from "@/lib/types"
 
@@ -33,11 +26,12 @@ interface TaskMergeDialogProps {
 }
 
 /**
- * Quick-merge a reviewed task: commit message (prefilled from the title),
- * strategy (folder default), and the delete-worktree checkbox (checked by
- * default per the folder settings). Submit fires the async two-stage merge;
- * the outcome rides `task://changed` (merging → done, or back to review with a
- * readable error on the card).
+ * Accept a reviewed task. The merge itself is performed by the agent in the
+ * task's session (conflicts resolved in the same turn), so the form is down to
+ * two choices: let the agent write the commit message (default) or provide one,
+ * and whether to delete the worktree after landing. Submit awaits only the
+ * dispatch; the outcome rides `task://changed` (merging → done, or back to
+ * review with a readable error on the card).
  */
 export function TaskMergeDialog({
   open,
@@ -45,30 +39,27 @@ export function TaskMergeDialog({
   task,
 }: TaskMergeDialogProps) {
   const t = useTranslations("Tasks")
+  const [autoMessage, setAutoMessage] = useState(true)
   const [message, setMessage] = useState("")
-  const [strategy, setStrategy] = useState<"squash" | "merge">("squash")
   const [deleteWorktree, setDeleteWorktree] = useState(true)
-  const [autoResolve, setAutoResolve] = useState(true)
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
     if (!open || !task) return
-    // Seed per open: message from the title, strategy + delete-worktree from
-    // the folder's task settings.
+    // Seed per open: message from the title, delete-worktree from the folder's
+    // effective task settings.
     /* eslint-disable react-hooks/set-state-in-effect */
+    setAutoMessage(true)
     setMessage(task.title)
-    setAutoResolve(true)
     setSubmitting(false)
     let cancelled = false
-    workTaskSettingsGet(task.folder_id)
+    workTaskSettingsEffective(task.folder_id)
       .then((s) => {
         if (cancelled) return
-        setStrategy(s.merge_strategy === "merge" ? "merge" : "squash")
         setDeleteWorktree(s.delete_worktree_default)
       })
       .catch(() => {
         if (cancelled) return
-        setStrategy("squash")
         setDeleteWorktree(true)
       })
     return () => {
@@ -78,15 +69,13 @@ export function TaskMergeDialog({
   }, [open, task])
 
   const submit = async () => {
-    if (!task || !message.trim()) return
+    if (!task || (!autoMessage && !message.trim())) return
     setSubmitting(true)
     try {
       await workTaskMerge(
         task.id,
-        message.trim(),
-        strategy,
-        deleteWorktree,
-        autoResolve
+        autoMessage ? null : message.trim(),
+        deleteWorktree
       )
       onOpenChange(false)
     } catch (e) {
@@ -111,34 +100,26 @@ export function TaskMergeDialog({
         </DialogHeader>
 
         <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="task-merge-message">{t("mergeMessage")}</Label>
-            <Textarea
-              id="task-merge-message"
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder={t("mergeMessagePlaceholder")}
-              rows={3}
+          <Label className="text-sm font-normal">
+            <Checkbox
+              checked={autoMessage}
+              onCheckedChange={(v) => setAutoMessage(v === true)}
             />
-          </div>
+            {t("mergeAutoMessage")}
+          </Label>
 
-          <div className="flex items-center justify-between gap-3">
-            <Label className="text-sm">{t("mergeStrategy")}</Label>
-            <Select
-              value={strategy}
-              onValueChange={(v) =>
-                setStrategy(v === "merge" ? "merge" : "squash")
-              }
-            >
-              <SelectTrigger size="sm" className="w-40">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="squash">{t("strategySquash")}</SelectItem>
-                <SelectItem value="merge">{t("strategyMerge")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          {autoMessage ? null : (
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="task-merge-message">{t("mergeMessage")}</Label>
+              <Textarea
+                id="task-merge-message"
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                placeholder={t("mergeMessagePlaceholder")}
+                rows={3}
+              />
+            </div>
+          )}
 
           <Label className="text-sm font-normal">
             <Checkbox
@@ -146,14 +127,6 @@ export function TaskMergeDialog({
               onCheckedChange={(v) => setDeleteWorktree(v === true)}
             />
             {t("mergeDeleteWorktree")}
-          </Label>
-
-          <Label className="text-sm font-normal">
-            <Checkbox
-              checked={autoResolve}
-              onCheckedChange={(v) => setAutoResolve(v === true)}
-            />
-            {t("mergeAutoResolve")}
           </Label>
         </div>
 
@@ -169,7 +142,7 @@ export function TaskMergeDialog({
           <Button
             type="button"
             onClick={submit}
-            disabled={submitting || !message.trim()}
+            disabled={submitting || (!autoMessage && !message.trim())}
           >
             {t("mergeSubmit")}
           </Button>

@@ -2,19 +2,21 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
-import {
-  BookmarkPlus,
-  ChevronRight,
-  Folder,
-  LayoutTemplate,
-  Trash2,
-} from "lucide-react"
+import { BookmarkPlus, Folder, LayoutTemplate, Trash2 } from "lucide-react"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { AgentSelector } from "@/components/chat/agent-selector"
 import {
   RichComposer,
   type RichComposerHandle,
 } from "@/components/chat/composer/rich-composer"
+import {
+  isComposerChromeClick,
+  restampSkillPrefixes,
+} from "@/components/chat/composer/composer-commands"
+import {
+  ComposerInvocationsPopup,
+  useComposerInvocations,
+} from "@/components/automations/composer-invocations"
 import {
   useReferenceSearch,
   type ReferenceGroupLabels,
@@ -36,11 +38,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
-import {
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -54,11 +51,11 @@ import {
 } from "@/components/ui/select"
 import { useScrollbarSafeDismiss } from "@/hooks/use-scrollbar-safe-dismiss"
 import {
+  workTaskSettingsEffective,
   workTaskTemplateDelete,
   workTaskTemplateList,
   workTaskTemplateSave,
 } from "@/lib/api"
-import { cn } from "@/lib/utils"
 import type {
   AgentType,
   PromptInputBlock,
@@ -81,11 +78,12 @@ interface TaskEditorDialogProps {
 }
 
 /**
- * Create/edit a task: title + the real conversation composer (rich text +
- * @-mentions) + folder select, with an "advanced" collapse carrying the
- * per-task agent override (AgentSelector + ACP-probed mode/model options —
- * same surface as the sub-agent settings). No override = inherit the folder's
- * task defaults at launch.
+ * Create/edit a task, laid out like the automation editor: borderless title,
+ * the agent pill above the real conversation composer (rich text +
+ * @-mentions) with the ACP-probed mode/model bar inside the box, and a Target
+ * section for the folder. The agent controls prefill from the folder's
+ * EFFECTIVE task settings; untouched they keep inheriting (nothing is frozen
+ * into the task), and only an explicit change is saved as a per-task override.
  */
 export function TaskEditorDialog({
   open,
@@ -145,9 +143,10 @@ function TaskEditorBody({
   const [folderId, setFolderId] = useState<number | null>(
     task?.folder_id ?? defaultFolderId ?? projectFolders[0]?.id ?? null
   )
-  const [overrideAgent, setOverrideAgent] = useState(
-    task?.config?.agent_type != null
-  )
+  // `agentDirty` = the user explicitly chose agent/mode/config for THIS task.
+  // While clean, the controls display the folder's effective task settings and
+  // the draft keeps inheriting (agent_type null) — nothing is frozen.
+  const [agentDirty, setAgentDirty] = useState(task?.config?.agent_type != null)
   const [agentType, setAgentType] = useState<AgentType>(
     task?.config?.agent_type ?? "claude_code"
   )
@@ -186,6 +185,32 @@ function TaskEditorBody({
     }
   }, [])
 
+  const folderDefaultAgent = useMemo(
+    () => folders.find((f) => f.id === folderId)?.default_agent_type ?? null,
+    [folders, folderId]
+  )
+
+  // Prefill the agent controls from the folder's effective settings while the
+  // user hasn't touched them; follows folder switches and template resets
+  // (the effect re-runs when `agentDirty` flips back to false).
+  useEffect(() => {
+    if (agentDirty || folderId == null) return
+    let cancelled = false
+    workTaskSettingsEffective(folderId)
+      .then((s) => {
+        if (cancelled) return
+        setAgentType(
+          s.default_agent_type ?? folderDefaultAgent ?? "claude_code"
+        )
+        setModeId(s.mode_id ?? null)
+        setConfigValues(s.config_values ?? {})
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [agentDirty, folderId, folderDefaultAgent])
+
   const folderPath = useMemo(
     () => folders.find((f) => f.id === folderId)?.path ?? null,
     [folders, folderId]
@@ -217,18 +242,33 @@ function TaskEditorBody({
     labels: referenceGroupLabels,
   })
 
-  // Probe only while the override is on — no transient agent session otherwise.
-  const agentOptions = useAgentOptions(agentType, folderPath, overrideAgent)
+  const agentOptions = useAgentOptions(agentType, folderPath, true)
 
-  // The captured composer + agent-override state as a `WorkTaskConfig` — the
-  // shared payload of both the task draft and a saved template.
+  // `/` slash commands (from the agent-options probe already running above)
+  // + Codex-only `$` skills, same behavior as the conversation composer.
+  const invocations = useComposerInvocations({
+    editorRef,
+    agentType,
+    folderPath,
+    availableCommands: agentOptions.snapshot?.available_commands ?? [],
+  })
+
+  // Keep inserted skill badges' trigger prefix in sync when the agent flips
+  // (`$` is Codex's trigger; every other agent advertises skills as `/`).
+  useEffect(() => {
+    const editor = editorRef.current?.getEditor()
+    if (editor) restampSkillPrefixes(editor, agentType === "codex" ? "$" : "/")
+  }, [agentType])
+
+  // The captured composer + agent state as a `WorkTaskConfig` — the shared
+  // payload of both the task draft and a saved template.
   const buildConfig = async (): Promise<WorkTaskConfig> => {
     const editor = editorRef.current?.getEditor()
     const displayText = (editorRef.current?.getText() ?? prompt).trim()
     const blocks: PromptInputBlock[] = editor
       ? docToPromptBlocks(editor)
       : [{ type: "text", text: displayText }]
-    if (!overrideAgent) {
+    if (!agentDirty) {
       return {
         prompt_blocks: blocks,
         display_text: displayText,
@@ -285,12 +325,13 @@ function TaskEditorBody({
     setPrompt(text)
     setComposerSeed((s) => ({ key: s.key + 1, text }))
     if (cfg?.agent_type != null) {
-      setOverrideAgent(true)
+      setAgentDirty(true)
       setAgentType(cfg.agent_type)
       setModeId(cfg.mode_id ?? null)
       setConfigValues(cfg.config_values ?? {})
     } else {
-      setOverrideAgent(false)
+      // Back to inheriting — the prefill effect reseeds from settings.
+      setAgentDirty(false)
     }
     setTemplatesOpen(false)
   }
@@ -343,7 +384,47 @@ function TaskEditorBody({
           className="w-full bg-transparent text-lg font-semibold tracking-tight outline-none placeholder:font-normal placeholder:text-muted-foreground/50"
         />
 
-        <div className="rounded-xl border border-input bg-background transition-colors focus-within:border-ring focus-within:ring-[3px] focus-within:ring-inset focus-within:ring-ring/50">
+        {/* Agent pill above the composer, as in the automation editor. While
+            untouched it mirrors the folder's effective task settings. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <AgentSelector
+            defaultAgentType={agentType}
+            onSelect={(a) => {
+              setAgentDirty(true)
+              setAgentType(a)
+              setModeId(null)
+              setConfigValues({})
+            }}
+            // A system substitution (agent unavailable) must not count as a
+            // user override choice.
+            onFallback={setAgentType}
+          />
+          {agentDirty ? (
+            <button
+              type="button"
+              onClick={() => setAgentDirty(false)}
+              className="text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+            >
+              {t("agentOverrideReset")}
+            </button>
+          ) : (
+            <span className="text-xs text-muted-foreground">
+              {t("agentInheritedHint")}
+            </span>
+          )}
+        </div>
+
+        {/* The real conversation composer with the inline config bottom bar,
+            matching the automation editor's box. */}
+        <div
+          onMouseDown={(e) => {
+            if (!isComposerChromeClick(e.target)) return
+            e.preventDefault()
+            editorRef.current?.focusAtCoords(e.clientX, e.clientY)
+          }}
+          className="codeg-composer-chrome relative rounded-xl border border-input bg-background transition-colors focus-within:border-ring focus-within:ring-[3px] focus-within:ring-inset focus-within:ring-ring/50"
+        >
+          <ComposerInvocationsPopup inv={invocations} />
           <RichComposer
             key={composerSeed.key}
             ref={editorRef}
@@ -353,67 +434,15 @@ function TaskEditorBody({
             referenceSearch={referenceSearch}
             mentionUiLabels={mentionUiLabels}
             tabLabels={referenceGroupLabels}
-            onChange={setPrompt}
+            onChange={(text) => {
+              setPrompt(text)
+              invocations.detect()
+            }}
+            isExternalMenuOpen={invocations.isOpen}
+            onExternalMenuKeyDown={invocations.onKeyDown}
             className="max-h-[14rem] min-h-[6rem]"
           />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Select
-            value={folderId != null ? String(folderId) : undefined}
-            onValueChange={(v) => setFolderId(Number(v))}
-            // A task that already ran is pinned to its folder (its worktree
-            // lives there) — the backend rejects a move too.
-            disabled={task != null && task.worktree_folder_id != null}
-          >
-            <SelectTrigger size="sm" className="h-7 gap-1.5 text-xs">
-              <Folder
-                className="size-3.5 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <SelectValue placeholder={t("folderPlaceholder")} />
-            </SelectTrigger>
-            <SelectContent>
-              {projectFolders.map((f) => (
-                <SelectItem key={f.id} value={String(f.id)}>
-                  {f.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <Collapsible open={overrideAgent} onOpenChange={setOverrideAgent}>
-          <CollapsibleTrigger asChild>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <ChevronRight
-                className={cn(
-                  "size-3.5 transition-transform",
-                  overrideAgent && "rotate-90"
-                )}
-                aria-hidden="true"
-              />
-              {t("overrideAgent")}
-            </button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="flex flex-col gap-2.5 pt-2">
-            <p className="text-xs text-muted-foreground">
-              {t("overrideAgentHint")}
-            </p>
-            <div className="flex">
-              <AgentSelector
-                defaultAgentType={agentType}
-                onSelect={(a) => {
-                  setAgentType(a)
-                  setModeId(null)
-                  setConfigValues({})
-                }}
-                onFallback={setAgentType}
-              />
-            </div>
+          <div className="px-2 pb-2 pt-1">
             <AgentConfigSection
               snapshot={agentOptions.snapshot}
               loading={agentOptions.loading}
@@ -422,18 +451,53 @@ function TaskEditorBody({
               modeId={modeId}
               configValues={configValues}
               layout="inline"
-              onModeChange={setModeId}
-              onConfigChange={(optionId, valueId) =>
+              onModeChange={(m) => {
+                setAgentDirty(true)
+                setModeId(m)
+              }}
+              onConfigChange={(optionId, valueId) => {
+                setAgentDirty(true)
                 setConfigValues((prev) => {
                   const next = { ...prev }
                   if (valueId === null) delete next[optionId]
                   else next[optionId] = valueId
                   return next
                 })
-              }
+              }}
             />
-          </CollapsibleContent>
-        </Collapsible>
+          </div>
+        </div>
+
+        {/* Target — which project board the task lives on. */}
+        <div className="flex flex-col gap-2">
+          <h3 className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground">
+            {t("sectionTarget")}
+          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              value={folderId != null ? String(folderId) : undefined}
+              onValueChange={(v) => setFolderId(Number(v))}
+              // A task that already ran is pinned to its folder (its worktree
+              // lives there) — the backend rejects a move too.
+              disabled={task != null && task.worktree_folder_id != null}
+            >
+              <SelectTrigger size="sm" className="h-7 gap-1.5 text-xs">
+                <Folder
+                  className="size-3.5 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <SelectValue placeholder={t("folderPlaceholder")} />
+              </SelectTrigger>
+              <SelectContent>
+                {projectFolders.map((f) => (
+                  <SelectItem key={f.id} value={String(f.id)}>
+                    {f.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
 
         {error ? (
           <p className="text-sm text-destructive" role="alert">

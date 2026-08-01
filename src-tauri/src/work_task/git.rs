@@ -32,25 +32,6 @@ pub async fn rev_parse(path: &str, rev: &str) -> Result<String, AppCommandError>
     Ok(sha)
 }
 
-/// First parent of a commit (`None` for a root commit).
-pub async fn first_parent(path: &str, rev: &str) -> Result<Option<String>, AppCommandError> {
-    let out = run_git(path, &["rev-parse", "--verify", &format!("{rev}^1")]).await?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(if sha.is_empty() { None } else { Some(sha) })
-}
-
-/// Full commit message body of a revision.
-pub async fn commit_message(path: &str, rev: &str) -> Result<String, AppCommandError> {
-    let out = run_git(path, &["log", "-1", "--format=%B", rev]).await?;
-    if !out.status.success() {
-        return Err(git_command_error("log -1", &out.stderr));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
 /// Whether the index has staged changes (stage-B preflight requires a clean
 /// index in the project folder).
 pub async fn staged_clean(path: &str) -> Result<bool, AppCommandError> {
@@ -181,6 +162,32 @@ pub async fn reset_merge(path: &str) -> Result<(), AppCommandError> {
 pub async fn has_merge_head(path: &str) -> Result<bool, AppCommandError> {
     let out = run_git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).await?;
     Ok(out.status.success())
+}
+
+/// Whether `ancestor` is reachable from `descendant`. Exit 0 = yes, 1 = no,
+/// anything else is a real error.
+pub async fn is_ancestor(
+    path: &str,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool, AppCommandError> {
+    let out = run_git(path, &["merge-base", "--is-ancestor", ancestor, descendant]).await?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(git_command_error("merge-base --is-ancestor", &out.stderr)),
+    }
+}
+
+/// Whether two revisions point at identical trees (`git diff --quiet a b`) —
+/// how a squash landing is recognized without knowing the commit message.
+pub async fn trees_equal(path: &str, a: &str, b: &str) -> Result<bool, AppCommandError> {
+    let out = run_git(path, &["diff", "--quiet", a, b]).await?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(git_command_error("diff --quiet", &out.stderr)),
+    }
 }
 
 /// `git diff --numstat <base>` — the task's change set vs its recorded base.

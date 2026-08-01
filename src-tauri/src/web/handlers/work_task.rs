@@ -81,12 +81,18 @@ pub struct ReturnParams {
 #[serde(rename_all = "camelCase")]
 pub struct MergeParams {
     pub id: i32,
-    pub message: String,
+    /// `None` → the agent writes the commit message itself.
     #[serde(default)]
-    pub strategy: Option<String>,
+    pub message: Option<String>,
     pub delete_worktree: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartAllParams {
+    /// `None` = every folder holding todos.
     #[serde(default)]
-    pub auto_resolve: Option<bool>,
+    pub folder_id: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -211,7 +217,7 @@ pub async fn work_task_start(
 }
 
 pub async fn work_task_start_all(
-    Json(params): Json<FolderParams>,
+    Json(params): Json<StartAllParams>,
 ) -> Result<Json<u32>, AppCommandError> {
     let claimed = core::work_task_start_all_core(params.folder_id)
         .await
@@ -257,19 +263,11 @@ pub async fn work_task_cancel(
 }
 
 pub async fn work_task_merge(
-    Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<MergeParams>,
 ) -> Result<Json<()>, AppCommandError> {
-    core::work_task_merge_core(
-        &state.db,
-        params.id,
-        params.message,
-        params.strategy,
-        params.delete_worktree,
-        params.auto_resolve,
-    )
-    .await
-    .map_err(AppCommandError::from)?;
+    core::work_task_merge_core(params.id, params.message, params.delete_worktree)
+        .await
+        .map_err(AppCommandError::from)?;
     Ok(Json(()))
 }
 
@@ -318,6 +316,26 @@ pub async fn work_task_settings_get(
     Ok(Json(result))
 }
 
+pub async fn work_task_settings_effective(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<FolderParams>,
+) -> Result<Json<WorkTaskFolderSettings>, AppCommandError> {
+    let result = core::work_task_settings_effective_core(&state.db, params.folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn work_task_settings_get_own(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<FolderParams>,
+) -> Result<Json<Option<WorkTaskFolderSettings>>, AppCommandError> {
+    let result = core::work_task_settings_get_own_core(&state.db, params.folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn work_task_settings_set(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<SettingsSetParams>,
@@ -330,6 +348,16 @@ pub async fn work_task_settings_set(
     )
     .await
     .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_settings_delete(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<FolderParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_settings_delete_core(&state.emitter, &state.db, params.folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
     Ok(Json(()))
 }
 

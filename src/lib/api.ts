@@ -2645,8 +2645,11 @@ export async function workTaskStart(id: number): Promise<void> {
   return getTransport().call("work_task_start", { id })
 }
 
-/** Queue every todo of the folder; returns how many were claimed. */
-export async function workTaskStartAll(folderId: number): Promise<number> {
+/** Queue every todo of the folder — or of every folder holding todos when
+ *  `folderId` is null. Returns how many were claimed. */
+export async function workTaskStartAll(
+  folderId: number | null
+): Promise<number> {
   return getTransport().call("work_task_start_all", { folderId })
 }
 
@@ -2671,20 +2674,17 @@ export async function workTaskCancel(id: number): Promise<void> {
   return getTransport().call("work_task_cancel", { id })
 }
 
-/** Kick off the two-stage merge; the outcome rides `task://changed` events. */
+/** Dispatch the agent-driven merge (`message: null` = the agent writes the
+ *  commit message itself); the outcome rides `task://changed` events. */
 export async function workTaskMerge(
   id: number,
-  message: string,
-  strategy: "squash" | "merge" | null,
-  deleteWorktree: boolean,
-  autoResolve = true
+  message: string | null,
+  deleteWorktree: boolean
 ): Promise<void> {
   return getTransport().call("work_task_merge", {
     id,
     message,
-    strategy,
     deleteWorktree,
-    autoResolve,
   })
 }
 
@@ -2714,10 +2714,26 @@ export async function workTaskChangedFiles(
   return getTransport().call("work_task_changed_files", { id })
 }
 
+/** Effective settings after the folder → global → built-in fallback — what
+ *  the engine will actually use for this folder. */
+export async function workTaskSettingsEffective(
+  folderId: number
+): Promise<WorkTaskFolderSettings> {
+  return getTransport().call("work_task_settings_effective", { folderId })
+}
+
 export async function workTaskSettingsGet(
   folderId: number
 ): Promise<WorkTaskFolderSettings> {
   return getTransport().call("work_task_settings_get", { folderId })
+}
+
+/** The folder's own settings row, or null when it follows the global
+ *  defaults — how the settings dialog tells the two apart. */
+export async function workTaskSettingsGetOwn(
+  folderId: number
+): Promise<WorkTaskFolderSettings | null> {
+  return getTransport().call("work_task_settings_get_own", { folderId })
 }
 
 export async function workTaskSettingsSet(
@@ -2725,6 +2741,11 @@ export async function workTaskSettingsSet(
   settings: WorkTaskFolderSettings
 ): Promise<void> {
   return getTransport().call("work_task_settings_set", { folderId, settings })
+}
+
+/** Drop the folder's own settings row — it reverts to the global defaults. */
+export async function workTaskSettingsDelete(folderId: number): Promise<void> {
+  return getTransport().call("work_task_settings_delete", { folderId })
 }
 
 export async function workTaskTemplateList(): Promise<WorkTaskTemplate[]> {

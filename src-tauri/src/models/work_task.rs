@@ -34,9 +34,6 @@ pub struct WorkTaskInfo {
     pub additions: Option<i32>,
     pub deletions: Option<i32>,
     pub merge_commit: Option<String>,
-    /// A conflict-repair cycle is in flight: the agent is resolving merge
-    /// conflicts and the merge re-runs automatically when it finishes.
-    pub repairing: bool,
     /// `WorkTaskPreflight` snapshot (acceptance red/green light), if a
     /// preflight command ran for this review.
     pub preflight: Option<serde_json::Value>,
@@ -144,6 +141,14 @@ pub struct WorkTaskFolderSettings {
     /// review — the acceptance red/green light. `None` = no preflight.
     #[serde(default)]
     pub preflight_command_id: Option<i32>,
+    /// Free-form preflight shell line; takes precedence over
+    /// `preflight_command_id` when non-empty.
+    #[serde(default)]
+    pub preflight_command: Option<String>,
+    /// Shell line run inside a freshly created worktree before the agent
+    /// starts (deps install, env seeding). Not re-run on reused worktrees.
+    #[serde(default)]
+    pub init_command: Option<String>,
 }
 
 impl Default for WorkTaskFolderSettings {
@@ -158,6 +163,8 @@ impl Default for WorkTaskFolderSettings {
             merge_strategy: default_merge_strategy(),
             delete_worktree_default: true,
             preflight_command_id: None,
+            preflight_command: None,
+            init_command: None,
         }
     }
 }
@@ -175,16 +182,15 @@ fn default_true() -> bool {
 }
 
 /// The merge intent persisted (as JSON in `work_task.merge_state`) in the same
-/// transaction as the review→merging CAS. Crash recovery replays git truth
-/// against `pre_merge_head` + `message` to decide landed / not landed.
+/// transaction as the review→merging CAS. The merge itself is performed by the
+/// agent in its session; the engine settles from git truth against
+/// `pre_merge_head` (base advanced + work content contained), never from the
+/// agent's word.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkTaskMergeState {
-    /// Project-folder HEAD right before stage B.
+    /// Project-folder HEAD right before the merge generation was dispatched.
     pub pre_merge_head: String,
-    /// Base HEAD the work branch was synced to by stage A (set after stage A).
-    #[serde(default)]
-    pub synced_base_sha: Option<String>,
-    /// The commit message stage B will use (recovery matches on it).
+    /// The commit message the agent is told to use ("" when auto-generated).
     pub message: String,
     /// "squash" | "merge"
     pub strategy: String,
@@ -192,26 +198,9 @@ pub struct WorkTaskMergeState {
     /// so crash recovery can honor the choice when it back-fills `done`.
     #[serde(default)]
     pub delete_worktree: bool,
-}
-
-/// The auto-remerge intent persisted in `work_task.pending_merge` while a
-/// conflict-repair cycle is in flight: a stage-A merge conflict dispatched the
-/// agent to resolve it, and when that run settles into review the merge re-runs
-/// with these parameters. `attempts` counts repair dispatches for this user
-/// merge request and caps the loop.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkTaskPendingMerge {
-    pub message: String,
-    /// "squash" | "merge"
-    pub strategy: String,
-    pub delete_worktree: bool,
-    /// Repair dispatches so far (including the one this intent rode on).
+    /// The agent writes the commit message itself (`message` is empty then).
     #[serde(default)]
-    pub attempts: i32,
-    /// Conflicted files from the aborted merge — replayed into the repair
-    /// prompt (also by a pump-driven relaunch that never saw the conflict).
-    #[serde(default)]
-    pub conflict_files: Vec<String>,
+    pub auto_message: bool,
 }
 
 /// Outcome of the folder's preflight command for one review generation,

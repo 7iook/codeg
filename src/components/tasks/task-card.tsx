@@ -5,31 +5,28 @@ import {
   Archive,
   ArchiveRestore,
   Ban,
+  Check,
+  CircleAlert,
   CircleCheck,
   CircleX,
-  GitBranch,
+  Ellipsis,
   GitMerge,
   Loader2,
   MessageSquareText,
+  Pencil,
   Play,
   RotateCw,
-  Wrench,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { formatRelative } from "@/components/conversations/sidebar-conversation-grouping"
 import { cn } from "@/lib/utils"
 import type { WorkTask } from "@/lib/types"
-
-const STATUS_STYLES: Record<string, string> = {
-  todo: "bg-muted text-muted-foreground",
-  queued: "bg-primary/10 text-primary",
-  running: "bg-primary/10 text-primary",
-  awaiting_input: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  review: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  merging: "bg-primary/10 text-primary",
-  done: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  failed: "bg-destructive/10 text-destructive",
-  canceled: "bg-muted text-muted-foreground",
-}
 
 type StatusLabelKey =
   | "statusTodo"
@@ -65,32 +62,66 @@ export function statusLabelKey(status: WorkTask["status"]): StatusLabelKey {
   }
 }
 
+/**
+ * Per-status presentation, so the board reads by shape rather than nine
+ * same-looking chips: live statuses are primary-colored spinner text,
+ * attention statuses an outlined amber pill, `done` a bare green check,
+ * `failed` a tinted red pill, the rest a muted pill.
+ */
 export function StatusChip({ task }: { task: WorkTask }) {
   const t = useTranslations("Tasks")
-  const spinning = task.status === "running" || task.status === "merging"
   // An interrupted failure (restart) reads differently from an agent failure.
   const label =
     task.status === "failed" && task.failure_reason === "interrupted"
       ? t("statusInterrupted")
       : t(statusLabelKey(task.status))
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium leading-none",
-        STATUS_STYLES[task.status]
-      )}
-    >
-      {spinning ? (
-        <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
-      ) : null}
-      {label}
-    </span>
-  )
+  switch (task.status) {
+    case "queued":
+    case "running":
+    case "merging":
+      return (
+        <span className="inline-flex shrink-0 items-center gap-1 text-[0.6875rem] font-medium text-primary">
+          <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+          {label}
+        </span>
+      )
+    case "awaiting_input":
+    case "review":
+      return (
+        <span className="inline-flex shrink-0 items-center rounded-full border border-amber-500/45 bg-amber-500/5 px-2 py-1 text-[0.625rem] font-medium leading-none text-amber-600 dark:border-amber-400/40 dark:text-amber-400">
+          {label}
+        </span>
+      )
+    case "done":
+      return (
+        <span
+          className="inline-flex shrink-0 items-center text-emerald-500"
+          title={label}
+        >
+          <Check className="size-3.5" strokeWidth={3} aria-hidden="true" />
+          <span className="sr-only">{label}</span>
+        </span>
+      )
+    case "failed":
+      return (
+        <span className="inline-flex shrink-0 items-center rounded-full bg-destructive/10 px-2 py-1 text-[0.625rem] font-medium leading-none text-destructive">
+          {label}
+        </span>
+      )
+    default:
+      return (
+        <span className="inline-flex shrink-0 items-center rounded-full bg-muted px-2 py-1 text-[0.625rem] font-medium leading-none text-muted-foreground">
+          {label}
+        </span>
+      )
+  }
 }
 
 interface TaskCardProps {
   task: WorkTask
   folderName: string | null
+  /** Shared render-tick timestamp for relative times (refreshed by the page). */
+  now: number
   onOpen: () => void
   onStart: () => void
   onCancel: () => void
@@ -100,6 +131,8 @@ interface TaskCardProps {
   onMerge: () => void
   /** Toggles by `task.archived_at` (archive ⇄ unarchive). */
   onArchive: () => void
+  /** Opens the editor dialog — offered while editable (todo / failed). */
+  onEdit: () => void
 }
 
 /** The acceptance red/green light for a reviewed card. */
@@ -116,7 +149,9 @@ export function PreflightChip({ task }: { task: WorkTask }) {
   return (
     <span
       className={cn(
-        "inline-flex min-w-0 shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium leading-none",
+        // max-w-full: a long command wraps the chip to its own row in the
+        // flex-wrap meta line and then truncates instead of overflowing.
+        "inline-flex min-w-0 max-w-full items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium leading-none",
         tone
       )}
       title={
@@ -139,14 +174,22 @@ export function PreflightChip({ task }: { task: WorkTask }) {
   )
 }
 
+interface CardActionItem {
+  icon: typeof Play
+  label: string
+  onClick: () => void
+}
+
 /**
- * One board card. The whole card opens the detail sheet; the footer surfaces
- * only the status's single most-likely action (everything else lives in the
- * sheet). `merging` is deliberately action-less — it cannot be canceled.
+ * One board card. The whole card opens the detail sheet; the footer carries
+ * the status's single primary action on the left and everything else behind a
+ * "…" menu — the full action set lives in the sheet. `merging` is
+ * deliberately action-less: it cannot be canceled.
  */
 export function TaskCard({
   task,
   folderName,
+  now,
   onOpen,
   onStart,
   onCancel,
@@ -155,104 +198,123 @@ export function TaskCard({
   onOpenConversation,
   onMerge,
   onArchive,
+  onEdit,
 }: TaskCardProps) {
   const t = useTranslations("Tasks")
   const archived = task.archived_at != null
-  const terminal =
-    task.status === "done" ||
-    task.status === "failed" ||
-    task.status === "canceled"
+  const live =
+    task.status === "running" ||
+    task.status === "awaiting_input" ||
+    task.status === "merging"
 
   const stat =
     task.files_changed != null && task.files_changed > 0 ? (
-      <span className="inline-flex items-center gap-1 font-mono text-[0.625rem] text-muted-foreground">
-        <span>{t("filesChanged", { count: task.files_changed })}</span>
+      <span className="inline-flex shrink-0 items-center gap-1 font-mono text-[0.625rem]">
         <span className="text-emerald-600 dark:text-emerald-400">
           +{task.additions ?? 0}
         </span>
         <span className="text-destructive">-{task.deletions ?? 0}</span>
       </span>
     ) : null
+  const when = formatRelative(
+    task.finished_at ?? task.settled_at ?? task.started_at ?? task.created_at,
+    now
+  )
 
-  const quickAction = (() => {
+  const { primary, more } = (() => {
+    const more: CardActionItem[] = []
+    let primary: (CardActionItem & { emphasized?: boolean }) | null = null
     // An archived card offers exactly one way back.
     if (archived) {
-      return (
-        <CardAction
-          icon={ArchiveRestore}
-          label={t("actionUnarchive")}
-          onClick={onArchive}
-        />
-      )
+      primary = {
+        icon: ArchiveRestore,
+        label: t("actionUnarchive"),
+        onClick: onArchive,
+      }
+      return { primary, more }
     }
     switch (task.status) {
       case "todo":
-        return (
-          <CardAction
-            icon={Play}
-            label={t("actionStart")}
-            onClick={onStart}
-            emphasized
-          />
-        )
+        primary = {
+          icon: Play,
+          label: t("actionStart"),
+          onClick: onStart,
+          emphasized: true,
+        }
+        more.push({ icon: Pencil, label: t("actionEdit"), onClick: onEdit })
+        break
       case "queued":
-        return (
-          <CardAction icon={Ban} label={t("actionCancel")} onClick={onCancel} />
-        )
+        primary = { icon: Ban, label: t("actionCancel"), onClick: onCancel }
+        break
       case "running":
       case "awaiting_input":
-        return (
-          <>
-            <CardAction
-              icon={MessageSquareText}
-              label={t("actionOpenConversation")}
-              onClick={onOpenConversation}
-              emphasized={task.status === "awaiting_input"}
-            />
-            <CardAction
-              icon={Ban}
-              label={t("actionCancel")}
-              onClick={onCancel}
-            />
-          </>
-        )
+        primary = {
+          icon: MessageSquareText,
+          label: t("actionOpenConversation"),
+          onClick: onOpenConversation,
+          emphasized: task.status === "awaiting_input",
+        }
+        more.push({ icon: Ban, label: t("actionCancel"), onClick: onCancel })
+        break
       case "review":
-        return (
-          <CardAction
-            icon={GitMerge}
-            label={t("actionMerge")}
-            onClick={onMerge}
-            emphasized
-          />
-        )
+        primary = {
+          icon: GitMerge,
+          label: t("actionMerge"),
+          onClick: onMerge,
+          emphasized: true,
+        }
+        if (task.conversation_id != null) {
+          more.push({
+            icon: MessageSquareText,
+            label: t("actionOpenConversation"),
+            onClick: onOpenConversation,
+          })
+        }
+        break
       case "merging":
-        return null
+        break
       case "failed":
-        return (
-          <CardAction
-            icon={RotateCw}
-            label={t("actionRetry")}
-            onClick={onRetry}
-            emphasized
-          />
-        )
+        primary = {
+          icon: RotateCw,
+          label: t("actionRetry"),
+          onClick: onRetry,
+          emphasized: true,
+        }
+        more.push({ icon: Pencil, label: t("actionEdit"), onClick: onEdit })
+        more.push({
+          icon: Archive,
+          label: t("actionArchive"),
+          onClick: onArchive,
+        })
+        break
       case "done":
-        return task.conversation_id != null ? (
-          <CardAction
-            icon={MessageSquareText}
-            label={t("actionOpenConversation")}
-            onClick={onOpenConversation}
-          />
-        ) : null
+        if (task.conversation_id != null) {
+          primary = {
+            icon: MessageSquareText,
+            label: t("actionOpenConversation"),
+            onClick: onOpenConversation,
+          }
+        }
+        more.push({
+          icon: Archive,
+          label: t("actionArchive"),
+          onClick: onArchive,
+        })
+        break
       case "canceled":
-        return (
-          <CardAction
-            icon={RotateCw}
-            label={t("actionRequeue")}
-            onClick={onRequeue}
-          />
-        )
+        primary = {
+          icon: RotateCw,
+          label: t("actionRequeue"),
+          onClick: onRequeue,
+        }
+        more.push({
+          icon: Archive,
+          label: t("actionArchive"),
+          onClick: onArchive,
+        })
+        break
     }
+    return { primary, more }
   })()
 
   return (
@@ -267,8 +329,10 @@ export function TaskCard({
         }
       }}
       className={cn(
-        "group/card flex cursor-pointer flex-col gap-1.5 rounded-lg border border-border bg-card/60 p-2.5 text-left",
-        "transition-colors hover:border-ring/40 hover:bg-card",
+        // ws-msg-card: with a workspace background image on, the card goes
+        // translucent like message-stream cards (e.g. the file-edit card).
+        "group/card flex cursor-pointer flex-col rounded-xl border border-border/70 bg-card ws-msg-card p-3 text-left",
+        "transition-[border-color,box-shadow] hover:border-border hover:shadow-sm",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         archived && "opacity-60"
       )}
@@ -280,25 +344,26 @@ export function TaskCard({
         <StatusChip task={task} />
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.6875rem] text-muted-foreground">
+      <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[0.6875rem] text-muted-foreground">
         {folderName ? (
-          <span className="min-w-0 truncate">{folderName}</span>
+          <span className="max-w-40 truncate">{folderName}</span>
+        ) : null}
+        {folderName && task.work_branch ? (
+          <span className="text-muted-foreground/40">/</span>
         ) : null}
         {task.work_branch ? (
-          <span className="inline-flex min-w-0 items-center gap-0.5">
-            <GitBranch className="size-2.5 shrink-0" aria-hidden="true" />
-            <span className="truncate font-mono text-[0.625rem]">
-              {task.work_branch}
-            </span>
+          <span className="truncate font-mono text-[0.625rem]">
+            {task.work_branch}
           </span>
+        ) : null}
+        {(folderName || task.work_branch) && (stat || when) ? (
+          <span className="text-muted-foreground/40">·</span>
         ) : null}
         {stat}
-        {task.repairing ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[0.625rem] text-amber-600 dark:text-amber-400">
-            <Wrench className="size-2.5" aria-hidden="true" />
-            {t("badgeRepairing")}
-          </span>
+        {stat && when ? (
+          <span className="text-muted-foreground/40">·</span>
         ) : null}
+        {when ? <span className="shrink-0">{when}</span> : null}
         <PreflightChip task={task} />
         {task.cleanup_state === "failed" ? (
           <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[0.625rem] text-amber-600 dark:text-amber-400">
@@ -314,31 +379,52 @@ export function TaskCard({
 
       {task.last_error &&
       (task.status === "failed" || task.status === "review") ? (
-        <p className="line-clamp-2 text-[0.6875rem] leading-snug text-destructive/90">
-          {task.last_error}
-        </p>
+        <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-destructive/10 px-2 py-1.5 text-[0.6875rem] text-destructive">
+          <CircleAlert className="size-3.5 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate">{task.last_error}</span>
+          <button
+            type="button"
+            className="shrink-0 font-medium hover:underline"
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpen()
+            }}
+          >
+            {t("errorView")}
+          </button>
+        </div>
       ) : null}
       {task.status === "review" && task.result_summary ? (
-        <p className="line-clamp-2 text-[0.6875rem] leading-snug text-muted-foreground">
+        <p className="mt-1.5 line-clamp-2 text-[0.6875rem] leading-snug text-muted-foreground">
           {task.result_summary}
         </p>
       ) : null}
-      {(task.status === "running" || task.status === "awaiting_input") &&
-      task.latest_progress ? (
-        <p className="line-clamp-2 text-[0.6875rem] leading-snug text-muted-foreground italic">
+      {live && task.latest_progress ? (
+        <p className="mt-1.5 line-clamp-2 text-[0.6875rem] leading-snug text-muted-foreground italic">
           {task.latest_progress}
         </p>
       ) : null}
 
-      {quickAction || (terminal && !archived) ? (
-        <div className="flex items-center gap-1 pt-0.5">
-          {quickAction}
-          {terminal && !archived ? (
-            <CardAction
-              icon={Archive}
-              label={t("actionArchive")}
-              onClick={onArchive}
-            />
+      {primary || more.length > 0 ? (
+        <div className="mt-2.5 flex items-center gap-1.5 border-t border-border/60 pt-2">
+          {primary ? (
+            <Button
+              type="button"
+              size="xs"
+              variant={primary.emphasized ? "default" : "outline"}
+              onClick={(e) => {
+                // The card itself opens the detail sheet — keep actions local.
+                e.stopPropagation()
+                primary.onClick()
+              }}
+            >
+              <primary.icon className="size-3" aria-hidden="true" />
+              {primary.label}
+            </Button>
+          ) : null}
+          <div className="flex-1" />
+          {more.length > 0 ? (
+            <CardMoreMenu items={more} label={t("more")} />
           ) : null}
         </div>
       ) : null}
@@ -346,31 +432,41 @@ export function TaskCard({
   )
 }
 
-function CardAction({
-  icon: Icon,
+function CardMoreMenu({
+  items,
   label,
-  onClick,
-  emphasized,
 }: {
-  icon: typeof Play
+  items: CardActionItem[]
   label: string
-  onClick: () => void
-  emphasized?: boolean
 }) {
   return (
-    <Button
-      type="button"
-      size="sm"
-      variant={emphasized ? "secondary" : "ghost"}
-      className="h-6 gap-1 px-2 text-[0.6875rem]"
-      onClick={(e) => {
-        // The card itself opens the detail sheet — keep actions local.
-        e.stopPropagation()
-        onClick()
-      }}
-    >
-      <Icon className="size-3" aria-hidden="true" />
-      {label}
-    </Button>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="ghost"
+          className="text-muted-foreground"
+          aria-label={label}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Ellipsis className="size-3.5" aria-hidden="true" />
+        </Button>
+      </DropdownMenuTrigger>
+      {/* Portaled content still bubbles through the React tree — without the
+          stop, picking a menu item would also open the card's detail sheet. */}
+      <DropdownMenuContent
+        align="end"
+        className="min-w-32"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {items.map((item) => (
+          <DropdownMenuItem key={item.label} onSelect={item.onClick}>
+            <item.icon className="size-3.5" aria-hidden="true" />
+            {item.label}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

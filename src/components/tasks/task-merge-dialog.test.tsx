@@ -10,7 +10,7 @@ const settingsMock = vi.fn()
 
 vi.mock("@/lib/api", () => ({
   workTaskMerge: (...args: unknown[]) => mergeMock(...args),
-  workTaskSettingsGet: (...args: unknown[]) => settingsMock(...args),
+  workTaskSettingsEffective: (...args: unknown[]) => settingsMock(...args),
 }))
 
 import { TaskMergeDialog } from "./task-merge-dialog"
@@ -31,7 +31,7 @@ function task(): WorkTask {
     connection_id: null,
     base_branch: "main",
     base_sha: "abc",
-    work_branch: "task/7-fix-login",
+    work_branch: "task/7",
     cleanup_state: null,
     verdict: null,
     result_summary: null,
@@ -39,7 +39,6 @@ function task(): WorkTask {
     additions: 10,
     deletions: 3,
     merge_commit: null,
-    repairing: false,
     preflight: null,
     archived_at: null,
     created_at: "2026-08-01T00:00:00Z",
@@ -79,41 +78,27 @@ beforeEach(() => {
 })
 
 describe("TaskMergeDialog", () => {
-  it("prefills the message from the title and checks delete-worktree by default", async () => {
+  it("defaults to an agent-written message and passes null on submit", async () => {
     settingsMock.mockResolvedValue(settings())
     renderDialog()
 
-    const message = await screen.findByLabelText("Commit message")
-    expect((message as HTMLTextAreaElement).value).toBe("Fix login")
+    // Auto-message on by default → no textarea, message goes out as null.
+    expect(
+      screen.getByRole("checkbox", { name: /write the commit message/ })
+    ).toBeChecked()
+    expect(screen.queryByLabelText("Commit message")).toBeNull()
     await waitFor(() =>
       expect(
         screen.getByRole("checkbox", { name: /Delete worktree after merge/ })
       ).toBeChecked()
     )
 
-    // Conflict auto-resolve is on unless unchecked.
-    expect(
-      screen.getByRole("checkbox", {
-        name: /resolve conflicts and retry the merge/,
-      })
-    ).toBeChecked()
-
     await userEvent.click(screen.getByRole("button", { name: "Merge" }))
-    await waitFor(() =>
-      expect(mergeMock).toHaveBeenCalledWith(
-        7,
-        "Fix login",
-        "squash",
-        true,
-        true
-      )
-    )
+    await waitFor(() => expect(mergeMock).toHaveBeenCalledWith(7, null, true))
   })
 
-  it("honors the folder's merge defaults", async () => {
-    settingsMock.mockResolvedValue(
-      settings({ merge_strategy: "merge", delete_worktree_default: false })
-    )
+  it("unchecking auto reveals the title-prefilled message and sends it", async () => {
+    settingsMock.mockResolvedValue(settings({ delete_worktree_default: false }))
     renderDialog()
 
     await waitFor(() =>
@@ -122,19 +107,27 @@ describe("TaskMergeDialog", () => {
       ).not.toBeChecked()
     )
     await userEvent.click(
-      screen.getByRole("checkbox", {
-        name: /resolve conflicts and retry the merge/,
-      })
+      screen.getByRole("checkbox", { name: /write the commit message/ })
     )
+    const message = await screen.findByLabelText("Commit message")
+    expect((message as HTMLTextAreaElement).value).toBe("Fix login")
+
     await userEvent.click(screen.getByRole("button", { name: "Merge" }))
     await waitFor(() =>
-      expect(mergeMock).toHaveBeenCalledWith(
-        7,
-        "Fix login",
-        "merge",
-        false,
-        false
-      )
+      expect(mergeMock).toHaveBeenCalledWith(7, "Fix login", false)
     )
+  })
+
+  it("refuses to submit a manual empty message", async () => {
+    settingsMock.mockResolvedValue(settings())
+    renderDialog()
+
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /write the commit message/ })
+    )
+    const message = await screen.findByLabelText("Commit message")
+    await userEvent.clear(message)
+    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled()
+    expect(mergeMock).not.toHaveBeenCalled()
   })
 })

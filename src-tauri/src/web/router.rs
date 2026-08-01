@@ -1261,8 +1261,20 @@ pub fn build_router(
             post(handlers::work_task::work_task_settings_get),
         )
         .route(
+            "/work_task_settings_effective",
+            post(handlers::work_task::work_task_settings_effective),
+        )
+        .route(
+            "/work_task_settings_get_own",
+            post(handlers::work_task::work_task_settings_get_own),
+        )
+        .route(
             "/work_task_settings_set",
             post(handlers::work_task::work_task_settings_set),
+        )
+        .route(
+            "/work_task_settings_delete",
+            post(handlers::work_task::work_task_settings_delete),
         )
         .route(
             "/work_task_template_list",

@@ -1290,14 +1290,11 @@ export interface WorkTask {
   additions: number | null
   deletions: number | null
   merge_commit: string | null
-  /** A conflict-repair cycle is in flight: the agent is resolving merge
-   *  conflicts and the merge re-fires automatically when it finishes. */
-  repairing: boolean
   /** Acceptance red/green light of the current review, if a preflight
    *  command ran. */
   preflight: WorkTaskPreflight | null
   archived_at: string | null
-  /** Latest agent_progress milestone — present on live (running/awaiting) rows only. */
+  /** Latest agent_progress milestone — present on live (running/awaiting/merging) rows only. */
   latest_progress?: string | null
   created_at: string
   updated_at: string
@@ -1358,6 +1355,11 @@ export interface WorkTaskFolderSettings {
   /** folder_command id run in the worktree when a task settles into review
    *  (the acceptance red/green light); null = no preflight. */
   preflight_command_id?: number | null
+  /** Free-form preflight shell line; wins over `preflight_command_id`. */
+  preflight_command?: string | null
+  /** Shell line run inside a freshly created worktree before the agent
+   *  starts (deps install, env seeding). */
+  init_command?: string | null
 }
 
 /** Changed file of a task worktree vs its recorded base. */

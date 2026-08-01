@@ -69,7 +69,6 @@ fn to_info(m: work_task::Model) -> WorkTaskInfo {
         additions: m.additions,
         deletions: m.deletions,
         merge_commit: m.merge_commit,
-        repairing: m.pending_merge.is_some(),
         preflight: m
             .preflight
             .as_deref()
@@ -162,13 +161,15 @@ pub async fn list(
     let mut infos: Vec<WorkTaskInfo> = rows.into_iter().map(to_info).collect();
 
     // Realtime progress line for live cards: the latest `agent_progress`
-    // milestone of each running/awaiting task, fetched in one sweep.
+    // milestone of each running/awaiting/merging task, fetched in one sweep.
     let live_ids: Vec<i32> = infos
         .iter()
         .filter(|t| {
             matches!(
                 t.status,
-                WorkTaskStatus::Running | WorkTaskStatus::AwaitingInput
+                WorkTaskStatus::Running
+                    | WorkTaskStatus::AwaitingInput
+                    | WorkTaskStatus::Merging
             )
         })
         .map(|t| t.id)
@@ -294,6 +295,22 @@ pub async fn folders_with_pending(conn: &DatabaseConnection) -> Result<Vec<i32>,
         .filter(
             work_task::Column::Status.is_in([WorkTaskStatus::Todo, WorkTaskStatus::Queued]),
         )
+        .inner_join(folder::Entity)
+        .filter(folder::Column::DeletedAt.is_null())
+        .all(conn)
+        .await?;
+    let mut ids: Vec<i32> = rows.into_iter().map(|m| m.folder_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// Folders that currently hold todo tasks — the "start all" fan-out set when
+/// no folder is selected.
+pub async fn folders_with_todos(conn: &DatabaseConnection) -> Result<Vec<i32>, DbError> {
+    let rows = work_task::Entity::find()
+        .filter(work_task::Column::DeletedAt.is_null())
+        .filter(work_task::Column::Status.eq(WorkTaskStatus::Todo))
         .inner_join(folder::Entity)
         .filter(folder::Column::DeletedAt.is_null())
         .all(conn)
@@ -787,6 +804,35 @@ pub async fn mark_running(
     Ok(true)
 }
 
+/// Record the live connection/conversation of a MERGE generation. The status
+/// stays `merging` for the whole agent turn; the CAS (merging + run_seq) makes
+/// a concurrent settle or recovery win cleanly.
+pub async fn mark_merging_live(
+    conn: &DatabaseConnection,
+    id: i32,
+    run_seq: i32,
+    conversation_id: i32,
+    connection_id: &str,
+) -> Result<bool, DbError> {
+    let res = work_task::Entity::update_many()
+        .col_expr(
+            work_task::Column::ConversationId,
+            Expr::value(Some(conversation_id)),
+        )
+        .col_expr(
+            work_task::Column::ConnectionId,
+            Expr::value(Some(connection_id.to_string())),
+        )
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(work_task::Column::Id.eq(id))
+        .filter(work_task::Column::Status.eq(WorkTaskStatus::Merging))
+        .filter(work_task::Column::RunSeq.eq(run_seq))
+        .filter(work_task::Column::DeletedAt.is_null())
+        .exec(conn)
+        .await?;
+    Ok(res.rows_affected == 1)
+}
+
 /// `from` (any of) → failed with a reason. `run_seq: Some(n)` guards
 /// engine-driven failures against stale generations; `None` is used by the
 /// boot/reconcile sweeps that own the whole DB.
@@ -993,7 +1039,7 @@ pub async fn begin_merge(
     conn: &DatabaseConnection,
     id: i32,
     state: &WorkTaskMergeState,
-) -> Result<bool, DbError> {
+) -> Result<Option<i32>, DbError> {
     let state_json = serde_json::to_string(state)
         .map_err(|e| DbError::Validation(format!("merge state not serializable: {e}")))?;
     let now = Utc::now();
@@ -1003,6 +1049,14 @@ pub async fn begin_merge(
             work_task::Column::Status,
             Expr::value(status_str(WorkTaskStatus::Merging)),
         )
+        // The merge is a fresh agent generation: bump run_seq so stale events
+        // of the settled run can't touch it, and clear the run-scoped fields.
+        .col_expr(
+            work_task::Column::RunSeq,
+            Expr::col(work_task::Column::RunSeq).add(1),
+        )
+        .col_expr(work_task::Column::ConnectionId, Expr::value(None::<String>))
+        .col_expr(work_task::Column::Verdict, Expr::value(None::<String>))
         .col_expr(work_task::Column::MergeState, Expr::value(Some(state_json)))
         .col_expr(work_task::Column::LastError, Expr::value(None::<String>))
         .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
@@ -1013,8 +1067,13 @@ pub async fn begin_merge(
         .await?;
     if res.rows_affected != 1 {
         txn.rollback().await?;
-        return Ok(false);
+        return Ok(None);
     }
+    let run_seq = work_task::Entity::find_by_id(id)
+        .one(&txn)
+        .await?
+        .map(|m| m.run_seq)
+        .ok_or_else(|| DbError::NotFound(format!("work task {id}")))?;
     record_event(
         &txn,
         id,
@@ -1036,26 +1095,7 @@ pub async fn begin_merge(
     )
     .await?;
     txn.commit().await?;
-    Ok(true)
-}
-
-/// Refresh the persisted merge intent mid-merge (e.g. `synced_base_sha` after
-/// stage A). Plain update guarded on the merging status.
-pub async fn update_merge_state(
-    conn: &DatabaseConnection,
-    id: i32,
-    state: &WorkTaskMergeState,
-) -> Result<(), DbError> {
-    let state_json = serde_json::to_string(state)
-        .map_err(|e| DbError::Validation(format!("merge state not serializable: {e}")))?;
-    work_task::Entity::update_many()
-        .col_expr(work_task::Column::MergeState, Expr::value(Some(state_json)))
-        .col_expr(work_task::Column::UpdatedAt, Expr::value(Utc::now()))
-        .filter(work_task::Column::Id.eq(id))
-        .filter(work_task::Column::Status.eq(WorkTaskStatus::Merging))
-        .exec(conn)
-        .await?;
-    Ok(())
+    Ok(Some(run_seq))
 }
 
 /// merging → done. The ONLY writer of `done`; never rolls back. Used both by
@@ -1148,84 +1188,6 @@ pub async fn merge_back_to_review(
     .await?;
     txn.commit().await?;
     Ok(true)
-}
-
-/// merging → queued for a conflict-repair cycle (P2 merge train): the stage-A
-/// merge was aborted, the agent is dispatched to resolve the conflicts, and
-/// the merge intent moves from `merge_state` (crash anchor of an in-flight
-/// merge) into `pending_merge` (auto-remerge on settle). Bumps `run_seq` like
-/// every claim; records the conflict + transition in the same transaction.
-pub async fn merge_to_repair(
-    conn: &DatabaseConnection,
-    id: i32,
-    pending: &crate::models::WorkTaskPendingMerge,
-) -> Result<Option<i32>, DbError> {
-    let pending_json = serde_json::to_string(pending)
-        .map_err(|e| DbError::Validation(format!("pending merge not serializable: {e}")))?;
-    let now = Utc::now();
-    let txn = conn.begin().await?;
-    let res = work_task::Entity::update_many()
-        .col_expr(
-            work_task::Column::Status,
-            Expr::value(status_str(WorkTaskStatus::Queued)),
-        )
-        .col_expr(
-            work_task::Column::RunSeq,
-            Expr::col(work_task::Column::RunSeq).add(1),
-        )
-        .col_expr(work_task::Column::MergeState, Expr::value(None::<String>))
-        .col_expr(
-            work_task::Column::PendingMerge,
-            Expr::value(Some(pending_json)),
-        )
-        .col_expr(work_task::Column::FailureReason, Expr::value(None::<String>))
-        .col_expr(work_task::Column::LastError, Expr::value(None::<String>))
-        .col_expr(work_task::Column::Verdict, Expr::value(None::<String>))
-        .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
-        .filter(work_task::Column::Id.eq(id))
-        .filter(work_task::Column::Status.eq(WorkTaskStatus::Merging))
-        .filter(work_task::Column::DeletedAt.is_null())
-        .exec(&txn)
-        .await?;
-    if res.rows_affected != 1 {
-        txn.rollback().await?;
-        return Ok(None);
-    }
-    let run_seq = work_task::Entity::find_by_id(id)
-        .one(&txn)
-        .await?
-        .map(|m| m.run_seq)
-        .ok_or_else(|| DbError::NotFound(format!("work task {id}")))?;
-    record_event(
-        &txn,
-        id,
-        "merge_conflict",
-        "engine",
-        Some(serde_json::json!({ "files": pending.conflict_files })),
-    )
-    .await?;
-    status_changed_event(
-        &txn,
-        id,
-        "engine",
-        Some(WorkTaskStatus::Merging),
-        WorkTaskStatus::Queued,
-        Some(serde_json::json!({ "reason": "conflict_repair", "attempt": pending.attempts })),
-    )
-    .await?;
-    txn.commit().await?;
-    Ok(Some(run_seq))
-}
-
-/// Consume the auto-remerge intent (right before firing the merge).
-pub async fn clear_pending_merge(conn: &DatabaseConnection, id: i32) -> Result<(), DbError> {
-    work_task::Entity::update_many()
-        .col_expr(work_task::Column::PendingMerge, Expr::value(None::<String>))
-        .col_expr(work_task::Column::UpdatedAt, Expr::value(Utc::now()))
-        .filter(work_task::Column::Id.eq(id))
-        .exec(conn)
-        .await?;
-    Ok(())
 }
 
 /// Write the preflight light for the CURRENT review generation. Guarded on
@@ -1451,6 +1413,58 @@ pub async fn settings_get(
     Ok(row
         .and_then(|r| serde_json::from_str(&r.config).ok())
         .unwrap_or_default())
+}
+
+/// The folder's own row only — `None` when the folder never saved its own
+/// settings (and thus follows the global row). This is what lets the settings
+/// dialog distinguish "own settings" from the global fallback, which
+/// `settings_get_effective` deliberately hides.
+pub async fn settings_get_own(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+) -> Result<Option<WorkTaskFolderSettings>, DbError> {
+    let row = work_task_settings::Entity::find()
+        .filter(work_task_settings::Column::FolderId.eq(folder_id))
+        .one(conn)
+        .await?;
+    Ok(row.and_then(|r| serde_json::from_str(&r.config).ok()))
+}
+
+/// Drop the folder's own settings row so it follows the global defaults
+/// again. Idempotent — a folder without a row is left as-is.
+pub async fn settings_delete(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+) -> Result<(), DbError> {
+    work_task_settings::Entity::delete_many()
+        .filter(work_task_settings::Column::FolderId.eq(folder_id))
+        .exec(conn)
+        .await?;
+    Ok(())
+}
+
+/// Sentinel `folder_id` of the global-defaults settings row. Real folders
+/// start at 1 (AUTOINCREMENT), so 0 can never collide.
+pub const GLOBAL_SETTINGS_FOLDER_ID: i32 = 0;
+
+/// Effective settings for a folder: the folder's own row wins wholesale; a
+/// folder that never saved its own settings falls back to the global row
+/// (`folder_id = 0`), then to the built-in defaults. Deliberately not a
+/// field-by-field merge — one save detaches the folder from the global row
+/// entirely, which keeps the behavior predictable.
+pub async fn settings_get_effective(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+) -> Result<WorkTaskFolderSettings, DbError> {
+    let own = work_task_settings::Entity::find()
+        .filter(work_task_settings::Column::FolderId.eq(folder_id))
+        .one(conn)
+        .await?
+        .and_then(|r| serde_json::from_str(&r.config).ok());
+    if let Some(settings) = own {
+        return Ok(settings);
+    }
+    settings_get(conn, GLOBAL_SETTINGS_FOLDER_ID).await
 }
 
 pub async fn settings_set(
@@ -1774,14 +1788,20 @@ mod tests {
 
         let state = WorkTaskMergeState {
             pre_merge_head: "abc123".into(),
-            synced_base_sha: None,
             message: "feat: t".into(),
             strategy: "squash".into(),
             delete_worktree: true,
+            auto_message: false,
         };
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
+        // The merge is a fresh agent generation: begin bumps run_seq and
+        // clears the run-scoped fields.
+        let merge_seq = begin_merge(&db.conn, t.id, &state).await.unwrap().unwrap();
+        assert_eq!(merge_seq, seq + 1);
+        let row = get_model(&db.conn, t.id).await.unwrap();
+        assert!(row.connection_id.is_none());
+        assert!(row.verdict.is_none());
         // Double begin loses (already merging) — merge idempotency.
-        assert!(!begin_merge(&db.conn, t.id, &state).await.unwrap());
+        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap().is_none());
         // Cancel is refused while merging.
         assert!(!cancel(&db.conn, t.id).await.unwrap());
 
@@ -1817,12 +1837,12 @@ mod tests {
         assert!(settle_review(&db.conn, t.id, seq, None, None).await.unwrap());
         let state = WorkTaskMergeState {
             pre_merge_head: "abc".into(),
-            synced_base_sha: None,
             message: "m".into(),
             strategy: "squash".into(),
             delete_worktree: false,
+            auto_message: false,
         };
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
+        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap().is_some());
         assert!(merge_back_to_review(
             &db.conn,
             t.id,
@@ -1867,10 +1887,10 @@ mod tests {
             merging.id,
             &WorkTaskMergeState {
                 pre_merge_head: "abc".into(),
-                synced_base_sha: None,
                 message: "m".into(),
                 strategy: "squash".into(),
                 delete_worktree: false,
+                auto_message: false,
             },
         )
         .await
@@ -1927,6 +1947,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn effective_settings_fall_back_to_the_global_row_wholesale() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-global").await;
+
+        // No rows anywhere → built-in defaults.
+        let s = settings_get_effective(&db.conn, folder_id).await.unwrap();
+        assert_eq!(s.max_concurrent, 2);
+
+        // A global row applies to folders without their own settings.
+        let global = WorkTaskFolderSettings {
+            max_concurrent: 5,
+            init_command: Some("pnpm install".into()),
+            ..Default::default()
+        };
+        settings_set(&db.conn, GLOBAL_SETTINGS_FOLDER_ID, &global)
+            .await
+            .unwrap();
+        let s = settings_get_effective(&db.conn, folder_id).await.unwrap();
+        assert_eq!(s.max_concurrent, 5);
+        assert_eq!(s.init_command.as_deref(), Some("pnpm install"));
+        // The raw read is untouched by the fallback.
+        assert_eq!(settings_get(&db.conn, folder_id).await.unwrap().max_concurrent, 2);
+
+        // Saving the folder's own settings detaches it entirely — no
+        // field-by-field merge.
+        let own = WorkTaskFolderSettings {
+            max_concurrent: 1,
+            ..Default::default()
+        };
+        settings_set(&db.conn, folder_id, &own).await.unwrap();
+        let s = settings_get_effective(&db.conn, folder_id).await.unwrap();
+        assert_eq!(s.max_concurrent, 1);
+        assert!(s.init_command.is_none());
+    }
+
+    #[tokio::test]
+    async fn folders_with_todos_lists_distinct_live_folders() {
+        let db = fresh_in_memory_db().await;
+        let f1 = seed_folder(&db, "/tmp/wt-todos-1").await;
+        let f2 = seed_folder(&db, "/tmp/wt-todos-2").await;
+        create(&db.conn, draft(f1, "a")).await.unwrap();
+        create(&db.conn, draft(f1, "b")).await.unwrap();
+        let started = create(&db.conn, draft(f2, "c")).await.unwrap();
+        assert_eq!(folders_with_todos(&db.conn).await.unwrap(), vec![f1, f2]);
+        // A folder whose only task left todo drops out.
+        claim_for_run(&db.conn, started.id, WorkTaskStatus::Todo, "user")
+            .await
+            .unwrap();
+        assert_eq!(folders_with_todos(&db.conn).await.unwrap(), vec![f1]);
+    }
+
+    #[tokio::test]
     async fn delete_rules() {
         let db = fresh_in_memory_db().await;
         let folder_id = seed_folder(&db, "/tmp/wt-del").await;
@@ -1947,110 +2019,6 @@ mod tests {
         assert!(mark_running(&db.conn, id, seq, 1, "c").await.unwrap());
         assert!(settle_review(&db.conn, id, seq, None, None).await.unwrap());
         seq
-    }
-
-    fn pending(attempts: i32) -> crate::models::WorkTaskPendingMerge {
-        crate::models::WorkTaskPendingMerge {
-            message: "feat: t".into(),
-            strategy: "squash".into(),
-            delete_worktree: true,
-            attempts,
-            conflict_files: vec!["a.rs".into()],
-        }
-    }
-
-    #[tokio::test]
-    async fn conflict_repair_moves_the_intent_and_every_exit_clears_it() {
-        let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/wt-repair").await;
-        let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
-        let seq = to_review(&db, t.id).await;
-
-        let state = WorkTaskMergeState {
-            pre_merge_head: "abc".into(),
-            synced_base_sha: None,
-            message: "feat: t".into(),
-            strategy: "squash".into(),
-            delete_worktree: true,
-        };
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
-
-        // merging → queued: intent moves from merge_state to pending_merge,
-        // run_seq bumps like every claim.
-        let repair_seq = merge_to_repair(&db.conn, t.id, &pending(1))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(repair_seq, seq + 1);
-        let row = get_model(&db.conn, t.id).await.unwrap();
-        assert_eq!(row.status, WorkTaskStatus::Queued);
-        assert!(row.merge_state.is_none());
-        assert!(row.pending_merge.is_some());
-        assert!(get(&db.conn, t.id).await.unwrap().repairing);
-        // A second repair claim loses (no longer merging).
-        assert!(merge_to_repair(&db.conn, t.id, &pending(2))
-            .await
-            .unwrap()
-            .is_none());
-        let events = list_events(&db.conn, t.id, 100).await.unwrap();
-        assert!(events.iter().any(|e| e.kind == "merge_conflict"));
-
-        // The repaired run settles into review with the intent still attached
-        // (the engine consumes it explicitly before re-firing the merge).
-        assert!(mark_running(&db.conn, t.id, repair_seq, 1, "c2").await.unwrap());
-        assert!(settle_review(&db.conn, t.id, repair_seq, None, None)
-            .await
-            .unwrap());
-        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_some());
-        clear_pending_merge(&db.conn, t.id).await.unwrap();
-        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_none());
-
-        // Every other exit clears a lingering intent: a user claim (return)…
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
-        assert!(merge_to_repair(&db.conn, t.id, &pending(1))
-            .await
-            .unwrap()
-            .is_some());
-        let seq = claim_for_run(&db.conn, t.id, WorkTaskStatus::Queued, "user")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_none());
-
-        // …a failure…
-        assert!(mark_running(&db.conn, t.id, seq, 1, "c3").await.unwrap());
-        assert!(settle_review(&db.conn, t.id, seq, None, None).await.unwrap());
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
-        assert!(merge_to_repair(&db.conn, t.id, &pending(1))
-            .await
-            .unwrap()
-            .is_some());
-        assert!(fail(
-            &db.conn,
-            t.id,
-            &[WorkTaskStatus::Queued],
-            None,
-            "setup_error",
-            None
-        )
-        .await
-        .unwrap());
-        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_none());
-
-        // …and a cancel.
-        let seq = claim_for_run(&db.conn, t.id, WorkTaskStatus::Failed, "user")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(mark_running(&db.conn, t.id, seq, 1, "c4").await.unwrap());
-        assert!(settle_review(&db.conn, t.id, seq, None, None).await.unwrap());
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap());
-        assert!(merge_to_repair(&db.conn, t.id, &pending(1))
-            .await
-            .unwrap()
-            .is_some());
-        assert!(cancel(&db.conn, t.id).await.unwrap());
-        assert!(get_model(&db.conn, t.id).await.unwrap().pending_merge.is_none());
     }
 
     #[tokio::test]

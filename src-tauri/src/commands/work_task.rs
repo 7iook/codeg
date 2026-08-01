@@ -143,7 +143,8 @@ pub async fn work_task_start_core(id: i32) -> Result<(), DbError> {
     engine()?.start(id).await.map_err(DbError::Validation)
 }
 
-pub async fn work_task_start_all_core(folder_id: i32) -> Result<u32, DbError> {
+/// `folder_id: None` = the global sweep — every folder holding todos.
+pub async fn work_task_start_all_core(folder_id: Option<i32>) -> Result<u32, DbError> {
     engine()?
         .start_all(folder_id)
         .await
@@ -190,36 +191,20 @@ pub async fn work_task_cancel_core(id: i32) -> Result<(), DbError> {
     engine()?.cancel(id).await.map_err(DbError::Validation)
 }
 
-/// Kick off the merge and return immediately — progress and the outcome ride
-/// the `task://changed` events (merging → done, or back to review with a
-/// readable error). Preconditions (in review, message present) are validated
-/// before the spawn so the caller still gets immediate feedback for those.
+/// Dispatch the merge generation: the agent lands the task in its session and
+/// the outcome rides the `task://changed` events (merging → done, or back to
+/// review with a readable error). This awaits only the dispatch (validation +
+/// agent spawn), so refused merges surface directly in the dialog.
+/// `message: None` = the agent writes the commit message itself.
 pub async fn work_task_merge_core(
-    db: &AppDatabase,
     id: i32,
-    message: String,
-    strategy: Option<String>,
+    message: Option<String>,
     delete_worktree: bool,
-    auto_resolve: Option<bool>,
 ) -> Result<(), DbError> {
-    let engine = engine()?;
-    let task = work_task_service::get_model(&db.conn, id).await?;
-    if task.status != WorkTaskStatus::Review {
-        return Err(DbError::Validation("task is not in review".to_string()));
-    }
-    if message.trim().is_empty() {
-        return Err(DbError::Validation("commit message is required".to_string()));
-    }
-    let auto_resolve = auto_resolve.unwrap_or(true);
-    tokio::spawn(async move {
-        if let Err(e) = engine
-            .merge_task(id, message, strategy, delete_worktree, auto_resolve, 0)
-            .await
-        {
-            tracing::info!("[work_task] merge {id}: {e}");
-        }
-    });
-    Ok(())
+    engine()?
+        .merge_task(id, message, delete_worktree)
+        .await
+        .map_err(DbError::Validation)
 }
 
 /// Archive / unarchive a terminal task (pure DB; no engine needed). Archived
@@ -299,6 +284,25 @@ pub async fn work_task_settings_get_core(
     work_task_service::settings_get(&db.conn, folder_id).await
 }
 
+/// Effective settings after the folder → global → built-in fallback — what
+/// the engine will actually use for this folder (editor prefill, merge dialog
+/// seeding).
+pub async fn work_task_settings_effective_core(
+    db: &AppDatabase,
+    folder_id: i32,
+) -> Result<WorkTaskFolderSettings, DbError> {
+    work_task_service::settings_get_effective(&db.conn, folder_id).await
+}
+
+/// The folder's own settings row, or `None` when it follows the global
+/// defaults — the settings dialog's source-of-truth probe.
+pub async fn work_task_settings_get_own_core(
+    db: &AppDatabase,
+    folder_id: i32,
+) -> Result<Option<WorkTaskFolderSettings>, DbError> {
+    work_task_service::settings_get_own(&db.conn, folder_id).await
+}
+
 pub async fn work_task_settings_set_core(
     emitter: &EventEmitter,
     db: &AppDatabase,
@@ -306,6 +310,23 @@ pub async fn work_task_settings_set_core(
     settings: WorkTaskFolderSettings,
 ) -> Result<(), DbError> {
     work_task_service::settings_set(&db.conn, folder_id, &settings).await?;
+    emit_event(
+        emitter,
+        WORK_TASK_CHANGED_EVENT,
+        WorkTaskChange::Settings { folder_id },
+    );
+    nudge_pump(folder_id);
+    Ok(())
+}
+
+/// Remove the folder's own settings row — it reverts to the global defaults.
+/// Same nudges as a set: auto-process/concurrency may effectively change.
+pub async fn work_task_settings_delete_core(
+    emitter: &EventEmitter,
+    db: &AppDatabase,
+    folder_id: i32,
+) -> Result<(), DbError> {
+    work_task_service::settings_delete(&db.conn, folder_id).await?;
     emit_event(
         emitter,
         WORK_TASK_CHANGED_EVENT,
@@ -427,7 +448,7 @@ pub async fn work_task_start(id: i32) -> Result<(), DbError> {
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn work_task_start_all(folder_id: i32) -> Result<u32, DbError> {
+pub async fn work_task_start_all(folder_id: Option<i32>) -> Result<u32, DbError> {
     work_task_start_all_core(folder_id).await
 }
 
@@ -462,14 +483,11 @@ pub async fn work_task_cancel(id: i32) -> Result<(), DbError> {
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn work_task_merge(
-    db: tauri::State<'_, AppDatabase>,
     id: i32,
-    message: String,
-    strategy: Option<String>,
+    message: Option<String>,
     delete_worktree: bool,
-    auto_resolve: Option<bool>,
 ) -> Result<(), DbError> {
-    work_task_merge_core(&db, id, message, strategy, delete_worktree, auto_resolve).await
+    work_task_merge_core(id, message, delete_worktree).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -519,6 +537,24 @@ pub async fn work_task_settings_get(
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_settings_effective(
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+) -> Result<WorkTaskFolderSettings, DbError> {
+    work_task_settings_effective_core(&db, folder_id).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_settings_get_own(
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+) -> Result<Option<WorkTaskFolderSettings>, DbError> {
+    work_task_settings_get_own_core(&db, folder_id).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn work_task_settings_set(
     app: tauri::AppHandle,
     db: tauri::State<'_, AppDatabase>,
@@ -526,6 +562,16 @@ pub async fn work_task_settings_set(
     settings: WorkTaskFolderSettings,
 ) -> Result<(), DbError> {
     work_task_settings_set_core(&EventEmitter::Tauri(app), &db, folder_id, settings).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_settings_delete(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+) -> Result<(), DbError> {
+    work_task_settings_delete_core(&EventEmitter::Tauri(app), &db, folder_id).await
 }
 
 #[cfg(feature = "tauri-runtime")]

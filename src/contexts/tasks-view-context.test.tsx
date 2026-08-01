@@ -65,7 +65,6 @@ function sample(id: number, status: WorkTask["status"]): WorkTask {
     additions: null,
     deletions: null,
     merge_commit: null,
-    repairing: false,
     preflight: null,
     archived_at: null,
     created_at: "2026-08-01T00:00:00Z",
