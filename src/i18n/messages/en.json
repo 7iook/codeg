@@ -2602,7 +2602,14 @@
         "moreFiles": "+{count} more files",
         "plan": "Plan",
         "allowedActions": "Allowed actions",
-        "targetMode": "Target mode: {mode}"
+        "targetMode": "Target mode: {mode}",
+        "optionGrants": "What each option grants",
+        "changeScopeSession": "This session",
+        "changeScopeProcess": "This run",
+        "changeScopeUser": "Saved to user settings",
+        "changeScopeProject": "Saved to project settings",
+        "changeScopeProjectLocal": "Saved to local project settings",
+        "changeScopePersistent": "Saved permanently"
       },
       "questionDialog": {
         "title": "Agent is asking a question",

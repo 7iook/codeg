@@ -548,11 +548,13 @@ pub struct PermissionOptionInfo {
     pub name: String,
     pub kind: String,
     /// The option's ACP `_meta`, forwarded verbatim (same opaque-passthrough
-    /// treatment as the request's `tool_call`). codex-acp ≥1.1.8 (#342) hangs
+    /// treatment as the request's `tool_call`). codex-acp ≥1.1.8 (#342) and
+    /// claude-agent-acp ≥0.64.1 (#930) hang
     /// `_meta.permission = {version: 1, changes: [...]}` here, where each change
     /// carries a ready-made human `description` of what picking this option
-    /// would grant and for how long — the permission card renders those instead
-    /// of leaving the user to guess what "Allow for Session" covers.
+    /// would grant, plus the `lifetime` saying for how long — the permission
+    /// card renders those instead of leaving the user to guess what "Allow for
+    /// Session" or "Always Allow" covers.
     ///
     /// `default` so pre-existing serialized snapshots (`PendingPermissionState`,
     /// the pet payload, the chat-channel bridge) still deserialize.

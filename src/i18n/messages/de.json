@@ -2602,7 +2602,14 @@
         "moreFiles": "+{count} weitere Dateien",
         "plan": "Arbeitsplan",
         "allowedActions": "Erlaubte Aktionen",
-        "targetMode": "Zielmodus: {mode}"
+        "targetMode": "Zielmodus: {mode}",
+        "optionGrants": "Was jede Option gewährt",
+        "changeScopeSession": "Diese Sitzung",
+        "changeScopeProcess": "Dieser Lauf",
+        "changeScopeUser": "In Benutzereinstellungen gespeichert",
+        "changeScopeProject": "In Projekteinstellungen gespeichert",
+        "changeScopeProjectLocal": "In lokalen Projekteinstellungen gespeichert",
+        "changeScopePersistent": "Dauerhaft gespeichert"
       },
       "questionDialog": {
         "title": "Agent stellt eine Frage",

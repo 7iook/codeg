@@ -348,14 +348,25 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // `steering_prompt_required_min_version` and every session rides
             // the codeg-mcp `check_user_feedback` pull (see
             // `manager::submit_feedback`); the full wiring stays in place to
-            // re-enable on a fixed release. 0.64.0 also
+            // re-enable on a fixed release (0.64.1 does NOT fix it — its
+            // `steer()` is byte-identical to 0.64.0's). 0.64.0 also
             // marks the per-question
             // free-text "Other" elicitation field with the deliberately
             // un-namespaced `_meta._askUserQuestionCustomAnswer` (#929, omitted
             // from the release notes) — see `question::is_custom_answer_property`.
+            // 0.64.1 (#930, likewise absent from its notes) adopts the
+            // option-level `_meta.permission = {version, changes[]}` contract
+            // codex already speaks, so Claude permission cards now spell out
+            // what each button grants; its `lifetime` is what
+            // `parsePermissionOptionChanges` reads for the duration, since
+            // Claude — unlike codex — never states it in the description.
+            // 0.64.1's other change (#938, ExitPlanMode Markdown as
+            // `plan_update`) is inert here: it gates on
+            // `clientCapabilities.plan`, which sacp 11.0.0 cannot express, so
+            // the plan keeps riding the switch_mode tool call unchanged.
             distribution: AgentDistribution::Npx {
-                version: "0.64.0",
-                package: "@agentclientprotocol/claude-agent-acp@0.64.0",
+                version: "0.64.1",
+                package: "@agentclientprotocol/claude-agent-acp@0.64.1",
                 cmd: "claude-agent-acp",
                 args: &[],
                 env: &[],
@@ -419,7 +430,9 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // the SAME `session/prompt`. 1.1.8 (#342) also hangs a structured
             // `_meta.permission = {version, changes[]}` on each permission
             // option, whose `changes[].description` codeg surfaces in the
-            // permission card. The `clientCapabilities.plan` path (structured
+            // permission card — the contract claude-agent-acp joined in 0.64.1
+            // (#930), so that rendering is no longer codex-only. The
+            // `clientCapabilities.plan` path (structured
             // `plan_update`s) does NOT apply: sacp 11.0.0's schema has neither
             // the capability nor the session-update variant, so plans keep
             // arriving as `agent_message_chunk`s. That also makes 1.1.9 (#354,
@@ -850,8 +863,8 @@ mod tests {
     fn registry_pins_current_acp_agent_versions() {
         assert_npx_version(
             AgentType::ClaudeCode,
-            "0.64.0",
-            "@agentclientprotocol/claude-agent-acp@0.64.0",
+            "0.64.1",
+            "@agentclientprotocol/claude-agent-acp@0.64.1",
             Some("22.0.0"),
         );
         assert_npx_version(

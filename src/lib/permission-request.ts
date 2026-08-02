@@ -819,29 +819,90 @@ const MAX_PERMISSION_CHANGES = 6
 const MAX_PERMISSION_CHANGE_CHARS = 200
 
 /**
- * Human-readable descriptions of what picking a permission option would change.
+ * How long a permission change lasts, and where it is written — normalized from
+ * the wire's `lifetime: {scope, storage?}` pair into one flat token the card can
+ * label directly.
  *
- * codex-acp ≥1.1.8 (#342) hangs `_meta.permission = {version: 1, changes: [...]}`
- * on each `PermissionOption`, where every change already carries a rendered
- * English sentence ("Allow access to api.example.com for this session", "Allow
- * commands starting with npm test"). Only `version: 1` is read — a future
- * revision may reshape `changes`, and showing it half-understood is worse than
- * showing nothing. The structural fields (`targets`, `lifetime`, `ruleBehavior`)
- * are deliberately ignored: `description` is the agent's own summary of them.
+ * `persistent` is the deliberate catch-all for a `scope: "persistent"` whose
+ * `storage` we do not recognize: the destination is unknown but the fact that it
+ * OUTLIVES the session is the part the user must not miss, so it degrades to a
+ * weaker warning rather than to silence.
+ */
+export type PermissionChangeScope =
+  | "session"
+  | "process"
+  | "user"
+  | "project"
+  | "project_local"
+  | "persistent"
+
+export interface PermissionOptionChange {
+  /** The agent's own rendered sentence for this change. */
+  description: string
+  /**
+   * `null` when the change carries no lifetime, reports `scope: "unknown"`, or
+   * uses a scope this build does not know — the card then says nothing about
+   * duration rather than guessing at one.
+   */
+  scope: PermissionChangeScope | null
+}
+
+/** Wire `lifetime` → {@link PermissionChangeScope}; see the type's doc. */
+function parseChangeScope(lifetime: unknown): PermissionChangeScope | null {
+  const record = asObject(lifetime)
+  const scope = pickString(record, ["scope"])
+  if (scope === "session") return "session"
+  if (scope === "process") return "process"
+  if (scope !== "persistent") return null
+  switch (pickString(record, ["storage"])) {
+    case "user":
+      return "user"
+    case "project":
+      return "project"
+    case "project_local":
+      return "project_local"
+    default:
+      return "persistent"
+  }
+}
+
+/**
+ * What picking a permission option would change: the agent's own sentence for
+ * each change, plus how long it lasts.
+ *
+ * codex-acp ≥1.1.8 (#342) and claude-agent-acp ≥0.64.1 (#930) both hang
+ * `_meta.permission = {version: 1, changes: [...]}` on a `PermissionOption`,
+ * where every change carries a rendered English sentence ("Allow access to
+ * api.example.com for this session", "Allow all Bash calls"). Only `version: 1`
+ * is read — a future revision may reshape `changes`, and showing it
+ * half-understood is worse than showing nothing.
+ *
+ * `lifetime` is read because `description` alone does NOT always answer "for how
+ * long": codex writes the duration into its sentences, claude does not — it
+ * reports `{scope: "session"}` vs `{scope: "persistent", storage: "project"}`
+ * structurally instead. Left unread, claude's most common card would pair an
+ * "Always Allow" button with "Allow all Bash calls" and never reveal that the
+ * grant expires with the session (or, worse, that it is about to be written into
+ * settings the repo commits). The remaining structural fields (`targets`,
+ * `ruleBehavior`) stay ignored: those `description` really does summarize.
  */
 export function parsePermissionOptionChanges(
   meta: Record<string, unknown> | null | undefined
-): string[] {
+): PermissionOptionChange[] {
   const permission = asObject(pickValue(asObject(meta), ["permission"]))
   if (!permission || permission.version !== 1) return []
   const changes = permission.changes
   if (!Array.isArray(changes)) return []
-  const out: string[] = []
+  const out: PermissionOptionChange[] = []
   for (const change of changes) {
     if (out.length >= MAX_PERMISSION_CHANGES) break
-    const description = pickString(asObject(change), ["description"])
+    const record = asObject(change)
+    const description = pickString(record, ["description"])
     if (!description) continue
-    out.push(description.slice(0, MAX_PERMISSION_CHANGE_CHARS))
+    out.push({
+      description: description.slice(0, MAX_PERMISSION_CHANGE_CHARS),
+      scope: parseChangeScope(pickValue(record, ["lifetime"])),
+    })
   }
   return out
 }

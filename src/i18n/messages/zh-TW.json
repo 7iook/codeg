@@ -2602,7 +2602,14 @@
         "moreFiles": "+{count} 個更多檔案",
         "plan": "計畫",
         "allowedActions": "允許的操作",
-        "targetMode": "目標模式：{mode}"
+        "targetMode": "目標模式：{mode}",
+        "optionGrants": "各選項將授予的權限",
+        "changeScopeSession": "本次工作階段",
+        "changeScopeProcess": "本次執行",
+        "changeScopeUser": "儲存至使用者設定",
+        "changeScopeProject": "儲存至專案設定",
+        "changeScopeProjectLocal": "儲存至本機專案設定",
+        "changeScopePersistent": "永久儲存"
       },
       "questionDialog": {
         "title": "代理正在提問",

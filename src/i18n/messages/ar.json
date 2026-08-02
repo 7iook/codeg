@@ -2602,7 +2602,14 @@
         "moreFiles": "+{count} ملف إضافي",
         "plan": "الخطة",
         "allowedActions": "الإجراءات المسموح بها",
-        "targetMode": "وضع الهدف: {mode}"
+        "targetMode": "وضع الهدف: {mode}",
+        "optionGrants": "ما يمنحه كل خيار",
+        "changeScopeSession": "هذه الجلسة",
+        "changeScopeProcess": "هذا التشغيل",
+        "changeScopeUser": "محفوظ في إعدادات المستخدم",
+        "changeScopeProject": "محفوظ في إعدادات المشروع",
+        "changeScopeProjectLocal": "محفوظ في إعدادات المشروع المحلية",
+        "changeScopePersistent": "محفوظ بشكل دائم"
       },
       "questionDialog": {
         "title": "الوكيل يطرح سؤالاً",

@@ -1023,7 +1023,8 @@ export interface PermissionOptionInfo {
   kind: string
   /**
    * The option's ACP `_meta`, forwarded verbatim from the wire. codex-acp
-   * ≥1.1.8 hangs `permission: {version: 1, changes: [...]}` here — see
+   * ≥1.1.8 and claude-agent-acp ≥0.64.1 hang
+   * `permission: {version: 1, changes: [...]}` here — see
    * `parsePermissionOptionChanges` in `lib/permission-request.ts`. Absent for
    * agents that send no option metadata.
    */

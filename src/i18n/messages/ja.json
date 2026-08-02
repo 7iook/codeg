@@ -2602,7 +2602,14 @@
         "moreFiles": "+{count} 件の追加ファイル",
         "plan": "計画",
         "allowedActions": "許可されたアクション",
-        "targetMode": "対象モード: {mode}"
+        "targetMode": "対象モード: {mode}",
+        "optionGrants": "各選択肢が許可する内容",
+        "changeScopeSession": "このセッション",
+        "changeScopeProcess": "この実行",
+        "changeScopeUser": "ユーザー設定に保存",
+        "changeScopeProject": "プロジェクト設定に保存",
+        "changeScopeProjectLocal": "ローカルプロジェクト設定に保存",
+        "changeScopePersistent": "永続的に保存"
       },
       "questionDialog": {
         "title": "エージェントが質問しています",

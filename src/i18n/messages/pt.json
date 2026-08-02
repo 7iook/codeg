@@ -2602,7 +2602,14 @@
         "moreFiles": "+{count} arquivos a mais",
         "plan": "Plano",
         "allowedActions": "Ações permitidas",
-        "targetMode": "Modo de destino: {mode}"
+        "targetMode": "Modo de destino: {mode}",
+        "optionGrants": "O que cada opção concede",
+        "changeScopeSession": "Esta sessão",
+        "changeScopeProcess": "Esta execução",
+        "changeScopeUser": "Salvo nas configurações do usuário",
+        "changeScopeProject": "Salvo nas configurações do projeto",
+        "changeScopeProjectLocal": "Salvo nas configurações locais do projeto",
+        "changeScopePersistent": "Salvo permanentemente"
       },
       "questionDialog": {
         "title": "O agente está fazendo uma pergunta",

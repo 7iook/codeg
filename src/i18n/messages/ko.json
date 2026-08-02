@@ -2602,7 +2602,14 @@
         "moreFiles": "+{count}개 파일 더",
         "plan": "계획",
         "allowedActions": "허용된 작업",
-        "targetMode": "대상 모드: {mode}"
+        "targetMode": "대상 모드: {mode}",
+        "optionGrants": "각 옵션이 부여하는 권한",
+        "changeScopeSession": "이 세션",
+        "changeScopeProcess": "이 실행",
+        "changeScopeUser": "사용자 설정에 저장",
+        "changeScopeProject": "프로젝트 설정에 저장",
+        "changeScopeProjectLocal": "로컬 프로젝트 설정에 저장",
+        "changeScopePersistent": "영구 저장"
       },
       "questionDialog": {
         "title": "에이전트가 질문하고 있습니다",
