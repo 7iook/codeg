@@ -4143,6 +4143,7 @@
     "actionArchive": "보관",
     "actionUnarchive": "보관 해제",
     "archiveAllDone": "모두 보관",
+    "dropToStart": "놓으면 실행 시작",
     "more": "더 보기",
     "errorView": "보기",
     "toastStartedAll": "{count}개 작업을 대기열에 추가했습니다",

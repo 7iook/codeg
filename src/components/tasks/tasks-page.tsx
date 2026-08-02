@@ -1,6 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
+import { createPortal } from "react-dom"
 import { Reorder, type PanInfo } from "motion/react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
@@ -50,7 +58,7 @@ import {
   groupTasksByColumn,
   type BoardColumnId,
 } from "./board-columns"
-import { TaskCard } from "./task-card"
+import { StatusChip, TaskCard } from "./task-card"
 import { TaskDetailSheet } from "./task-detail-sheet"
 import { TaskEditorDialog } from "./task-editor-dialog"
 import { TaskMergeDialog } from "./task-merge-dialog"
@@ -145,13 +153,39 @@ export function TasksPage() {
   useEffect(() => {
     saveTasksBoardFilter(boardFilter)
   }, [boardFilter])
-  // Drag state for the pending column (enabled only with a folder selected —
-  // sort_order is per folder, so a mixed-folder列 has no persistable order).
+  // Dragging a pending card is always available: dropping it on In-progress
+  // starts the task and needs no order at all. Only the REORDER half waits on
+  // a folder — sort_order is per folder, so a mixed-folder列 has nothing it
+  // could persist, and the cards simply don't shuffle there.
   const [dragOrder, setDragOrder] = useState<number[] | null>(null)
   const dragOrderRef = useRef<number[] | null>(null)
   dragOrderRef.current = dragOrder
-  const [draggingTodo, setDraggingTodo] = useState(false)
   const inProgressColRef = useRef<HTMLDivElement | null>(null)
+  // A drop acts on the LIVE row, not the snapshot the drag started from: the
+  // provider refetches throughout a drag, and the engine's auto-processor can
+  // claim a pending task while it is in the air.
+  const tasksRef = useRef(tasks)
+  tasksRef.current = tasks
+  // The dragged card cannot visually leave its column — the column is a scroll
+  // area, so it clips — which made the drop read as impossible even though it
+  // worked. A fixed-position preview follows the pointer instead, portalled
+  // clear of every clipping and transformed ancestor.
+  const [drag, setDrag] = useState<{ task: WorkTask; width: number } | null>(
+    null
+  )
+  const [dropArmed, setDropArmed] = useState(false)
+  const dropArmedRef = useRef(false)
+  const ghostRef = useRef<HTMLDivElement | null>(null)
+  // Grab offset inside the card and the card's width, both read at pointerdown
+  // (the drag events' native `currentTarget` is gone by the time they fire),
+  // so the preview appears exactly over the card and tracks the pointer 1:1.
+  const grabRef = useRef({ dx: 0, dy: 0, width: 0 })
+  const pointRef = useRef({ x: 0, y: 0 })
+  // A drag ends with a click on the card underneath; without this latch the
+  // detail sheet would open on top of whatever the drop just did.
+  const draggedRef = useRef(false)
+  // Set when the gesture ended without a deliberate release (see abortDrag).
+  const dragAbortedRef = useRef(false)
   const [editorOpen, setEditorOpen] = useState(false)
   const [editorTask, setEditorTask] = useState<WorkTask | null>(null)
   const [editorPrefill, setEditorPrefill] =
@@ -277,12 +311,125 @@ export function TasksPage() {
     setEditorOpen(true)
   }, [])
 
-  // Drop on the In-progress column = start (the pending column drags on the y
+  const positionGhost = useCallback((x: number, y: number) => {
+    const el = ghostRef.current
+    if (!el) return
+    const { dx, dy } = grabRef.current
+    el.style.transform = `translate3d(${x - dx}px, ${y - dy}px, 0)`
+  }, [])
+
+  // Place the preview before its first paint, so it never flashes at the
+  // window's top-left corner on the frame it mounts.
+  useLayoutEffect(() => {
+    if (drag) positionGhost(pointRef.current.x, pointRef.current.y)
+  }, [drag, positionGhost])
+
+  const pointerOverInProgress = (x: number, y: number) => {
+    const rect = inProgressColRef.current?.getBoundingClientRect()
+    return (
+      rect != null &&
+      x >= rect.left &&
+      x <= rect.right &&
+      y >= rect.top &&
+      y <= rect.bottom
+    )
+  }
+
+  // Read the grab geometry here rather than in onDragStart: the drag events
+  // carry a native pointer event whose `currentTarget` is already gone.
+  const handleTodoPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    grabRef.current = {
+      dx: e.clientX - rect.left,
+      dy: e.clientY - rect.top,
+      width: rect.width,
+    }
+  }
+
+  const handleTodoDragStart = (task: WorkTask, info: PanInfo) => {
+    draggedRef.current = true
+    dragAbortedRef.current = false
+    pointRef.current = { x: info.point.x, y: info.point.y }
+    setDrag({ task, width: grabRef.current.width })
+  }
+
+  // Pointer-rate: the preview moves by direct style mutation and only the
+  // drop-target flip goes through state.
+  const handleTodoDrag = (info: PanInfo) => {
+    pointRef.current = { x: info.point.x, y: info.point.y }
+    positionGhost(info.point.x, info.point.y)
+    const over = pointerOverInProgress(info.point.x, info.point.y)
+    if (over !== dropArmedRef.current) {
+      dropArmedRef.current = over
+      setDropArmed(over)
+    }
+  }
+
+  // `latchNow` clears the post-drag click latch immediately instead of after a
+  // frame: only a deliberate release is followed by a click.
+  const clearDrag = useCallback((latchNow: boolean) => {
+    setDrag(null)
+    setDropArmed(false)
+    dropArmedRef.current = false
+    if (latchNow) {
+      draggedRef.current = false
+      return
+    }
+    // The click that ends the drag lands before the next frame.
+    requestAnimationFrame(() => {
+      draggedRef.current = false
+    })
+  }, [])
+
+  // A gesture can end without a deliberate drop: the OS cancels it (touch), the
+  // window loses focus with the button still held, or the card unmounts because
+  // something claimed the task while it was in the air. Motion reports the
+  // first case through the same `onDragEnd` as a real release and the last one
+  // not at all — so the preview and the click latch have to be torn down here,
+  // and the drop itself must not run.
+  const abortDrag = useCallback(() => {
+    dragAbortedRef.current = true
+    setDragOrder(null)
+    clearDrag(true)
+  }, [clearDrag])
+
+  useEffect(() => {
+    if (!drag) return
+    const onVisibility = () => {
+      if (document.hidden) abortDrag()
+    }
+    window.addEventListener("blur", abortDrag)
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => {
+      window.removeEventListener("blur", abortDrag)
+      document.removeEventListener("visibilitychange", onVisibility)
+    }
+  }, [drag, abortDrag])
+
+  // The dragged card left the pending column under us — its Reorder.Item
+  // unmounts with it and Motion never reports an end, which would strand the
+  // preview and leave the latch swallowing every card click.
+  useEffect(() => {
+    if (drag && !todoTasks.some((task) => task.id === drag.task.id)) {
+      abortDrag()
+    }
+  }, [drag, todoTasks, abortDrag])
+
+  // Drop on the In-progress column = start (the card itself drags on the y
   // axis, but the POINTER is free — droppedness is judged by its position).
-  // Anywhere else = persist the reorder.
+  // Anywhere else = persist the reorder, when there is one to persist.
   const handleTodoDragEnd = useCallback(
-    (task: WorkTask, info: PanInfo) => {
-      setDraggingTodo(false)
+    (task: WorkTask, event: unknown, info: PanInfo) => {
+      // `pointercancel` routes through Motion's pointer-up handler, so an
+      // abandoned gesture arrives here looking exactly like a release.
+      const aborted =
+        dragAbortedRef.current ||
+        (event as Event | null | undefined)?.type === "pointercancel"
+      clearDrag(aborted)
+      if (aborted) {
+        setDragOrder(null)
+        return
+      }
       const rect = inProgressColRef.current?.getBoundingClientRect()
       const droppedOnInProgress =
         rect != null &&
@@ -290,9 +437,12 @@ export function TasksPage() {
         info.point.x <= rect.right &&
         info.point.y >= rect.top &&
         info.point.y <= rect.bottom
-      if (droppedOnInProgress && task.status === "todo") {
+      if (droppedOnInProgress) {
         setDragOrder(null)
-        void act(() => workTaskStart(task.id))
+        // The row may have advanced during the drag; the engine would reject
+        // the stale start anyway, so don't spend a request and a toast on it.
+        const live = tasksRef.current.find((row) => row.id === task.id)
+        if (live?.status === "todo") void act(() => workTaskStart(task.id))
         return
       }
       const order = dragOrderRef.current
@@ -308,7 +458,7 @@ export function TasksPage() {
         })()
       }
     },
-    [act, folderFilter, refetch]
+    [act, clearDrag, folderFilter, refetch]
   )
 
   // With "all folders" selected this is the global sweep — every folder that
@@ -488,7 +638,11 @@ export function TasksPage() {
                   task={task}
                   folderName={folderNames.get(task.folder_id) ?? null}
                   now={now}
-                  onOpen={() => setDetailTaskId(task.id)}
+                  onOpen={() => {
+                    // Swallow the click that closes a drag.
+                    if (draggedRef.current) return
+                    setDetailTaskId(task.id)
+                  }}
                   onStart={() => void act(() => workTaskStart(task.id))}
                   onCancel={() => void act(() => workTaskCancel(task.id))}
                   onRetry={() => void act(() => workTaskRetry(task.id))}
@@ -561,12 +715,16 @@ export function TasksPage() {
                         // border-border is near-invisible on the plain canvas —
                         // dash with a foreground-derived tone instead.
                         "flex flex-1 flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-muted-foreground/30 p-4 text-center",
-                        // Drop target hint while a pending card is dragged;
-                        // otherwise tint like the cards when a workspace
-                        // background image is on (ws-msg-card is inert without
-                        // one) so the cell stays legible over a photo.
-                        col === "inProgress" && draggingTodo
-                          ? "border-primary/50 bg-primary/5"
+                        // Drop target while a pending card is dragged: quiet
+                        // once the drag starts, loud once the pointer is
+                        // actually inside. Otherwise tint like the cards when a
+                        // workspace background image is on (ws-msg-card is
+                        // inert without one) so the cell stays legible over a
+                        // photo.
+                        col === "inProgress" && drag
+                          ? dropArmed
+                            ? "border-primary bg-primary/10"
+                            : "border-primary/40"
                           : "ws-msg-card"
                       )}
                     >
@@ -577,18 +735,24 @@ export function TasksPage() {
                   ) : (
                     <ScrollArea
                       className={cn(
-                        "min-h-0 flex-1 rounded-xl",
+                        "min-h-0 flex-1 rounded-xl transition-colors",
                         col === "inProgress" &&
-                          draggingTodo &&
-                          "ring-2 ring-primary/40"
+                          drag &&
+                          (dropArmed
+                            ? "bg-primary/5 ring-2 ring-primary"
+                            : "ring-1 ring-primary/25")
                       )}
                     >
-                      {col === "todo" && dragEnabled ? (
+                      {col === "todo" ? (
                         <Reorder.Group
                           as="div"
                           axis="y"
                           values={todoTasks.map((task) => task.id)}
-                          onReorder={(ids: number[]) => setDragOrder(ids)}
+                          // Without a folder there is no order to save, so the
+                          // cards stay put and the drag exists only to start.
+                          onReorder={(ids: number[]) => {
+                            if (dragEnabled) setDragOrder(ids)
+                          }}
                           className={CARD_LIST_CLASS}
                         >
                           {todoTasks.map((task) => (
@@ -596,11 +760,22 @@ export function TasksPage() {
                               key={task.id}
                               value={task.id}
                               as="div"
-                              onDragStart={() => setDraggingTodo(true)}
-                              onDragEnd={(_e: unknown, info: PanInfo) =>
-                                handleTodoDragEnd(task, info)
+                              onPointerDown={handleTodoPointerDown}
+                              onDragStart={(_e: unknown, info: PanInfo) =>
+                                handleTodoDragStart(task, info)
                               }
-                              className="cursor-grab active:cursor-grabbing"
+                              onDrag={(_e: unknown, info: PanInfo) =>
+                                handleTodoDrag(info)
+                              }
+                              onDragEnd={(e: unknown, info: PanInfo) =>
+                                handleTodoDragEnd(task, e, info)
+                              }
+                              className={cn(
+                                "cursor-grab active:cursor-grabbing",
+                                // The preview is the card now; what stays in
+                                // the list is the slot it came from.
+                                drag?.task.id === task.id && "opacity-40"
+                              )}
                             >
                               {cardFor(task)}
                             </Reorder.Item>
@@ -664,6 +839,43 @@ export function TasksPage() {
         onOpenChange={setSettingsOpen}
         folderId={folderFilter}
       />
+
+      {/* Drag preview. Portalled to the body because a fixed element is
+          positioned against the nearest transformed ancestor otherwise, and
+          the board sits inside several. */}
+      {drag
+        ? createPortal(
+            <div
+              ref={ghostRef}
+              className="pointer-events-none fixed left-0 top-0 z-50 will-change-transform"
+              style={{ width: drag.width }}
+              aria-hidden="true"
+            >
+              <div
+                className={cn(
+                  "flex -rotate-1 flex-col gap-2 rounded-xl border bg-card p-3 shadow-lg",
+                  dropArmed
+                    ? "border-primary ring-2 ring-primary/25"
+                    : "border-foreground/15"
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <span className="min-w-0 break-words text-[0.8125rem] font-medium leading-snug">
+                    {drag.task.title}
+                  </span>
+                  <StatusChip task={drag.task} />
+                </div>
+                {dropArmed ? (
+                  <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium text-primary">
+                    <Play className="size-3" aria-hidden="true" />
+                    {t("dropToStart")}
+                  </span>
+                ) : null}
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   )
 }

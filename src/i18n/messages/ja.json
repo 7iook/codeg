@@ -4143,6 +4143,7 @@
     "actionArchive": "アーカイブ",
     "actionUnarchive": "アーカイブ解除",
     "archiveAllDone": "すべてアーカイブ",
+    "dropToStart": "離すと実行を開始",
     "more": "その他",
     "errorView": "表示",
     "toastStartedAll": "{count} 件のタスクをキューに追加しました",

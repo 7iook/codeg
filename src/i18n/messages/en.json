@@ -4143,6 +4143,7 @@
     "actionArchive": "Archive",
     "actionUnarchive": "Unarchive",
     "archiveAllDone": "Archive all",
+    "dropToStart": "Release to start",
     "more": "More",
     "errorView": "View",
     "toastStartedAll": "Queued {count} tasks",

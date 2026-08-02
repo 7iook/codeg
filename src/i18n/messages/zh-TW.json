@@ -4143,6 +4143,7 @@
     "actionArchive": "封存",
     "actionUnarchive": "取消封存",
     "archiveAllDone": "全部封存",
+    "dropToStart": "放開即開始執行",
     "more": "更多",
     "errorView": "檢視",
     "toastStartedAll": "已排隊 {count} 個任務",

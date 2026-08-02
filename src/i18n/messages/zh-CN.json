@@ -4143,6 +4143,7 @@
     "actionArchive": "归档",
     "actionUnarchive": "取消归档",
     "archiveAllDone": "全部归档",
+    "dropToStart": "松开即开始执行",
     "more": "更多",
     "errorView": "查看",
     "toastStartedAll": "已排队 {count} 个任务",

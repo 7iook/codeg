@@ -4143,6 +4143,7 @@
     "actionArchive": "Arquivar",
     "actionUnarchive": "Desarquivar",
     "archiveAllDone": "Arquivar tudo",
+    "dropToStart": "Solte para iniciar",
     "more": "Mais",
     "errorView": "Ver",
     "toastStartedAll": "{count} tarefas enfileiradas",

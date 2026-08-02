@@ -4143,6 +4143,7 @@
     "actionArchive": "Archivieren",
     "actionUnarchive": "Dearchivieren",
     "archiveAllDone": "Alle archivieren",
+    "dropToStart": "Loslassen zum Starten",
     "more": "Mehr",
     "errorView": "Ansehen",
     "toastStartedAll": "{count} Aufgaben eingereiht",

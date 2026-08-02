@@ -4143,6 +4143,7 @@
     "actionArchive": "أرشفة",
     "actionUnarchive": "إلغاء الأرشفة",
     "archiveAllDone": "أرشفة الكل",
+    "dropToStart": "أفلِت للبدء",
     "more": "المزيد",
     "errorView": "عرض",
     "toastStartedAll": "تم إدراج {count} مهام",

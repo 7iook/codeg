@@ -4143,6 +4143,7 @@
     "actionArchive": "Archiver",
     "actionUnarchive": "Désarchiver",
     "archiveAllDone": "Tout archiver",
+    "dropToStart": "Relâchez pour lancer",
     "more": "Plus",
     "errorView": "Voir",
     "toastStartedAll": "{count} tâches mises en file",
