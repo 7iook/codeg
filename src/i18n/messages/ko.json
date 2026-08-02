@@ -1123,6 +1123,16 @@
       "remoteUnavailable": "{versionText}. 현재 원격 버전을 사용할 수 없습니다.",
       "latest": "{versionText}. 이미 최신입니다."
     },
+    "adapter": {
+      "label": "ACP 어댑터",
+      "badge": "ACP 어댑터",
+      "badgeHint": "이 에이전트에 대해 Codeg가 설치하는 것은 벤더 CLI가 아니라 ACP 어댑터 패키지입니다. 둘은 서로 독립적이며 설정을 공유합니다.",
+      "learnMore": "자세히 보기",
+      "missingWithNative": "사용 중인 {nativeLabel}을(를) {nativePath}에서 찾았습니다. Codeg는 에이전트를 ACP로 구동하는데 이 CLI 자체는 ACP를 지원하지 않으므로, 별도의 어댑터 패키지 {adapterPackage}(Agent Client Protocol 프로젝트가 관리, 처음에는 Zed 팀)가 필요합니다. 자체 런타임을 포함하고 있어 기존 {nativeCmd} 명령을 수정하거나 대체하지 않으며, 같은 {configDir}를 읽으므로 기존 로그인과 설정이 그대로 적용됩니다. 아래에서 설치하세요.",
+      "missing": "Codeg는 에이전트를 ACP로 구동하는데 {nativeLabel} 자체는 ACP를 지원하지 않으므로, 별도의 어댑터 패키지 {adapterPackage}(Agent Client Protocol 프로젝트가 관리, 처음에는 Zed 팀)가 필요합니다. 자체 런타임을 포함하므로 {nativeCmd} CLI를 먼저 설치할 필요는 없습니다. 이미 설치했다면 둘은 공존하며 {configDir}의 로그인과 설정을 공유합니다. 아래에서 설치하세요.",
+      "readyWithNative": "어댑터 {adapterCmd}가 설치되어 있습니다. Codeg가 실행하는 것은 이 어댑터이며, {nativePath}에 있는 사용자의 {nativeCmd}가 아닙니다. 둘은 독립된 패키지로 공존하고 모두 {configDir}를 읽으므로 로그인과 설정을 공유합니다.",
+      "ready": "어댑터 {adapterCmd}가 설치되어 있으며 Codeg가 실행하는 것이 바로 이것입니다. 자체 런타임을 포함하므로 {nativeLabel}은 필요하지 않습니다. 나중에 설치해도 둘은 공존하며 {configDir}를 공유합니다."
+    },
     "cline": {
       "configDescription": "Cline API 제공자와 자격 증명을 구성합니다. 설정은 ~/.cline/data/에 저장됩니다."
     },
@@ -2321,7 +2331,8 @@
           "missingConfig": "현재 에이전트 구성을 읽을 수 없습니다.",
           "disabled": "{agent}은(는) 에이전트 설정에서 비활성화되어 있습니다. 연결 전에 활성화하세요.",
           "unavailable": "{agent}은(는) 현재 플랫폼에서 사용할 수 없습니다.",
-          "sdkMissing": "{agent} SDK가 설치되어 있지 않습니다"
+          "sdkMissing": "{agent} SDK가 설치되어 있지 않습니다",
+          "adapterMissing": "{agent}의 ACP 어댑터가 설치되어 있지 않습니다"
         },
         "backendErrors": {
           "initializeTimeout": "{agent} 연결 핸드셰이크가 시간 초과되었습니다(60초 동안 응답 없음). 설정을 열어 에이전트 및 네트워크 구성을 확인하세요.",
@@ -2451,7 +2462,8 @@
         "prepareSessionFailed": "채팅 세션을 준비하지 못했습니다. 다시 시도해 주세요.",
         "createConversationFailed": "대화를 만들지 못했습니다. 다시 시도해 주세요.",
         "askAnythingPlaceholder": "무엇이든 물어보세요...",
-        "agentNotInstalled": "{agent}이(가) 설치되지 않았습니다 · 클릭하여 Agents 설정에서 설치하세요"
+        "agentNotInstalled": "{agent}이(가) 설치되지 않았습니다 · 클릭하여 Agents 설정에서 설치하세요",
+        "agentAdapterNotInstalled": "{agent}의 ACP 어댑터가 설치되지 않았습니다(사용 중인 CLI와는 별개) · 클릭하여 Agents 설정에서 설치하세요"
       },
       "welcomePanel": {
         "greeting": "오늘은 <highlight>무엇을</highlight> 해볼까요?",
@@ -4356,7 +4368,9 @@
       "homebrew_bin_not_on_path": "Homebrew bin에 설치되었지만 앱 PATH에 없습니다(Apple Silicon keg 분리).",
       "terminal_only_path": "이 명령은 터미널에서는 확인되지만 앱에서는 확인되지 않습니다. GUI PATH 불일치입니다. 터미널에서 앱을 실행하거나 에이전트 설정에서 다시 설치하세요.",
       "npm_prefix_timeout": "npm prefix -g가 너무 느립니다(1.5초 초과). 폴백 감지를 건너뛰었습니다. 앱을 재시작한 후 다시 시도하세요.",
-      "node_too_old": "현재 Node.js가 이 에이전트의 요구 버전보다 낮습니다. Node.js를 업그레이드하세요."
+      "node_too_old": "현재 Node.js가 이 에이전트의 요구 버전보다 낮습니다. Node.js를 업그레이드하세요.",
+      "adapter_missing_native_present": "사용 중인 {agent} CLI는 설치되어 있지만, Codeg가 실행하는 것은 별도의 ACP 어댑터 패키지이며 그것이 아직 설치되지 않았습니다. 에이전트 설정에서 설치하세요. 기존 CLI는 건드리지 않으며 로그인도 공유됩니다.",
+      "adapter_missing": "Codeg는 {agent}에 대해 별도의 ACP 어댑터 패키지를 실행하는데, 아직 설치되지 않았습니다. 에이전트 설정에서 설치하세요 — 벤더 CLI만 설치하는 것으로는 충분하지 않습니다."
     }
   }
 }

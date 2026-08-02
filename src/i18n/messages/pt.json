@@ -1123,6 +1123,16 @@
       "remoteUnavailable": "{versionText}. A versão remota está indisponível no momento.",
       "latest": "{versionText}. Já está na versão mais recente."
     },
+    "adapter": {
+      "label": "Adaptador ACP",
+      "badge": "Adaptador ACP",
+      "badgeHint": "Para este agente o Codeg instala um pacote adaptador ACP, não a CLI do fornecedor. Os dois são independentes e compartilham a mesma configuração.",
+      "learnMore": "Saiba mais",
+      "missingWithNative": "Encontramos a sua {nativeLabel} em {nativePath}. O Codeg conversa com os agentes por ACP e essa CLI não fala ACP, então o Codeg precisa de um pacote adaptador separado, {adapterPackage}, mantido pelo projeto Agent Client Protocol (originalmente Zed). Ele traz o próprio runtime, nunca modifica nem substitui o seu comando {nativeCmd} e lê o mesmo {configDir} — seu login e suas configurações continuam valendo. Instale abaixo.",
+      "missing": "O Codeg conversa com os agentes por ACP e a {nativeLabel} não fala ACP, então o Codeg precisa de um pacote adaptador separado, {adapterPackage}, mantido pelo projeto Agent Client Protocol (originalmente Zed). Ele traz o próprio runtime, então a CLI {nativeCmd} não é pré-requisito; se você já a tem, as duas coexistem e compartilham o login e as configurações de {configDir}. Instale abaixo.",
+      "readyWithNative": "O adaptador {adapterCmd} está instalado — é ele que o Codeg inicia, não a sua {nativeCmd} em {nativePath}. São pacotes distintos que coexistem e ambos leem {configDir}, então login e configurações são compartilhados.",
+      "ready": "O adaptador {adapterCmd} está instalado — é ele que o Codeg inicia. Ele traz o próprio runtime, então a {nativeLabel} não é necessária; se instalá-la depois, as duas coexistem e compartilham {configDir}."
+    },
     "cline": {
       "configDescription": "Configure o provedor de API e as credenciais do Cline. As configurações são salvas em ~/.cline/data/."
     },
@@ -2321,7 +2331,8 @@
           "missingConfig": "Não foi possível ler a configuração atual do agente.",
           "disabled": "{agent} está desativado nas configurações de agentes. Ative-o antes de conectar.",
           "unavailable": "{agent} está indisponível na plataforma atual.",
-          "sdkMissing": "O SDK de {agent} não está instalado"
+          "sdkMissing": "O SDK de {agent} não está instalado",
+          "adapterMissing": "O adaptador ACP de {agent} não está instalado"
         },
         "backendErrors": {
           "initializeTimeout": "O handshake de conexão de {agent} expirou (sem resposta após 60 segundos). Abra Configurações para verificar a configuração do agente e da rede.",
@@ -2451,7 +2462,8 @@
         "prepareSessionFailed": "Não foi possível preparar a sessão de chat. Tente novamente.",
         "createConversationFailed": "Não foi possível criar a conversa. Tente novamente.",
         "askAnythingPlaceholder": "Pergunte qualquer coisa...",
-        "agentNotInstalled": "{agent} não está instalado · abra as configurações de Agents para instalá-lo"
+        "agentNotInstalled": "{agent} não está instalado · abra as configurações de Agents para instalá-lo",
+        "agentAdapterNotInstalled": "O adaptador ACP de {agent} não está instalado (separado da sua própria CLI) · abra as configurações de Agents para instalá-lo"
       },
       "welcomePanel": {
         "greeting": "O que você gostaria de <highlight>fazer hoje</highlight>?",
@@ -4356,7 +4368,9 @@
       "homebrew_bin_not_on_path": "Instalado no bin do Homebrew, que não está no PATH do app (divisão de keg no Apple Silicon).",
       "terminal_only_path": "O comando é resolvido no seu terminal, mas não no app: uma diferença de PATH da GUI. Inicie o app por um terminal ou reinstale nas Configurações de agentes.",
       "npm_prefix_timeout": "npm prefix -g foi muito lento (mais de 1,5 s), então a detecção de fallback foi ignorada. Reinicie o app e tente novamente.",
-      "node_too_old": "Seu Node.js ativo é mais antigo do que este agente requer. Atualize o Node.js."
+      "node_too_old": "Seu Node.js ativo é mais antigo do que este agente requer. Atualize o Node.js.",
+      "adapter_missing_native_present": "A sua CLI do {agent} está instalada, mas o Codeg inicia um pacote adaptador ACP separado — e esse ainda não está. Instale-o nas configurações de agentes: ele não mexe na sua CLI e compartilha o mesmo login.",
+      "adapter_missing": "O Codeg inicia um pacote adaptador ACP separado para o {agent}, e ele ainda não está instalado. Instale-o nas configurações de agentes — instalar só a CLI do fornecedor não basta."
     }
   }
 }

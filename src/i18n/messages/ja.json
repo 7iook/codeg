@@ -1123,6 +1123,16 @@
       "remoteUnavailable": "{versionText}。現在リモートバージョンは取得できません。",
       "latest": "{versionText}。すでに最新です。"
     },
+    "adapter": {
+      "label": "ACP アダプター",
+      "badge": "ACP アダプター",
+      "badgeHint": "このエージェントで Codeg がインストールするのはベンダー CLI ではなく ACP アダプターのパッケージです。両者は独立しており、設定は共有されます。",
+      "learnMore": "詳細",
+      "missingWithNative": "お使いの {nativeLabel} を {nativePath} で検出しました。Codeg はエージェントを ACP で駆動しますが、この CLI 自体は ACP に対応していないため、別パッケージのアダプター {adapterPackage}（Agent Client Protocol プロジェクトが保守。当初は Zed チーム）が必要です。独自のランタイムを同梱しており、既存の {nativeCmd} コマンドを変更も置き換えもしません。読み込む設定は同じ {configDir} なので、ログインと設定はそのまま引き継がれます。下のボタンからインストールしてください。",
+      "missing": "Codeg はエージェントを ACP で駆動しますが、{nativeLabel} 自体は ACP に対応していないため、別パッケージのアダプター {adapterPackage}（Agent Client Protocol プロジェクトが保守。当初は Zed チーム）が必要です。独自のランタイムを同梱しているので {nativeCmd} CLI を先に入れる必要はありません。すでにお持ちの場合も両者は共存し、{configDir} のログインと設定を共有します。下のボタンからインストールしてください。",
+      "readyWithNative": "アダプター {adapterCmd} はインストール済みです。Codeg が起動するのはこちらで、あなたの {nativeCmd}（{nativePath}）ではありません。両者は独立したパッケージとして共存し、どちらも {configDir} を読むためログインと設定は共有されます。",
+      "ready": "アダプター {adapterCmd} はインストール済みで、Codeg が起動するのはこれです。独自のランタイムを同梱しているため {nativeLabel} は不要です。後から入れても両者は共存し、{configDir} を共有します。"
+    },
     "cline": {
       "configDescription": "Cline API プロバイダーと認証情報を設定します。設定は ~/.cline/data/ に保存されます。"
     },
@@ -2321,7 +2331,8 @@
           "missingConfig": "現在のエージェント設定を読み取れません。",
           "disabled": "{agent} はエージェント設定で無効になっています。接続前に有効化してください。",
           "unavailable": "{agent} は現在のプラットフォームでは利用できません。",
-          "sdkMissing": "{agent} SDK がインストールされていません"
+          "sdkMissing": "{agent} SDK がインストールされていません",
+          "adapterMissing": "{agent} の ACP アダプターがインストールされていません"
         },
         "backendErrors": {
           "initializeTimeout": "{agent} の接続ハンドシェイクがタイムアウトしました（60 秒以内に応答なし）。設定を開いてエージェントとネットワーク設定を確認してください。",
@@ -2451,7 +2462,8 @@
         "prepareSessionFailed": "チャットセッションを準備できませんでした。もう一度お試しください。",
         "createConversationFailed": "会話を作成できませんでした。もう一度お試しください。",
         "askAnythingPlaceholder": "何でも質問してください...",
-        "agentNotInstalled": "{agent} はインストールされていません · クリックして Agents 設定でインストール"
+        "agentNotInstalled": "{agent} はインストールされていません · クリックして Agents 設定でインストール",
+        "agentAdapterNotInstalled": "{agent} の ACP アダプターが未インストールです（お使いの CLI とは別物）· クリックして Agents 設定でインストール"
       },
       "welcomePanel": {
         "greeting": "今日は<highlight>何を</highlight>しましょうか？",
@@ -4356,7 +4368,9 @@
       "homebrew_bin_not_on_path": "Homebrew の bin にインストールされていますが、アプリの PATH に含まれていません（Apple Silicon の keg 分割）。",
       "terminal_only_path": "このコマンドはターミナルでは解決されますが、アプリでは解決されません。GUI の PATH のずれです。ターミナルからアプリを起動するか、エージェント設定から再インストールしてください。",
       "npm_prefix_timeout": "npm prefix -g が遅すぎました（1.5 秒超）。フォールバック検出をスキップしました。アプリを再起動して再試行してください。",
-      "node_too_old": "使用中の Node.js がこのエージェントの要件より古いです。Node.js をアップグレードしてください。"
+      "node_too_old": "使用中の Node.js がこのエージェントの要件より古いです。Node.js をアップグレードしてください。",
+      "adapter_missing_native_present": "お使いの {agent} CLI は確かにインストールされていますが、Codeg が起動するのは別の ACP アダプターパッケージで、そちらが未インストールです。エージェント設定からインストールしてください。既存の CLI には触れず、ログインも共有されます。",
+      "adapter_missing": "Codeg は {agent} 用に別個の ACP アダプターパッケージを起動しますが、まだインストールされていません。エージェント設定からインストールしてください。ベンダー CLI を入れるだけでは足りません。"
     }
   }
 }

@@ -685,6 +685,13 @@ pub struct AcpAgentInfo {
     pub description: String,
     pub available: bool,
     pub distribution_type: String,
+    /// Whether codeg's entry for this agent is a third-party ACP *adapter*
+    /// wrapping a vendor CLI of a different name (Claude Code, Codex — see
+    /// `registry::acp_adapter_relation`). Lets the surfaces that have no
+    /// preflight result (composer block banner, settings header badge) say
+    /// "the adapter isn't installed" instead of "the agent isn't", without
+    /// hardcoding a second copy of the agent list frontend-side.
+    pub is_acp_adapter: bool,
     /// For custom agents, where the definition came from (`registry` |
     /// `manual`); `None` for built-ins. A manual definition's
     /// `registry_version` is user-typed, so the version-status display shows
@@ -1025,6 +1032,9 @@ pub struct AcpAgentStatus {
     pub available: bool,
     pub enabled: bool,
     pub installed_version: Option<String>,
+    /// See [`AcpAgentInfo::is_acp_adapter`] — the connect pre-check uses it to
+    /// pick the right "not installed" wording.
+    pub is_acp_adapter: bool,
 }
 
 /// Severity of a single diagnostics check / the overall verdict.

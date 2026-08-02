@@ -2665,7 +2665,13 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
 
       return {
         kind: "sdk_missing",
-        reason: t("blocked.sdkMissing", { agent: agentLabel }),
+        // Claude Code / Codex install a separate ACP adapter package, not the
+        // vendor CLI — saying "{agent} is not installed" to someone who has
+        // `claude` on their PATH reads as a bug in codeg. Name what's actually
+        // missing instead.
+        reason: agent.is_acp_adapter
+          ? t("blocked.adapterMissing", { agent: agentLabel })
+          : t("blocked.sdkMissing", { agent: agentLabel }),
       }
     },
     [t]
@@ -4185,12 +4191,15 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       }
       connectingKeysRef.current.add(contextKey)
 
+      // Declared outside the try so the catch below can still tell whether this
+      // agent is an ACP adapter when picking its "not installed" wording.
+      let configuredAgent: AcpAgentStatus | null = null
+
       try {
         // Preflight: read agent status and block if the SDK / binary is
         // not installed. The session page must never trigger a download
         // or install — if the agent is not ready, prompt the user to
         // install it from Agent Settings instead.
-        let configuredAgent: AcpAgentStatus | null = null
         try {
           configuredAgent = await acpGetAgentStatus(agentType)
         } catch (error) {
@@ -4508,7 +4517,9 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           if (message.includes("is not installed")) {
             pushAlertRef.current(
               "error",
-              t("blocked.sdkMissing", { agent: agentLabel }),
+              configuredAgent?.is_acp_adapter
+                ? t("blocked.adapterMissing", { agent: agentLabel })
+                : t("blocked.sdkMissing", { agent: agentLabel }),
               t("agentsSetupHint"),
               [buildOpenAgentsSettingsAction(agentType)]
             )

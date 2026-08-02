@@ -502,6 +502,15 @@ const ConversationTabView = memo(function ConversationTabView({
       info != null && info.enabled && info.available && !info.installed_version
     )
   }, [acpAgents, selectedAgent])
+  // Claude Code / Codex install a separate ACP adapter package rather than the
+  // vendor CLI, so the generic "not installed" banner reads as wrong to anyone
+  // who has `claude`/`codex` in their terminal. Name the adapter instead.
+  const selectedAgentIsAcpAdapter = useMemo(
+    () =>
+      acpAgents.find((a) => a.agent_type === selectedAgent)?.is_acp_adapter ===
+      true,
+    [acpAgents, selectedAgent]
+  )
   const canAutoConnect =
     (hasPersistedConversation || (agentsLoaded && usableAgentCount > 0)) &&
     !awaitingHistoricalSessionId &&
@@ -659,7 +668,12 @@ const ConversationTabView = memo(function ConversationTabView({
   // appears the moment a not-installed agent is selected, independent of whether
   // a (deduped/superseded) connect attempt ever reached the preflight.
   const composerBlockedMessage = selectedAgentNotInstalled
-    ? tWelcome("agentNotInstalled", { agent: getAgentLabel(selectedAgent) })
+    ? tWelcome(
+        selectedAgentIsAcpAdapter
+          ? "agentAdapterNotInstalled"
+          : "agentNotInstalled",
+        { agent: getAgentLabel(selectedAgent) }
+      )
     : (autoConnectError ?? agentConnectError)
 
   useEffect(() => {

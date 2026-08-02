@@ -167,6 +167,7 @@ beforeEach(() => {
     enabled: true,
     available: true,
     installed_version: "1.0.0",
+    is_acp_adapter: true,
   })
   h.acpConnect.mockResolvedValue("spawned-conn")
   h.acpDisconnect.mockResolvedValue(undefined)
@@ -1138,6 +1139,7 @@ describe("AcpConnectionsProvider Grok cross-agent-type model switch", () => {
       enabled: true,
       available: true,
       installed_version: "0.2.94",
+      is_acp_adapter: false,
     })
     await mountProvider()
     await act(async () => {
@@ -1332,6 +1334,7 @@ describe("HYDRATE_FROM_SNAPSHOT last_error recovery", () => {
       enabled: true,
       available: true,
       installed_version: "1.0.0",
+      is_acp_adapter: true,
     })
     await mountProvider()
     await act(async () => {
