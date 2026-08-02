@@ -675,6 +675,9 @@ impl DelegationListener {
             working_dir,
             requested_working_dir,
             external_handle: req.external_handle,
+            // stage 6 parses `subagent_type` off `req.input` here; stage 1
+            // lands the field as `None` so the type checks.
+            subagent_type: None,
         };
         self.broker.start_delegation(delegation_req).await
     }
@@ -779,6 +782,7 @@ fn report_canceled(message: &str) -> DelegationTaskReport {
         error_code: Some("canceled".into()),
         message: Some(message.into()),
         duration_ms: None,
+        applied_persona: None,
     }
 }
 
@@ -793,6 +797,7 @@ fn report_failed(error_code: &str, message: &str) -> DelegationTaskReport {
         error_code: Some(error_code.into()),
         message: Some(message.into()),
         duration_ms: None,
+        applied_persona: None,
     }
 }
 
@@ -808,6 +813,7 @@ fn unknown_report(task_id: &str) -> DelegationTaskReport {
         error_code: None,
         message: Some("unknown task id".into()),
         duration_ms: None,
+        applied_persona: None,
     }
 }
 

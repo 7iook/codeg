@@ -1650,6 +1650,7 @@ fn report_from_outcome(
         error_code,
         message,
         duration_ms,
+        applied_persona: None,
     }
 }
 
@@ -1702,6 +1703,7 @@ fn running_ack(
         error_code: None,
         message: Some(message),
         duration_ms: None,
+        applied_persona: None,
     }
 }
 
@@ -1741,6 +1743,7 @@ fn running_report(task_id: &str, task: &RunningTask) -> DelegationTaskReport {
         // "Running.\nLatest sub-agent reply: …" when the child has live output.
         message: Some("Running.".to_string()),
         duration_ms: None,
+        applied_persona: None,
     }
 }
 
@@ -1755,6 +1758,7 @@ fn completed_report(task_id: &str, c: &CompletedTask) -> DelegationTaskReport {
         error_code: c.error_code.clone(),
         message: c.message.clone(),
         duration_ms: Some(c.duration_ms),
+        applied_persona: None,
     }
 }
 
@@ -1780,6 +1784,7 @@ fn last_known_report_locked(
             error_code: None,
             message: None,
             duration_ms: None,
+            applied_persona: None,
         }
     };
     report.message = Some(
@@ -1807,6 +1812,7 @@ fn unknown_report(task_id: &str) -> DelegationTaskReport {
                 .to_string(),
         ),
         duration_ms: None,
+        applied_persona: None,
     }
 }
 
@@ -1825,6 +1831,7 @@ fn db_report(task_id: &str, rec: &ChildStatusRecord) -> DelegationTaskReport {
             rec.child_conversation_id
         )),
         duration_ms: None,
+        applied_persona: None,
     }
 }
 
@@ -1886,6 +1893,7 @@ fn report_to_outcome(report: &DelegationTaskReport) -> DelegationOutcome {
             turn_count: 1,
             duration_ms: report.duration_ms.unwrap_or(0),
             token_usage: None,
+            applied_persona: report.applied_persona.clone(),
         }),
         // Running never reaches here (the shim loops until terminal); the other
         // states all project onto Err.
@@ -4742,6 +4750,7 @@ impl DelegationBroker {
                     error_code: None,
                     message: Some("Continuation already dispatching.".to_string()),
                     duration_ms: None,
+                    applied_persona: None,
                 };
             }
             let Some(s) = inner.sessions.get_mut(task_id) else {

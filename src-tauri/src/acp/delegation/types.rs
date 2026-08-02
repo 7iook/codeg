@@ -71,6 +71,31 @@ pub struct DelegationRequest {
     pub requested_working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_handle: Option<String>,
+    /// Optional persona / sub-agent name nominated by the LLM's
+    /// `delegate_to_agent` call. Grammar: 1-64 chars of `[A-Za-z0-9_-]`
+    /// (see [`super::persona::is_valid_persona_name`]); the broker
+    /// enforces it BEFORE any filesystem access.
+    ///
+    /// Semantic strength varies by `agent_type`:
+    /// - `Kiro` → REAL persona, translated to `--agent <name>` argv.
+    /// - `ClaudeCode` / `Codex` → BEST-EFFORT hint, body of
+    ///   `<HOME>/.claude/agents/<name>.md` (or `.codex`) prepended to the
+    ///   first turn; frontmatter high-order fields don't take effect.
+    /// - Any other agent_type → Ignored; a `[note]` rides
+    ///   `DelegationSuccess.text`; delegation still succeeds.
+    ///
+    /// # Naming trap — NOT the same `subagent_type` other parsers use
+    ///
+    /// Several CLI adapters
+    /// (`parsers::codebuddy` / `parsers::cursor` / `parsers::opencode` /
+    /// `parsers::kimi_code`) have their own `subagent_type` concept for
+    /// parsing INBOUND tool_use metadata — an entirely different flow
+    /// (they read what a running agent emitted, this field records what
+    /// the parent asked for). Do NOT wire this field into those parsers
+    /// or vice versa; the wire shape happens to match, the semantics do
+    /// not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +113,14 @@ pub struct DelegationSuccess {
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<TokenUsage>,
+    /// What the broker actually applied for this delegation, if the LLM
+    /// nominated a persona via `subagent_type`. Only populated once the
+    /// spawn (and, for `Hint` effects, the first-turn send) actually
+    /// succeeded — a failed spawn leaves this `None` and the failure
+    /// rides `DelegationOutcome::Err.code == "invalid_persona"` instead
+    /// (R3 F2 rejects a symmetric `AppliedPersona::Failed` variant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_persona: Option<super::persona::AppliedPersona>,
 }
 
 /// Broker-internal failure modes. Serialized via the wrapping
@@ -105,6 +138,13 @@ pub enum DelegationError {
     InvalidWorkingDir(String),
     #[error("spawn failed: {0}")]
     SpawnFailed(String),
+    /// The LLM nominated `subagent_type` but the broker could not honor
+    /// it — name grammar failed, the persona file was missing, malformed,
+    /// or oversize, or a path-safety check tripped. Detail carries the
+    /// user-visible reason (see [`super::persona::PersonaError::Display`]).
+    /// Wire code is `"invalid_persona"`.
+    #[error("invalid persona: {0}")]
+    InvalidPersona(String),
     #[error("subagent runtime error: {0}")]
     SubagentRuntimeError(String),
     /// Child agent ended its turn via `refusal`. Often a backend / gateway
@@ -247,6 +287,13 @@ pub struct DelegationTaskReport {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// What the broker actually applied for this delegation, mirrored
+    /// from [`DelegationSuccess::applied_persona`] onto the status /
+    /// terminal report so `get_delegation_status` also carries it. Same
+    /// invariants: only populated on success (spawn + first-turn send),
+    /// `None` on failure / cancel / setup-failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_persona: Option<super::persona::AppliedPersona>,
 }
 
 impl DelegationTaskReport {
@@ -271,6 +318,7 @@ impl DelegationOutcome {
             DelegationError::InvalidAgentType => "invalid_agent_type",
             DelegationError::InvalidWorkingDir(_) => "invalid_working_dir",
             DelegationError::SpawnFailed(_) => "spawn_failed",
+            DelegationError::InvalidPersona(_) => "invalid_persona",
             DelegationError::SubagentRuntimeError(_) => "subagent_error",
             DelegationError::ChildRefusal => "child_refusal",
             DelegationError::ChildMaxTokens => "child_max_tokens",
@@ -363,6 +411,7 @@ mod tests {
             error_code: Some("not_continuable".into()),
             message: None,
             duration_ms: None,
+            applied_persona: None,
         };
         let filled = report.with_task_id("t-1");
         assert_eq!(filled.task_id.as_deref(), Some("t-1"));

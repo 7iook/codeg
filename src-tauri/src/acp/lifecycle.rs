@@ -334,6 +334,7 @@ async fn forward_turn_complete_to_broker(
             turn_count: 1,
             duration_ms: 0,
             token_usage: None,
+            applied_persona: None,
         }),
         "cancelled" => DelegationOutcome::from_err(
             DelegationError::Canceled {

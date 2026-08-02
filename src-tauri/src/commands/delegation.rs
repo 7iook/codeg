@@ -270,6 +270,7 @@ fn unknown_target_report() -> DelegationTaskReport {
                 .to_string(),
         ),
         duration_ms: None,
+        applied_persona: None,
     }
 }
 
@@ -293,6 +294,7 @@ fn not_a_subsession_report(child_conversation_id: i32) -> DelegationTaskReport {
             error_code: Some(code),
             message: Some(message),
             duration_ms: None,
+            applied_persona: None,
         },
         DelegationOutcome::Ok(_) => unreachable!("from_err never yields Ok"),
     }
