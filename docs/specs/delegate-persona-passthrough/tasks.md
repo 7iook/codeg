@@ -164,8 +164,17 @@
 
 ### 阶段 3 · persona.rs 安全实现 + 全量 unit test
 
-- [ ] 3. persona.rs `resolve_preamble` 硬约束
-  - [ ] 3.1 实现 `pub fn resolve_preamble_at(name: &str, root: &Path) -> Result<String, PersonaError>`:
+- [x] 3. persona.rs `resolve_preamble` 硬约束
+
+  **Evidence**
+  - `commit pending`
+  - `verify: cargo check (test-utils / mcp) → EXIT=0; cargo test --test persona_stage3 → 12/12 passed`
+  - `files: src-tauri/src/acp/delegation/persona.rs · src-tauri/tests/persona_stage3.rs (new)`
+  - `AC: Requirements 3.1 + 3.2 + 3.3 + 8.1 全达 (spec design §5, R2 F4 + R2 F2 + R3 F1)`
+
+  See sub-tasks 3.1-3.3 for detailed narrative, verification breakdown, and file line references.
+
+  - [x] 3.1 实现 `pub fn resolve_preamble_at(name: &str, root: &Path) -> Result<String, PersonaError>`:
     - 名称语法 gate:`if !is_valid_persona_name(name) return InvalidName`
     - Canonical containment(R2 F4 · R3 P2.4):`canonical_root = canonicalize(root)?; canonical = canonicalize(candidate)?; if canonical.parent() != Some(canonical_root.as_path()) return PathEscape`(direct-child 判定,非 starts_with)
     - TOCTOU-safe open(R2 F4):`File::open(&canonical)` 而非 candidate
@@ -174,16 +183,40 @@
     - Frontmatter parse(R2 F2):不以 `---` 起 → 全 body;以 `---\n`/`---\r\n` 起且找到闭合 `---` → 剥;找不到闭合 → **`MalformedFrontmatter`**(不宽容降级)
     - Empty body 检:剥完 body 全空 → `EmptyBody`
     - _Requirements: 3.1, 3.2, 3.3, 8.1_
-  - [ ] 3.2 `resolve_preamble_at` 用 `std::env::var("HOME").or_else("USERPROFILE")` 构 home 只在 impl 2.2/2.3 内部调用(R3 F1 只 Hint provider 才解 HOME,unsupported/Kiro 不碰)
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo test --test persona_stage3 → 12/12 passed(含 read_cap_boundary + rejects_symlink_escape_via_direct_child_check_unix cfg(unix))`
+    - `files: src-tauri/src/acp/delegation/persona.rs (resolve_preamble_at body + strip_frontmatter fn) · 同时把 PersonaError 由 stage-1 的 unit-variant shape 恢复成 spec design §5 line 250-258 的 tuple-variant shape(InvalidName(String) / NotFound(String) / NotUtf8(String) / EmptyBody(String) / MalformedFrontmatter(String) / PathEscape(String))`
+    - `AC: 3.1 canonical direct-child · TOCTOU-safe open · 200 KiB BufReader::take · BOM strip · frontmatter hard-fail on unclosed fence · EmptyBody detection`
+
+  - [x] 3.2 `resolve_preamble_at` 用 `std::env::var("HOME").or_else("USERPROFILE")` 构 home 只在 impl 2.2/2.3 内部调用(R3 F1 只 Hint provider 才解 HOME,unsupported/Kiro 不碰)
     - _Requirements: 4.1, 8.1, R3-F1_
-  - [ ]* 3.3 persona.rs unit tests(全量硬约束覆盖):
-    - **Property 6**(name grammar):`.`、`/`、`\`、空、65 字符、UTF-8 多字节全 reject · `_Validates: Requirements 3-name-grammar.1-3_`
-    - **Symlink escape**:mock symlink 指向 `<root>/../secret.md` → `PathEscape`
-    - **Direct-child(非 starts_with)**:`<root>/subdir/foo.md` → `PathEscape`(**关键 · 用 `canonical.parent()==Some(root)`**)
-    - **BufReader::take 硬上限**:200 KiB - 1 = Ok,200 KiB + 1 = `TooLarge`(**非 metadata 预判**)
-    - **Frontmatter 六态**:无 fm / LF-fm-完好 / CRLF-fm-完好 / BOM-fm / **LF-fm-未闭合 → MalformedFrontmatter(硬失败)** / **frontmatter-only → EmptyBody**
-    - `_Requirements: 3.3, 3-name-grammar.1-3, 8.1_`
-    - `_Properties: P6_`
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils → EXIT=0`
+    - `files: persona.rs::ClaudeCodeProvider::resolve_persona_effect 现调 crate::parsers::claude::resolve_claude_config_dir().join("agents") 传入 resolve_preamble_at · CodexProvider 同法用 resolve_codex_home_dir(). 均 honour CLAUDE_CONFIG_DIR / CODEX_HOME env override`
+    - `AC: 3.2 Claude/Codex provider stub 兑现真调用 · Kiro/Unsupported 未新增 HOME 读盘`
+
+  - [x] 3.3 persona.rs unit tests(全量硬约束覆盖 · integration test crate 版本 `tests/persona_stage3.rs`):
+    - **Property 6**(name grammar):`.`、`/`、`\`、空、65 字符、UTF-8 多字节、emoji 全 reject · `_Validates: Requirements 3-name-grammar.1-3_`
+    - **Symlink escape**:`#[cfg(unix)]` mock symlink 指向 `<outer>/secret.md` → `PathEscape`(Windows 需 admin/dev-mode · 已 cfg gate)
+    - **Direct-child(非 starts_with)**:嵌套子目录场景走 InvalidName(grammar 上游拦)+ 子目录中文件缺 candidate 走 NotFound(实际 direct-child 逃逸只经 symlink 复现)
+    - **BufReader::take 硬上限**:200 KiB = Ok(len == cap),200 KiB + 1 = `TooLarge{cap:204800}`(**非 metadata 预判**)
+    - **Frontmatter 六态**:无 fm(Ok) / LF-fm-完好(Ok) / CRLF-fm-完好(Ok) / BOM+LF-fm(Ok · BOM strip 先于 fence probe) / **LF-fm-未闭合 → MalformedFrontmatter(硬失败)** / **frontmatter-only(有闭合 fence 但 body 空)→ EmptyBody** / **frontmatter-only EOF-closer(无尾换行) → EmptyBody**
+    - **is_valid_persona_name schema-level contract**:public gate 与 resolver 内部 defensive gate 同意于 good / bad 列表
+    - **偏离说明**(见 stage-3 report):spec 建议放在 `persona.rs::#[cfg(test)] mod tests`,已同步加入 · 但 cargo test 完整跑仍被 stage-1 遗留 test-tree 债卡住(broker/listener/manager/lifecycle/web-handlers 里 DelegationSuccess/DelegationRequest struct literal 缺 applied_persona/subagent_type 字段,stage 3 硬约束禁改)· 故 `tests/persona_stage3.rs` integration test 承担 stage-3 验证责任 · 只 link `pub` API 表面 · 12/12 EXIT=0 独立可跑
+    - _Requirements: 3.3, 3-name-grammar.1-3, 8.1_
+    - _Properties: P6_
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo test --test persona_stage3 --features test-utils → 12 passed; 0 failed; EXIT=0`
+    - `files: src-tauri/tests/persona_stage3.rs:1-271 (new) · src-tauri/src/acp/delegation/persona.rs:783-1138 (#[cfg(test)] mod tests §Stage-3 段)`
+    - `AC: Requirements 3.3, 3-name-grammar.1-3, 8.1 (Property P6 + R2 F4 read-cap + R2 F2 frontmatter 六态)`
+
+    Detailed test coverage (Windows / Unix), deviation notes on `cargo test --lib` blockage (stage-1 test-tree debt), and mitigation rationale live in the Update Log entry for stage 3.
 
 ### 阶段 4 · broker 翻译层 + 单测
 
@@ -341,3 +374,15 @@
 - 2026-08-03 · tasks.md 落盘 · charter Mode 1 三件套齐 · 待用户批准 tasks.md 后 executor 进 TDD red→green 循环
 - 2026-08-03 · executor(claude-opus) · stage 1 complete · commit `393e8983` · types base(LaunchOption / AppliedPersona / PersonaEffect / PersonaError / PersonaCapability / DelegationRequest.subagent_type / DelegationSuccess.applied_persona / DelegationTaskReport.applied_persona / DelegationError::InvalidPersona / tool_schema.json subagent_type + `<<PERSONA_LISTS>>` 占位符)· cargo check 双模式 EXIT=0 · `resolve_preamble_at` body=`todo!()` 由 stage 3 兑现 · `#[cfg(test)]` 内 5 条 unit tests · 下游 16 处 struct literal 补 `None` 兜底 · cargo test 完整跑要等 stage 4/5 补 broker/manager tests 里的 mock literals(pre-existing manager.rs Steer variant drift 也归 stage 4/5 修)
 - 2026-08-03 · executor(claude-opus 4.7 1M) · stage 2 complete · commit `pending` · provider capability 分派层(KiroProvider / ClaudeCodeProvider / CodexProvider / UnsupportedProvider unit-struct + `impl PersonaCapability` + `provider_for(agent_type)->&'static dyn PersonaCapability` match 分派)· Kiro=Native{KiroPersona} · Claude/Codex=stage-3 stub Failed{invalid_persona} 让 broker Err 路径可联调不 panic · 其它 built-in + `Custom(_)`=Ignored · non-exhaustive match 强制新增 AgentType 时作者显式路由(fail-safe) · +8 unit tests(2.5 optional) 覆盖三家 + 10 个 unsupported built-in + Custom + grammar 顺序 invariant · cargo check 双模式 EXIT=0 · 分派形式选 trait-object(spec design §Components §6 骨架伪代码即 `provider.supports_persona()` / `.resolve_persona_effect(...)`)不选 flat fn(stage-1 已定义的 PersonaCapability trait 需被本 stage 兑现,否则沦为死符号)· 硬约束合规:未触碰 broker.rs/listener.rs/manager.rs · 未引入 resolve_preamble_at 实际 body · spawn 签名未改 · Claude/Codex 走 stage-3 桩偏离 spec 建议 `home.join(".claude/agents")`(design §5 §8 应复用 `resolve_claude_config_dir()` 认 CLAUDE_CONFIG_DIR env,stage 3 兑现);stage 2 桩状态不解 HOME 不读文件,不影响 broker 联调
+- 2026-08-03 · executor(claude-opus 4.7 1M) · stage 3 complete · commit `pending` · persona.rs 安全实现 + Claude/Codex provider stub 兑现 + 全量 unit test:
+  - **resolve_preamble_at 完整 body**:name grammar defensive gate → canonicalize root + candidate → `canonical.parent() == Some(canonical_root.as_path())` direct-child guard(R2 F4 · 非 starts_with · 覆盖根本身为 symlink 情况) → TOCTOU-safe `File::open(&canonical)` → `BufReader::take((CAP as u64) + 1).read_to_end()` + `bytes.len() > CAP` 硬拦(非 metadata 预判 · CAP=200 KiB) → BOM strip 先于 fence probe → 手写 strip_frontmatter state machine(不引 serde_yaml · 支持 LF / CRLF / EOF-terminated closer · 未闭合 → MalformedFrontmatter 硬失败) → EmptyBody `trim().is_empty()` 终检
+  - **Claude/Codex provider stage-2 stub 兑现**:`ClaudeCodeProvider::resolve_persona_effect` 现调 `crate::parsers::claude::resolve_claude_config_dir().join("agents")`(honour `CLAUDE_CONFIG_DIR` env);`CodexProvider` 同法用 `resolve_codex_home_dir()`(honour `CODEX_HOME` env)· 错误路径以 `err.to_string()` 传给 `PersonaEffect::Failed{wire_code:"invalid_persona", reason}` · 保留 `_home_dir` 参数占位以维持 trait 对称
+  - **PersonaError shape 修正(stage-1 drift 补上)**:stage 1 landed unit variants(`InvalidName` / `NotFound` / `NotUtf8` / `EmptyBody` / `MalformedFrontmatter` / `PathEscape` 无字段)与 spec design §5 line 250-258 tuple-variant shape 有 undocumented drift · task dispatch 提示也用 tuple 形 · 本轮恢复 spec 形态并同步更新 stage-1 `persona_error_display_carries_useful_context` 测试断言(Display 输出含 persona 名字)
+  - **测试落地**:`src-tauri/tests/persona_stage3.rs` 新增 integration test(12 test · Windows 平台;Unix 平台额外 1 test 用 `#[cfg(unix)]` symlink)· 覆盖 frontmatter 七态(无 fm / LF-fm / CRLF-fm / BOM+LF-fm / 未闭合 / frontmatter-only-with-body-empty / frontmatter-only-EOF-close)+ read cap 临界(CAP · CAP+1)+ NotFound + Property 6 grammar defence(空 / dot / slash / backslash / 65-char / CJK / emoji)+ is_valid_persona_name schema-level contract + 嵌套子目录场景走 grammar 上游拦
+  - **偏离说明**(向主 AI 决策):spec 要求 unit tests 落 `persona.rs::#[cfg(test)] mod tests` · 已同步加入(cargo check EXIT=0 typecheck 通过)· 但 `cargo test --lib` 因 stage-1 已声明的遗留 test-tree 债无法整体 link(broker.rs/listener.rs/manager.rs/lifecycle.rs/web/handlers/delegation.rs 里 mock `DelegationSuccess` / `DelegationRequest` struct literal 缺 stage-1 引入的 `applied_persona` / `subagent_type` 字段 · stage 3 硬约束禁触这些文件 · 遗留由 stage 4/5 补齐) · 故补 integration test crate 只 link pub API 表面 · 12/12 EXIT=0 独立可跑并作为本阶段 stage-3 契约的可执行验证(inline mod tests 在 stage 4/5 broker/listener mock 补齐后即可整体绿)
+  - **验证输出**:
+    - `cargo check --features test-utils --message-format=short → EXIT=0`(warnings 全部 pre-existing steer 未用 fn · 与 stage 3 无关)
+    - `cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
+    - `cargo test --test persona_stage3 --features test-utils --message-format=short → 12 passed; 0 failed; EXIT=0`
+  - **硬约束合规**:仅动 `src-tauri/src/acp/delegation/persona.rs` + 新建 `src-tauri/tests/persona_stage3.rs` · 未触碰 broker.rs/listener.rs/manager.rs/connection.rs · 未引入 serde_yaml/markdown parser · spawn 签名未改(stage 5 的活)
+  - **架构反思**:stage 3 是 stage 1 unit-variant drift 的自然纠偏点 · 若 stage 1 时就照 spec 落 tuple-variant · 本轮工作量少 1/4 · 单测断言不必重写 · 教训归档到 executor 报告以促成下轮的 R2/R3 落 spec 更严

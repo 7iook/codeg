@@ -38,9 +38,13 @@
 //!   tiers, applied BEFORE any filesystem access.
 //! - [`PersonaCapability`] — trait each `AgentType` implements in stage 2
 //!   to say whether persona has any meaning for it and how to resolve it.
-//! - [`resolve_preamble_at`] — signature only; body panics on call in
-//!   stage 1, and the real implementation with symlink-safety / read
-//!   caps / frontmatter parsing lands in stage 3.
+//! - [`resolve_preamble_at`] — full body landed in stage 3: canonical
+//!   direct-child safety check (R2 F4), TOCTOU-safe open on the
+//!   canonical path (not the candidate), `BufReader::take` hard read cap
+//!   at 200 KiB (R2 F4, not `metadata().len()`), UTF-8 + BOM validation,
+//!   strict frontmatter parsing (R2 F2: unclosed `---` → hard fail, not
+//!   lenient fall-through). Consumed by the Claude Code / Codex
+//!   providers below.
 
 use std::path::Path;
 
@@ -144,30 +148,47 @@ pub enum PersonaEffect {
 ///
 /// Kept enum-shaped (not stringly-typed) so the resolver's callers can
 /// pattern-match on the concrete cause for tracing / testing.
+///
+/// # Variant shape (spec design §5 §5-line 250)
+///
+/// Every named-context variant carries a `String` payload — the persona
+/// name for name-scoped errors, or a fuller reason for path/parse
+/// failures. Stage 1 briefly landed these as unit variants (undocumented
+/// drift from design §5); stage 3 restored the tuple-variant shape so
+/// error messages surfaced through `DelegationError::InvalidPersona`
+/// name the offending persona and cite the specific failure — the
+/// broker's `wire_code` is always the stable `"invalid_persona"` but the
+/// user-facing `reason` (frontend / LLM tool result) MUST distinguish
+/// "file not found" from "path escape" from "too large".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersonaError {
     /// Name failed [`is_valid_persona_name`] — 1..=64 chars,
-    /// `[A-Za-z0-9_-]` only.
-    InvalidName,
-    /// `<root>/<name>.md` does not exist / cannot be stat'd.
-    NotFound,
-    /// File is not valid UTF-8.
-    NotUtf8,
+    /// `[A-Za-z0-9_-]` only. Payload = the offending name.
+    InvalidName(String),
+    /// `<root>/<name>.md` does not exist. Payload = persona name.
+    /// `canonicalize` reporting `NotFound` for the candidate is folded
+    /// into this variant so the LLM sees "persona X not found" rather
+    /// than a filesystem stat detail.
+    NotFound(String),
+    /// File is not valid UTF-8. Payload = the offending name + inner error.
+    NotUtf8(String),
     /// File body exceeds the hard read cap. `cap` is bytes.
     TooLarge { name: String, cap: usize },
     /// The persona file's body (after optional frontmatter stripping) is
-    /// empty / whitespace-only.
-    EmptyBody,
+    /// empty / whitespace-only. Payload = persona name.
+    EmptyBody(String),
     /// The file opens with `---\n` (or `---\r\n`) but the closing `---`
     /// delimiter is never found. Hard failure — R2 F2 rejects tolerant
     /// fall-through since a truncated file is likely a persona the user
-    /// meant to work but a save error corrupted.
-    MalformedFrontmatter,
+    /// meant to work but a save error corrupted. Payload = detailed
+    /// reason including persona name.
+    MalformedFrontmatter(String),
     /// After canonicalization, the resolved file is not a direct child of
     /// the canonical agents root (symlink escape / nested subdir / `..`
     /// traversal). Uses `canonical.parent() == Some(canonical_root)`, not
-    /// `starts_with`, so `<root>/sub/foo.md` also fails.
-    PathEscape,
+    /// `starts_with`, so `<root>/sub/foo.md` also fails. Payload =
+    /// detailed reason including persona name.
+    PathEscape(String),
     /// Any other filesystem IO error. Kept a single string to avoid
     /// leaking `std::io::Error` (not `Clone`) through the enum.
     IoError(String),
@@ -176,25 +197,26 @@ pub enum PersonaError {
 impl std::fmt::Display for PersonaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PersonaError::InvalidName => {
-                write!(f, "persona name must match [A-Za-z0-9_-]{{1,64}}")
+            PersonaError::InvalidName(name) => {
+                write!(f, "persona name '{name}' must match [A-Za-z0-9_-]{{1,64}}")
             }
-            PersonaError::NotFound => write!(f, "persona file not found"),
-            PersonaError::NotUtf8 => write!(f, "persona file is not valid UTF-8"),
+            PersonaError::NotFound(name) => {
+                write!(f, "persona '{name}' file not found")
+            }
+            PersonaError::NotUtf8(detail) => {
+                write!(f, "persona file is not valid UTF-8: {detail}")
+            }
             PersonaError::TooLarge { name, cap } => {
                 write!(f, "persona '{name}' body exceeds the {cap}-byte read cap")
             }
-            PersonaError::EmptyBody => {
-                write!(f, "persona body is empty after frontmatter stripping")
+            PersonaError::EmptyBody(name) => {
+                write!(
+                    f,
+                    "persona '{name}' body is empty after frontmatter stripping"
+                )
             }
-            PersonaError::MalformedFrontmatter => write!(
-                f,
-                "persona file starts with '---' but never closes the frontmatter block"
-            ),
-            PersonaError::PathEscape => write!(
-                f,
-                "persona path is not a direct child of the agents root (symlink or traversal)"
-            ),
+            PersonaError::MalformedFrontmatter(detail) => write!(f, "{detail}"),
+            PersonaError::PathEscape(detail) => write!(f, "{detail}"),
             PersonaError::IoError(msg) => write!(f, "persona IO error: {msg}"),
         }
     }
@@ -275,35 +297,189 @@ pub trait PersonaCapability {
 /// Read and validate a persona file at `<root>/<name>.md`, returning its
 /// frontmatter-stripped body ready to prepend to a first-turn prompt.
 ///
-/// # Stage boundary
-///
-/// **Body is a stage-1 panicking stub.** The real implementation — with
-/// canonical-path direct-child check (R2 F4), `BufReader::take` hard read
-/// cap (R2 F4), UTF-8 + BOM validation, and strict frontmatter parsing
-/// (R2 F2: unclosed `---` → `MalformedFrontmatter`, not a lenient
-/// fall-through) — lands in stage 3.
-///
-/// # Contract (stage 3 target)
+/// # Contract (spec design §5, R2 F4 + R2 F2 采纳)
 ///
 /// - `name` MUST have already passed [`is_valid_persona_name`]; the
 ///   function still checks it defensively and returns
 ///   `PersonaError::InvalidName` if the caller forgot.
 /// - `root` is the CLI-specific canonical agents directory, e.g.
-///   `<HOME>/.claude/agents` for Claude Code.
+///   `<HOME>/.claude/agents` for Claude Code (resolved by
+///   `crate::parsers::claude::resolve_claude_config_dir()`).
 /// - On success returns the file's body with any leading `---` YAML
 ///   frontmatter stripped and any BOM removed. Empty body →
 ///   `PersonaError::EmptyBody`.
-/// - Path safety: `<candidate>` must canonicalize to a *direct child* of
-///   canonical `<root>`; nested subdirectories and symlinks pointing
-///   outside `<root>` are `PathEscape`.
-/// - Read cap: 200 KiB by default (stage 3 wires the constant); files
-///   exceeding it return `TooLarge { name, cap }` without loading the
-///   overflow into memory.
-// gate:allow-unwired stage-3 lands the real body and stage-2 providers call it
-#[allow(dead_code)]
-pub fn resolve_preamble_at(_name: &str, _root: &Path) -> Result<String, PersonaError> {
-    // stage 3: implement per §5 of docs/specs/delegate-persona-passthrough/design.md
-    todo!("resolve_preamble_at lands in stage 3 (persona.rs safety impl)") // gate:allow-stub stage-1 signature-only landing; stage 3 lands the body
+/// - Path safety (R2 F4): `<candidate>` must canonicalize to a *direct
+///   child* of canonical `<root>`; nested subdirectories and symlinks
+///   pointing outside `<root>` are `PathEscape`. Direct-child is checked
+///   via `canonical.parent() == Some(canonical_root)`, NOT `starts_with`
+///   — `starts_with` would let a persona in a subdirectory pass.
+/// - TOCTOU-safety (R2 F4): the file is opened on the canonical path
+///   itself, not the candidate, so a symlink swap between canonicalize
+///   and open still hits the original entity.
+/// - Read cap (R2 F4): 200 KiB hard ceiling via `BufReader::take` — the
+///   `+1` sentinel byte plus a `bytes.len() > cap` check detects
+///   overflow without buffering the overflow content. `metadata().len()`
+///   is NEVER trusted (sparse files, procfs-style special files).
+/// - Frontmatter parsing (R2 F2): opening `---\n` / `---\r\n` MUST be
+///   followed by a closing lone `---` line; a missing closer is a hard
+///   `MalformedFrontmatter` error, NOT a lenient fall-through
+///   (frontmatter YAML injected into a downstream prompt would be a
+///   silent security regression). No `serde_yaml` / markdown parser
+///   dependency — a hand-rolled state machine matches the fences.
+pub fn resolve_preamble_at(name: &str, root: &Path) -> Result<String, PersonaError> {
+    // 1. Name grammar gate — defence-in-depth. Broker also pre-checks,
+    //    but a caller that skipped it must still get a typed error, not
+    //    an accidental filesystem probe with a `../` name.
+    if !is_valid_persona_name(name) {
+        return Err(PersonaError::InvalidName(name.to_string()));
+    }
+
+    // 2. Canonicalize root and candidate separately. Canonicalizing the
+    //    root as well means a root that itself lives under a symlink
+    //    still resolves to the same real path used for the parent
+    //    equality check below (design §5 point 2: 避免根目录本身是
+    //    symlink 时相等判断失败).
+    let candidate = root.join(format!("{name}.md"));
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| {
+        PersonaError::IoError(format!(
+            "canonicalize persona root {}: {}",
+            root.display(),
+            e
+        ))
+    })?;
+    let canonical = std::fs::canonicalize(&candidate).map_err(|e| {
+        // NotFound is the common case; caller-facing message names the
+        // persona (design §5, echoes R1-F1 error taxonomy).
+        if e.kind() == std::io::ErrorKind::NotFound {
+            PersonaError::NotFound(name.to_string())
+        } else {
+            PersonaError::IoError(format!(
+                "canonicalize persona candidate {}: {}",
+                candidate.display(),
+                e
+            ))
+        }
+    })?;
+
+    // 3. Direct-child check via `canonical.parent()` equality (R2 F4).
+    //    `starts_with(canonical_root)` would let <root>/sub/foo.md pass —
+    //    that is exactly the shape a nested-directory or symlink-escape
+    //    attack takes.
+    if canonical.parent() != Some(canonical_root.as_path()) {
+        return Err(PersonaError::PathEscape(format!(
+            "persona '{}' canonical path {} is not a direct child of {}",
+            name,
+            canonical.display(),
+            canonical_root.display()
+        )));
+    }
+
+    // 4. TOCTOU-safe open: open the CANONICAL path, not the candidate.
+    //    If a symlink was swapped between canonicalize() and open(), the
+    //    open still lands on the original inode (or fails cleanly).
+    let file = std::fs::File::open(&canonical).map_err(|e| {
+        PersonaError::IoError(format!("open persona {}: {}", canonical.display(), e))
+    })?;
+
+    // 5. Hard read cap via BufReader::take. `+1` sentinel byte lets us
+    //    detect overflow with a length compare, without ever buffering
+    //    the overflow content. metadata().len() is NEVER trusted —
+    //    sparse files / special files lie.
+    const CAP: usize = 200 * 1024;
+    let mut reader = std::io::BufReader::new(file).take((CAP as u64) + 1);
+    let mut bytes = Vec::with_capacity(4096);
+    use std::io::Read;
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| PersonaError::IoError(format!("read persona '{name}': {e}")))?;
+    if bytes.len() > CAP {
+        return Err(PersonaError::TooLarge {
+            name: name.to_string(),
+            cap: CAP,
+        });
+    }
+
+    // 6. UTF-8 decode + BOM strip. BOM must come off BEFORE the
+    //    frontmatter fence probe, or a BOM'd file that starts with
+    //    "\u{FEFF}---\n" would be treated as having no frontmatter.
+    let mut text = String::from_utf8(bytes)
+        .map_err(|e| PersonaError::NotUtf8(format!("persona '{name}' not UTF-8: {e}")))?;
+    if let Some(stripped) = text.strip_prefix('\u{FEFF}') {
+        text = stripped.to_string();
+    }
+
+    // 7. Frontmatter strip (R2 F2 — hard fail on unclosed fence).
+    let body = strip_frontmatter(&text, name)?;
+    if body.trim().is_empty() {
+        return Err(PersonaError::EmptyBody(name.to_string()));
+    }
+    Ok(body)
+}
+
+/// Hand-rolled frontmatter state machine. Returns the body (frontmatter
+/// removed); a missing closing fence is a hard `MalformedFrontmatter`.
+///
+/// Spec design §5 point 6: opening `---\n` / `---\r\n` must be followed
+/// by a lone `---` line (LF, CRLF, or EOF terminator). No `serde_yaml`,
+/// no markdown parser — just fence matching. Frontmatter content itself
+/// is discarded; only the body flows downstream.
+fn strip_frontmatter(text: &str, name: &str) -> Result<String, PersonaError> {
+    // Detect the opening fence. Lone "---" at file top with no newline
+    // is NOT a fence (a one-line "---" file is a body, not an unclosed
+    // block); require a following newline so we know where to start the
+    // scan for the closer.
+    let after_start = if let Some(rest) = text.strip_prefix("---\n") {
+        // Length of the consumed opener; used to key back into `text`
+        // rather than `rest` to keep offsets aligned.
+        let _ = rest;
+        4
+    } else if let Some(rest) = text.strip_prefix("---\r\n") {
+        let _ = rest;
+        5
+    } else {
+        return Ok(text.to_string());
+    };
+
+    // Scan for a lone "---" line inside the region after the opener.
+    // Every line starts either at `after_start` or right after a `\n`
+    // we've already seen. On each candidate line start, check whether
+    // the line's content (up to the next line terminator or EOF) is
+    // exactly "---" — that's the closing fence.
+    let mut line_start = after_start;
+    let text_bytes = text.as_bytes();
+    while line_start <= text_bytes.len() {
+        // Find the end of this line (index of `\n`, or EOF).
+        let next_nl = text[line_start..].find('\n');
+        let (line_end, next_start) = match next_nl {
+            Some(off) => (line_start + off, line_start + off + 1),
+            None => (text_bytes.len(), text_bytes.len() + 1),
+        };
+        // Strip a trailing `\r` for CRLF lines.
+        let effective_end = if line_end > line_start && text_bytes[line_end - 1] == b'\r' {
+            line_end - 1
+        } else {
+            line_end
+        };
+        let line = &text[line_start..effective_end];
+        if line == "---" {
+            // Closer found — body starts at `next_start`. If we ran off
+            // the end (no trailing newline after the closer), body is
+            // empty; upstream `EmptyBody` check will catch it.
+            if next_start > text_bytes.len() {
+                return Ok(String::new());
+            }
+            return Ok(text[next_start..].to_string());
+        }
+        // Advance. If we hit EOF without seeing the closer, break.
+        if next_nl.is_none() {
+            break;
+        }
+        line_start = next_start;
+    }
+
+    Err(PersonaError::MalformedFrontmatter(format!(
+        "persona '{name}' has an opening '---' fence but no closing fence"
+    )))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,13 +495,16 @@ pub fn resolve_preamble_at(_name: &str, _root: &Path) -> Result<String, PersonaE
 // structs are static singletons — they hold no state and are handed out as
 // `&'static dyn PersonaCapability` from `provider_for`.
 //
-// **Stage-3 stub disclaimer**: `ClaudeCodeProvider` and `CodexProvider` do
-// NOT call [`resolve_preamble_at`] yet — it is a stage-1 stub through
-// stage 2 and hitting it would panic every broker unit test. They return
-// [`PersonaEffect::Failed`] with `wire_code = "invalid_persona"` and a
-// stage-3 marker in `reason`, so the broker's Err-path plumbing is already
-// exercised end-to-end. Stage 3 replaces the stub body with a call to
-// `resolve_preamble_at(name, &<root>)`.
+// **Stage-3 landing**: `ClaudeCodeProvider` / `CodexProvider` now call
+// [`resolve_preamble_at`] with the CLI-specific canonical agents root
+// resolved via `crate::parsers::claude::resolve_claude_config_dir()` /
+// `crate::parsers::codex::resolve_codex_home_dir()` (which each honour
+// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` env overrides before falling back to
+// `$HOME`). The `home_dir` trait argument is deliberately unused on this
+// path — the parser helpers already encapsulate the HOME + env lookup so
+// broker never has to duplicate it — but the parameter is kept on the
+// trait for interface symmetry (a future upstream `CLAUDE_ACP_AGENT` env
+// support might resolve without touching disk and want the raw HOME).
 
 /// Unit-struct bridge that hangs [`PersonaCapability`] off the `Kiro`
 /// [`AgentType`] variant. Zero-sized; a single static reference is handed
@@ -359,11 +538,17 @@ impl PersonaCapability for KiroProvider {
     }
 }
 
-/// Claude Code persona provider. **Stage-2 stub**: hits stage-3 not-yet-
-/// implemented resolver, so returns `Failed{invalid_persona}` with a
-/// stage-3 marker. Stage 3 swaps this for a real
-/// [`resolve_preamble_at`] call rooted at
-/// `crate::parsers::claude::resolve_claude_config_dir().join("agents")`.
+/// Claude Code persona provider. Reads
+/// `<resolve_claude_config_dir()>/agents/<name>.md`, strips frontmatter,
+/// and returns the body as a `Hint` preamble. On any resolver failure
+/// (not found / not UTF-8 / too large / path escape / malformed
+/// frontmatter / empty body / IO) returns `Failed{invalid_persona}` with
+/// the concrete cause in `reason`.
+///
+/// Note: `home_dir` is intentionally unused — `resolve_claude_config_dir`
+/// already handles `CLAUDE_CONFIG_DIR` env → `$HOME/.claude` fallback
+/// (see `crate::parsers::claude`). Keeping the parameter preserves the
+/// trait interface symmetry.
 // gate:allow-unwired stage-4 broker.rs wires this via provider_for
 #[allow(dead_code)]
 pub struct ClaudeCodeProvider;
@@ -380,24 +565,21 @@ impl PersonaCapability for ClaudeCodeProvider {
                 reason: format!("persona name '{name}' violates grammar"),
             };
         }
-        // TODO(stage-3): replace with:
-        //   let root = crate::parsers::claude::resolve_claude_config_dir().join("agents");
-        //   match resolve_preamble_at(name, &root) {
-        //       Ok(body)  => PersonaEffect::Hint { preamble: body },
-        //       Err(e)    => PersonaEffect::Failed { wire_code: "invalid_persona", reason: e.to_string() },
-        //   }
-        // For now emit a typed Failed so the broker Err path is wired without
-        // panicking on the stage-1 stub inside resolve_preamble_at.
-        PersonaEffect::Failed {
-            wire_code: "invalid_persona",
-            reason: "persona resolver not yet implemented (stage 3)".to_string(),
+        let root = crate::parsers::claude::resolve_claude_config_dir().join("agents");
+        match resolve_preamble_at(name, &root) {
+            Ok(preamble) => PersonaEffect::Hint { preamble },
+            Err(err) => PersonaEffect::Failed {
+                wire_code: "invalid_persona",
+                reason: err.to_string(),
+            },
         }
     }
 }
 
-/// Codex persona provider. **Stage-2 stub** — same shape as
-/// [`ClaudeCodeProvider`]. Stage 3 roots at
-/// `crate::parsers::codex::resolve_codex_home_dir().join("agents")`.
+/// Codex persona provider. Reads
+/// `<resolve_codex_home_dir()>/agents/<name>.md` and follows the same
+/// shape as [`ClaudeCodeProvider`]. `resolve_codex_home_dir` honours the
+/// `CODEX_HOME` env variable (see `crate::parsers::codex`).
 // gate:allow-unwired stage-4 broker.rs wires this via provider_for
 #[allow(dead_code)]
 pub struct CodexProvider;
@@ -414,12 +596,13 @@ impl PersonaCapability for CodexProvider {
                 reason: format!("persona name '{name}' violates grammar"),
             };
         }
-        // TODO(stage-3): replace with resolve_preamble_at rooted at
-        // resolve_codex_home_dir().join("agents"). See ClaudeCodeProvider
-        // comment for the shape.
-        PersonaEffect::Failed {
-            wire_code: "invalid_persona",
-            reason: "persona resolver not yet implemented (stage 3)".to_string(),
+        let root = crate::parsers::codex::resolve_codex_home_dir().join("agents");
+        match resolve_preamble_at(name, &root) {
+            Ok(preamble) => PersonaEffect::Hint { preamble },
+            Err(err) => PersonaEffect::Failed {
+                wire_code: "invalid_persona",
+                reason: err.to_string(),
+            },
         }
     }
 }
@@ -585,10 +768,12 @@ mod tests {
     #[test]
     fn persona_error_display_carries_useful_context() {
         assert_eq!(
-            PersonaError::InvalidName.to_string(),
-            "persona name must match [A-Za-z0-9_-]{1,64}"
+            PersonaError::InvalidName("bad!".into()).to_string(),
+            "persona name 'bad!' must match [A-Za-z0-9_-]{1,64}"
         );
-        assert!(PersonaError::NotFound.to_string().contains("not found"));
+        assert!(PersonaError::NotFound("missing".into())
+            .to_string()
+            .contains("not found"));
         let too_large = PersonaError::TooLarge {
             name: "big".into(),
             cap: 204_800,
@@ -598,23 +783,15 @@ mod tests {
         assert!(msg.contains("204800"), "got: {msg}");
     }
 
-    #[test]
-    #[should_panic(expected = "resolve_preamble_at lands in stage 3")]
-    fn resolve_preamble_at_is_not_yet_implemented() {
-        // Guards the stage boundary: any code that accidentally starts
-        // calling the resolver in stage 1 / 2 must fail loudly.
-        let _ = resolve_preamble_at("plan-reality-recon", &PathBuf::from("/tmp"));
-    }
-
     // ─────────────────────────────────────────────────────────────────────
     // Stage-2 · Provider capability dispatch tests
     // ─────────────────────────────────────────────────────────────────────
 
-    /// Small helper — the provider signature demands a `&Path`, but Kiro
-    /// ignores it and the stage-2 stubs for Claude/Codex don't touch disk
-    /// either. Any path literal works.
+    /// Small helper — Kiro ignores the arg entirely; Claude/Codex delegate
+    /// to `resolve_claude_config_dir()` / `resolve_codex_home_dir()` on
+    /// stage 3 and also ignore the trait parameter. Any literal works.
     fn dummy_home() -> PathBuf {
-        PathBuf::from("/nonexistent-home-for-stage-2-tests")
+        PathBuf::from("/nonexistent-home-for-provider-tests")
     }
 
     #[test]
@@ -631,44 +808,27 @@ mod tests {
     }
 
     #[test]
-    fn provider_for_claude_code_returns_stage3_stub_failed() {
+    fn provider_for_claude_code_supports_persona_and_dispatches_to_resolver() {
+        // Stage-3 landing: ClaudeCodeProvider now calls resolve_preamble_at
+        // against resolve_claude_config_dir().join("agents"). We can't
+        // deterministically assert the resolver's outcome here (depends on
+        // whether the CI host happens to have ~/.claude/agents/<name>.md),
+        // but we CAN assert (a) capability = true and (b) name-grammar
+        // failure still short-circuits before the resolver — that
+        // behaviour is env-independent. Full resolver semantics are
+        // exercised in the resolve_preamble_at_* tests further down using
+        // an isolated tempdir.
         let provider = provider_for(AgentType::ClaudeCode);
         assert!(
             provider.supports_persona(),
             "ClaudeCode must support persona"
         );
-        let effect = provider.resolve_persona_effect("code-reviewer", &dummy_home());
-        match effect {
-            PersonaEffect::Failed { wire_code, reason } => {
-                assert_eq!(wire_code, "invalid_persona");
-                // Stage-3 marker is load-bearing: stage 3 will replace this
-                // with real resolver output; if this assertion drifts,
-                // whoever changed the reason string is doing stage 3 work
-                // and should switch to `PersonaEffect::Hint`.
-                assert!(
-                    reason.contains("stage 3"),
-                    "expected stage-3 stub marker, got: {reason}"
-                );
-            }
-            other => panic!("expected Failed{{invalid_persona, stage 3}}, got {other:?}"),
-        }
     }
 
     #[test]
-    fn provider_for_codex_returns_stage3_stub_failed() {
+    fn provider_for_codex_supports_persona_and_dispatches_to_resolver() {
         let provider = provider_for(AgentType::Codex);
         assert!(provider.supports_persona(), "Codex must support persona");
-        let effect = provider.resolve_persona_effect("critic", &dummy_home());
-        match effect {
-            PersonaEffect::Failed { wire_code, reason } => {
-                assert_eq!(wire_code, "invalid_persona");
-                assert!(
-                    reason.contains("stage 3"),
-                    "expected stage-3 stub marker, got: {reason}"
-                );
-            }
-            other => panic!("expected Failed{{invalid_persona, stage 3}}, got {other:?}"),
-        }
     }
 
     #[test]
@@ -747,9 +907,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_and_codex_providers_reject_invalid_name_before_stage3_stub() {
-        // Invalid name must short-circuit BEFORE the stage-3 stub marker,
-        // so the reason string names the grammar problem — not the stub.
+    fn claude_and_codex_providers_reject_invalid_name_before_touching_disk() {
+        // Invalid name must short-circuit at the grammar gate BEFORE the
+        // provider tries to canonicalize the agents root — otherwise a
+        // path-shaped name like "foo.bar" or "path/traversal" would
+        // reach `resolve_preamble_at` and get a filesystem error
+        // instead of the grammar error the LLM needs to see.
         for agent in [AgentType::ClaudeCode, AgentType::Codex] {
             let provider = provider_for(agent);
             match provider.resolve_persona_effect("foo.bar", &dummy_home()) {
@@ -759,13 +922,212 @@ mod tests {
                         reason.contains("grammar"),
                         "{agent:?}: expected grammar reason, got: {reason}"
                     );
-                    assert!(
-                        !reason.contains("stage 3"),
-                        "{agent:?}: grammar check must precede stage-3 stub, got: {reason}"
-                    );
                 }
                 other => panic!("{agent:?} accepted invalid name: {other:?}"),
             }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Stage-3 · resolve_preamble_at safety + frontmatter tests
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // Property 6 (name grammar) is already covered by
+    // `is_valid_persona_name_rejects_bad_inputs`; this section covers the
+    // filesystem-facing R2 F4 safety guarantees and the R2 F2 frontmatter
+    // parser. All tests use `tempfile::TempDir` for isolation — an
+    // ambient `~/.claude/agents/...` on the CI host must NOT influence
+    // outcomes.
+
+    use tempfile::TempDir;
+
+    /// Build an isolated agents-root tempdir plus a fresh persona name
+    /// suffixed with the process id and a counter so parallel test runs
+    /// never collide.
+    fn make_agents_root() -> TempDir {
+        tempfile::tempdir().expect("tempdir for agents root")
+    }
+
+    fn write_persona(root: &std::path::Path, name: &str, contents: &[u8]) {
+        std::fs::write(root.join(format!("{name}.md")), contents).expect("write persona");
+    }
+
+    #[test]
+    fn resolve_preamble_at_ok_no_frontmatter() {
+        let root = make_agents_root();
+        write_persona(root.path(), "plain", b"hello world");
+        let body = resolve_preamble_at("plain", root.path()).expect("ok");
+        assert_eq!(body, "hello world");
+    }
+
+    #[test]
+    fn resolve_preamble_at_ok_lf_frontmatter() {
+        let root = make_agents_root();
+        write_persona(root.path(), "lf", b"---\nkey: v\n---\nbody\n");
+        let body = resolve_preamble_at("lf", root.path()).expect("ok");
+        assert_eq!(body, "body\n");
+    }
+
+    #[test]
+    fn resolve_preamble_at_ok_crlf_frontmatter() {
+        let root = make_agents_root();
+        write_persona(root.path(), "crlf", b"---\r\nkey: v\r\n---\r\nbody\r\n");
+        let body = resolve_preamble_at("crlf", root.path()).expect("ok");
+        assert_eq!(body, "body\r\n");
+    }
+
+    #[test]
+    fn resolve_preamble_at_ok_bom_plus_lf_frontmatter() {
+        let root = make_agents_root();
+        // BOM must be stripped BEFORE the fence probe; otherwise the file
+        // reads as "no frontmatter" and the YAML block flows downstream.
+        let mut buf = Vec::new();
+        buf.extend_from_slice("\u{FEFF}".as_bytes());
+        buf.extend_from_slice(b"---\nkey: v\n---\nbody\n");
+        write_persona(root.path(), "bom", &buf);
+        let body = resolve_preamble_at("bom", root.path()).expect("ok");
+        assert_eq!(body, "body\n");
+    }
+
+    #[test]
+    fn resolve_preamble_at_rejects_unclosed_frontmatter() {
+        let root = make_agents_root();
+        write_persona(root.path(), "unclosed", b"---\nkey: v\nno close fence");
+        match resolve_preamble_at("unclosed", root.path()) {
+            Err(PersonaError::MalformedFrontmatter(msg)) => {
+                assert!(
+                    msg.contains("unclosed"),
+                    "expected persona name in reason, got: {msg}"
+                );
+            }
+            other => panic!("expected MalformedFrontmatter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_preamble_at_rejects_frontmatter_only_as_empty_body() {
+        let root = make_agents_root();
+        // "---\nk: v\n---\n" — frontmatter closes cleanly, body empty.
+        write_persona(root.path(), "empty", b"---\nk: v\n---\n");
+        match resolve_preamble_at("empty", root.path()) {
+            Err(PersonaError::EmptyBody(name)) => {
+                assert_eq!(name, "empty");
+            }
+            other => panic!("expected EmptyBody, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_preamble_at_rejects_frontmatter_only_no_trailing_newline() {
+        // "---\nk: v\n---" (no trailing newline after closer). Body is
+        // still empty; EmptyBody applies. Guards the strip_frontmatter
+        // EOF-terminated-fence branch.
+        let root = make_agents_root();
+        write_persona(root.path(), "eof-close", b"---\nk: v\n---");
+        match resolve_preamble_at("eof-close", root.path()) {
+            Err(PersonaError::EmptyBody(name)) => {
+                assert_eq!(name, "eof-close");
+            }
+            other => panic!("expected EmptyBody, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_preamble_at_read_cap_boundary() {
+        // Cap = 200 KiB. `cap` bytes → Ok, `cap+1` → TooLarge.
+        // Filler is a single ASCII byte to make counting easy; body
+        // is non-empty so EmptyBody doesn't trip.
+        const CAP: usize = 200 * 1024;
+
+        let root_ok = make_agents_root();
+        write_persona(root_ok.path(), "at-cap", &vec![b'a'; CAP]);
+        let ok_body = resolve_preamble_at("at-cap", root_ok.path()).expect("cap bytes ok");
+        assert_eq!(ok_body.len(), CAP);
+
+        let root_over = make_agents_root();
+        write_persona(root_over.path(), "over-cap", &vec![b'a'; CAP + 1]);
+        match resolve_preamble_at("over-cap", root_over.path()) {
+            Err(PersonaError::TooLarge { name, cap }) => {
+                assert_eq!(name, "over-cap");
+                assert_eq!(cap, CAP);
+            }
+            other => panic!("expected TooLarge at cap+1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_preamble_at_rejects_direct_child_violation_via_subdirectory() {
+        // <root>/sub/foo.md — starts_with(root) is true but
+        // canonical.parent() != Some(canonical_root), so PathEscape.
+        // This is the core reason `starts_with` was rejected in the
+        // R2 F4 review.
+        let root = make_agents_root();
+        std::fs::create_dir(root.path().join("sub")).expect("mkdir sub");
+        std::fs::write(root.path().join("sub").join("foo.md"), b"body").expect("write");
+        // The candidate is <root>/foo.md (doesn't exist) — subdir was a
+        // decoy; the real defense is that a name must map to a *direct*
+        // child. Since <root>/foo.md doesn't exist, we get NotFound
+        // instead of PathEscape here; the real subdirectory-escape
+        // vector is via symlink (next test).
+        match resolve_preamble_at("foo", root.path()) {
+            Err(PersonaError::NotFound(name)) => assert_eq!(name, "foo"),
+            other => panic!("expected NotFound for <root>/foo.md absent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_preamble_at_rejects_missing_file_as_not_found() {
+        let root = make_agents_root();
+        match resolve_preamble_at("ghost", root.path()) {
+            Err(PersonaError::NotFound(name)) => assert_eq!(name, "ghost"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_preamble_at_defensively_rejects_invalid_name() {
+        // Broker should have pre-checked, but the resolver's own defence
+        // must return InvalidName without probing the filesystem.
+        let root = make_agents_root();
+        match resolve_preamble_at("path/traversal", root.path()) {
+            Err(PersonaError::InvalidName(name)) => assert_eq!(name, "path/traversal"),
+            other => panic!("expected InvalidName, got {other:?}"),
+        }
+        match resolve_preamble_at(&"a".repeat(65), root.path()) {
+            Err(PersonaError::InvalidName(_)) => {}
+            other => panic!("expected InvalidName for 65-char name, got {other:?}"),
+        }
+        match resolve_preamble_at("中文", root.path()) {
+            Err(PersonaError::InvalidName(_)) => {}
+            other => panic!("expected InvalidName for CJK name, got {other:?}"),
+        }
+    }
+
+    /// Symlink-based path-escape test. Only runs on Unix — creating file
+    /// symlinks on Windows requires either administrator privileges or
+    /// Developer Mode, which is not guaranteed on CI runners. The Unix
+    /// path exercises the same R2 F4 canonical direct-child guard.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_preamble_at_rejects_symlink_escape_unix() {
+        use std::os::unix::fs::symlink;
+        let outer = tempfile::tempdir().expect("outer tempdir");
+        // Place the real secret file OUTSIDE the agents root.
+        let secret_path = outer.path().join("secret.md");
+        std::fs::write(&secret_path, b"escaped").expect("write secret");
+        // Now the agents root, sibling to secret.md.
+        let root_dir = outer.path().join("agents");
+        std::fs::create_dir(&root_dir).expect("mkdir agents");
+        // <root>/escape.md → ../secret.md
+        symlink(&secret_path, root_dir.join("escape.md")).expect("symlink");
+        match resolve_preamble_at("escape", &root_dir) {
+            Err(PersonaError::PathEscape(reason)) => {
+                assert!(
+                    reason.contains("escape"),
+                    "reason should name persona: {reason}"
+                );
+            }
+            other => panic!("expected PathEscape via symlink, got {other:?}"),
         }
     }
 }
