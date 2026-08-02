@@ -443,8 +443,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Gemini CLI",
             description: "Google's official CLI for Gemini",
             distribution: AgentDistribution::Npx {
-                version: "0.52.0",
-                package: "@google/gemini-cli@0.52.0",
+                version: "0.53.1",
+                package: "@google/gemini-cli@0.53.1",
                 cmd: "gemini",
                 args: &["--acp", "--skip-trust"],
                 env: &[],
@@ -473,8 +473,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Cline",
             description: "Autonomous coding agent CLI",
             distribution: AgentDistribution::Npx {
-                version: "3.0.47",
-                package: "cline@3.0.47",
+                version: "3.0.49",
+                package: "cline@3.0.49",
                 cmd: "cline",
                 args: &["--acp"],
                 env: &[],
@@ -487,39 +487,39 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "OpenCode",
             description: "The open source coding agent",
             distribution: AgentDistribution::Binary {
-                version: "1.18.10",
+                version: "1.18.11",
                 cmd: "opencode",
                 args: &["acp"],
                 env: &[],
                 platforms: &[
                     PlatformBinary {
                         platform: "darwin-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.10/opencode-darwin-arm64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-darwin-arm64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "darwin-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.10/opencode-darwin-x64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-darwin-x64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "linux-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.10/opencode-linux-arm64.tar.gz",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-linux-arm64.tar.gz",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "linux-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.10/opencode-linux-x64.tar.gz",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-linux-x64.tar.gz",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "windows-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.10/opencode-windows-arm64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-windows-arm64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "windows-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.10/opencode-windows-x64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-windows-x64.zip",
                         sha256: None,
                     },
                 ],
@@ -554,8 +554,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "CodeBuddy",
             description: "Tencent Cloud's official AI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "2.130.0",
-                package: "@tencent-ai/codebuddy-code@2.130.0",
+                version: "2.132.0",
+                package: "@tencent-ai/codebuddy-code@2.132.0",
                 cmd: "codebuddy",
                 args: &["--acp"],
                 env: &[],
@@ -568,8 +568,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Kimi Code",
             description: "Moonshot AI's official CLI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "0.31.0",
-                package: "@moonshot-ai/kimi-code@0.31.0",
+                version: "0.31.1",
+                package: "@moonshot-ai/kimi-code@0.31.1",
                 cmd: "kimi",
                 args: &["acp"],
                 env: &[],
@@ -587,7 +587,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             supports_mcp: true,
             name: "Pi",
             description: "Self-extensible coding agent (ACP via pi-acp)",
-            // pi-acp 0.0.32 spawns `pi --mode rpc` as a child, so `pi` (npm
+            // pi-acp 0.0.33 spawns `pi --mode rpc` as a child, so `pi` (npm
             // `@earendil-works/pi-coding-agent`) must be resolvable on PATH —
             // or pointed at a custom build via the `PI_ACP_PI_COMMAND` env
             // (see BYO-pi). Args are empty: the ACP server is the default mode
@@ -595,8 +595,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // 22+ requirement (pi-acp's own engines say >=20). The embedded
             // context env lets pi-acp advertise `promptCapabilities.embeddedContext`.
             distribution: AgentDistribution::Npx {
-                version: "0.0.32",
-                package: "pi-acp@0.0.32",
+                version: "0.0.33",
+                package: "pi-acp@0.0.33",
                 cmd: "pi-acp",
                 args: &[],
                 env: &[("PI_ACP_ENABLE_EMBEDDED_CONTEXT", "true")],
@@ -625,8 +625,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // leading `KEY=value` argv and sacp's `parse_env_var` only accepts
             // `[A-Za-z0-9_]` env names, which npm's `@scope:registry` key is not.)
             distribution: AgentDistribution::Npx {
-                version: "0.2.114",
-                package: "@xai-official/grok@0.2.114",
+                version: "0.2.118",
+                package: "@xai-official/grok@0.2.118",
                 cmd: "grok",
                 // Only the ACP subcommand lives here. Grok's ROOT-level launch
                 // flags (`--no-auto-update` always, `--permission-mode <value>`
@@ -637,7 +637,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
                 // args rather than appending after.
                 args: &["agent", "stdio"],
                 env: &[],
-                // `@xai-official/grok@0.2.114` declares `engines.node: ">=20"`;
+                // `@xai-official/grok@0.2.118` declares `engines.node: ">=20"`;
                 // surface that in preflight so Node 18 isn't silently accepted.
                 node_required: Some("20.0.0"),
             },
@@ -856,8 +856,8 @@ mod tests {
         );
         assert_npx_version(
             AgentType::Gemini,
-            "0.52.0",
-            "@google/gemini-cli@0.52.0",
+            "0.53.1",
+            "@google/gemini-cli@0.53.1",
             Some("20.0.0"),
         );
         assert_npx_version(
@@ -868,20 +868,20 @@ mod tests {
         );
         assert_npx_version(
             AgentType::Cline,
-            "3.0.47",
-            "cline@3.0.47",
+            "3.0.49",
+            "cline@3.0.49",
             Some("22.0.0"),
         );
         assert_npx_version(
             AgentType::CodeBuddy,
-            "2.130.0",
-            "@tencent-ai/codebuddy-code@2.130.0",
+            "2.132.0",
+            "@tencent-ai/codebuddy-code@2.132.0",
             Some("22.0.0"),
         );
         assert_npx_version(
             AgentType::KimiCode,
-            "0.31.0",
-            "@moonshot-ai/kimi-code@0.31.0",
+            "0.31.1",
+            "@moonshot-ai/kimi-code@0.31.1",
             Some("22.19.0"),
         );
         assert_npx_version(
@@ -890,14 +890,14 @@ mod tests {
             "@agentclientprotocol/codex-acp@1.1.9",
             Some("20.0.0"),
         );
-        assert_npx_version(AgentType::Pi, "0.0.32", "pi-acp@0.0.32", Some("22.0.0"));
+        assert_npx_version(AgentType::Pi, "0.0.33", "pi-acp@0.0.33", Some("22.0.0"));
         assert_npx_version(
             AgentType::Grok,
-            "0.2.114",
-            "@xai-official/grok@0.2.114",
+            "0.2.118",
+            "@xai-official/grok@0.2.118",
             Some("20.0.0"),
         );
-        assert_binary_version(AgentType::OpenCode, "1.18.10", "/releases/download/v1.18.10/");
+        assert_binary_version(AgentType::OpenCode, "1.18.11", "/releases/download/v1.18.11/");
         assert_uvx_version(
             AgentType::Hermes,
             "0.19.0",
