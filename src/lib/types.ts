@@ -1021,6 +1021,13 @@ export interface PermissionOptionInfo {
   option_id: string
   name: string
   kind: string
+  /**
+   * The option's ACP `_meta`, forwarded verbatim from the wire. codex-acp
+   * ≥1.1.8 hangs `permission: {version: 1, changes: [...]}` here — see
+   * `parsePermissionOptionChanges` in `lib/permission-request.ts`. Absent for
+   * agents that send no option metadata.
+   */
+  meta?: Record<string, unknown> | null
 }
 
 // --- ask_user_question (mirror of Rust `crate::acp::question`) ---

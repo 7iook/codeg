@@ -2981,6 +2981,7 @@ async fn run_connection(
                         &emitter_inner,
                         &perms,
                         &perm_cwd,
+                        agent_type,
                         req,
                         responder,
                     )
@@ -4227,6 +4228,9 @@ async fn handle_elicitation_request(
                     option_id: o.option_id.clone(),
                     name: o.label.clone(),
                     kind: o.kind.to_string(),
+                    // Synthesized from an elicitation form, not from ACP
+                    // `PermissionOption`s — there is no wire `_meta` to forward.
+                    meta: None,
                 })
                 .collect();
             perms.lock().await.insert(
@@ -4355,10 +4359,41 @@ async fn handle_permission_request(
     emitter: &EventEmitter,
     perms: &PendingPermissions,
     cwd: &str,
+    agent_type: AgentType,
     req: RequestPermissionRequest,
     responder: Responder<RequestPermissionResponse>,
 ) {
     let request_id = uuid::Uuid::new_v4().to_string();
+
+    // Codex Plan-mode review gate: seed the tool call codex never announced, so
+    // its follow-up `tool_call_update` (status + rawOutput only) merges into a
+    // card that has an identity instead of creating an untitled orphan. See
+    // `is_codex_plan_review`. `raw_input` is deliberately omitted: the plan text
+    // is already in the transcript (codex emits the plan as an
+    // `agent_message_chunk` before this) and the permission card renders it from
+    // the request's own `rawInput.plan` — a third copy would be noise.
+    if is_codex_plan_review(agent_type, req.meta.as_ref()) {
+        emit_with_state(
+            state,
+            emitter,
+            AcpEvent::ToolCall {
+                tool_call_id: req.tool_call.tool_call_id.to_string(),
+                title: req.tool_call.fields.title.clone().unwrap_or_default(),
+                kind: "switch_mode".to_string(),
+                status: "pending".to_string(),
+                content: None,
+                raw_input: None,
+                raw_output: None,
+                locations: None,
+                meta: req
+                    .meta
+                    .as_ref()
+                    .map(|m| serde_json::Value::Object(m.clone())),
+                images: None,
+            },
+        )
+        .await;
+    }
 
     let options: Vec<PermissionOptionInfo> = req
         .options
@@ -4373,6 +4408,12 @@ async fn handle_permission_request(
                 PermissionOptionKind::RejectAlways => "reject_always".into(),
                 _ => "unknown".into(),
             },
+            // Opaque passthrough — the frontend reads codex-acp ≥1.1.8's
+            // `_meta.permission.changes[].description` off this.
+            meta: opt
+                .meta
+                .as_ref()
+                .map(|m| serde_json::Value::Object(m.clone())),
         })
         .collect();
 
@@ -6875,6 +6916,31 @@ fn is_codex_subagent_activity(
         .is_some()
 }
 
+/// True when a `session/request_permission` is codex's Plan-mode review gate
+/// (codex-acp #351, v1.1.8+): `_meta.codex = {kind: "plan_review", planItemId}`
+/// on the REQUEST (sibling of `options`), not on the tool call.
+///
+/// codex-acp raises this once a plan item settles while `collaboration_mode` is
+/// `plan`, asking whether to implement the plan (`implement_plan`) or stay in
+/// plan mode (`revise_plan`). Its `toolCall` (`plan-review:<itemId>`) is NEVER
+/// announced as a `tool_call` — the only follow-up on the wire is a
+/// `tool_call_update` carrying just a status and `rawOutput`. Without seeding a
+/// tool call from this request that update lands on an unknown id and renders as
+/// an untitled generic tool card, so `handle_permission_request` emits one.
+/// Gated on Codex, mirroring [`is_codex_subagent_activity`].
+fn is_codex_plan_review(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    if agent_type != AgentType::Codex {
+        return false;
+    }
+    meta.and_then(|m| m.get("codex"))
+        .and_then(|codex| codex.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some("plan_review")
+}
+
 /// Extract a retryable-turn-error indicator from a Codex `session_info_update`'s
 /// `_meta` (codex-acp #289, v1.1.3+). codex ships a transient, auto-retried
 /// error as `_meta.codex.error = {message, codexErrorInfo, additionalDetails,
@@ -7995,6 +8061,29 @@ mod tests {
             "codex": { "collaboration": { "tool": "spawnAgent" } }
         }));
         assert!(!is_codex_subagent_activity(AgentType::Codex, Some(&collab)));
+    }
+
+    #[test]
+    fn codex_plan_review_detected_only_for_codex_plan_review_meta() {
+        // codex-acp #351: `_meta.codex.kind = "plan_review"` on the permission
+        // REQUEST marks the Plan-mode review gate whose tool call was never
+        // announced.
+        let review = meta_map(serde_json::json!({
+            "codex": { "kind": "plan_review", "planItemId": "item-7" }
+        }));
+        assert!(is_codex_plan_review(AgentType::Codex, Some(&review)));
+        // Gated on Codex: an identical meta from another agent seeds nothing.
+        assert!(!is_codex_plan_review(AgentType::ClaudeCode, Some(&review)));
+        // Ordinary permission requests carry no meta at all.
+        assert!(!is_codex_plan_review(AgentType::Codex, None));
+        // Sibling `codex` keys and other `kind` values must not seed a card.
+        let other_kind = meta_map(serde_json::json!({ "codex": { "kind": "mcp_tool_call" } }));
+        assert!(!is_codex_plan_review(AgentType::Codex, Some(&other_kind)));
+        let sub = meta_map(serde_json::json!({ "codex": { "subagent": { "threadId": "t1" } } }));
+        assert!(!is_codex_plan_review(AgentType::Codex, Some(&sub)));
+        // A non-string `kind` must not be coerced into a match.
+        let numeric = meta_map(serde_json::json!({ "codex": { "kind": 1 } }));
+        assert!(!is_codex_plan_review(AgentType::Codex, Some(&numeric)));
     }
 
     #[test]

@@ -2865,6 +2865,9 @@
         "planMode": {
           "entered": "進入計畫模式",
           "planLabel": "計畫",
+          "reviewApproved": "已核准執行計畫",
+          "reviewKept": "維持在計畫模式",
+          "reviewPending": "等待計畫決定",
           "submitted": "計畫已提交",
           "switched": "切換模式"
         },

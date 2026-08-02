@@ -236,9 +236,22 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // and `permission_denied` resolving unannounced tool calls
             // (#923). Fast mode's config option now folds the SDK's
             // `fast_mode_disabled_reason` into its description (#921).
+            // 0.64.0 carries the SAME claude-agent-sdk (0.3.220) and ACP SDK
+            // (1.3.0), so Claude Code's own behavior is unchanged. It adds an
+            // opt-in host-owned steering fallback (#919): a `_session/steering`
+            // request may carry `_meta.steering.idleBehavior = "promptRequired"`,
+            // and when the turn it meant to steer already settled the adapter
+            // returns `{outcome:"promptRequired", reason:"noRunningTurn"}`
+            // WITHOUT consuming the content, so the host resubmits it through a
+            // normal `session/prompt` it owns. Not wired into codeg yet — live
+            // feedback still rides the codeg-mcp `check_user_feedback` pull (see
+            // `crate::acp::feedback`). 0.64.0 also marks the per-question
+            // free-text "Other" elicitation field with the deliberately
+            // un-namespaced `_meta._askUserQuestionCustomAnswer` (#929, omitted
+            // from the release notes) — see `question::is_custom_answer_property`.
             distribution: AgentDistribution::Npx {
-                version: "0.63.0",
-                package: "@agentclientprotocol/claude-agent-acp@0.63.0",
+                version: "0.64.0",
+                package: "@agentclientprotocol/claude-agent-acp@0.64.0",
                 cmd: "claude-agent-acp",
                 args: &[],
                 env: &[],
@@ -252,7 +265,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             description: "ACP adapter for OpenAI's coding assistant",
             // codex-acp moved from zed-industries (Rust binary) to the
             // agentclientprotocol org (TypeScript rewrite, npx-distributed).
-            // 1.1.7 depends on `@openai/codex` ^0.145.0 and drives `codex
+            // 1.1.8 depends on `@openai/codex` ^0.145.0 and drives `codex
             // app-server`; since 1.0.1 it also resolves the resumed
             // `model_provider` from `~/.codex/config.toml` (#224), so codeg no
             // longer injects `MODEL_PROVIDER` to keep resumed sessions on the
@@ -282,11 +295,28 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // contents as a plain `agent_message_chunk`
             // (`_meta.codex.phase = "final_answer"`, no `<proposed_plan>` tags),
             // which the adapter's tag-splitter simply no-ops on — tagged output
-            // from older codex still renders as the proposed-plan card. 1.1.7
-            // declares no `engines.node`, so the 20.0.0 floor is retained.
+            // from older codex still renders as the proposed-plan card. 1.1.8
+            // (#351) gates Plan mode behind a review confirmation: when a plan
+            // item completes while `collaboration_mode` is `plan`, codex-acp
+            // sends a `session/request_permission` marked
+            // `_meta.codex = {kind:"plan_review", planItemId}` whose `toolCall`
+            // (`plan-review:<itemId>`, kind `switch_mode`, `rawInput.plan`) was
+            // NEVER announced as a `tool_call` — codeg seeds it from the request
+            // (see `is_codex_plan_review` / `handle_permission_request`) so the
+            // follow-up `tool_call_update` has a card to merge into. On approval
+            // codex flips the mode back to default (a mid-turn
+            // `config_option_update`) and runs the implementation turn inside
+            // the SAME `session/prompt`. 1.1.8 (#342) also hangs a structured
+            // `_meta.permission = {version, changes[]}` on each permission
+            // option, whose `changes[].description` codeg surfaces in the
+            // permission card. The 1.1.8 `clientCapabilities.plan` path
+            // (structured `plan_update`s) does NOT apply: sacp 11.0.0's schema
+            // has no such capability, so plans keep arriving as
+            // `agent_message_chunk`s. 1.1.8 still declares no `engines.node`, so
+            // the 20.0.0 floor is retained.
             distribution: AgentDistribution::Npx {
-                version: "1.1.7",
-                package: "@agentclientprotocol/codex-acp@1.1.7",
+                version: "1.1.8",
+                package: "@agentclientprotocol/codex-acp@1.1.8",
                 cmd: "codex-acp",
                 args: &[],
                 env: &[],
@@ -686,8 +716,8 @@ mod tests {
     fn registry_pins_current_acp_agent_versions() {
         assert_npx_version(
             AgentType::ClaudeCode,
-            "0.63.0",
-            "@agentclientprotocol/claude-agent-acp@0.63.0",
+            "0.64.0",
+            "@agentclientprotocol/claude-agent-acp@0.64.0",
             Some("22.0.0"),
         );
         assert_npx_version(
@@ -722,8 +752,8 @@ mod tests {
         );
         assert_npx_version(
             AgentType::Codex,
-            "1.1.7",
-            "@agentclientprotocol/codex-acp@1.1.7",
+            "1.1.8",
+            "@agentclientprotocol/codex-acp@1.1.8",
             Some("20.0.0"),
         );
         assert_npx_version(AgentType::Pi, "0.0.32", "pi-acp@0.0.32", Some("22.0.0"));

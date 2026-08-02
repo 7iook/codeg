@@ -153,4 +153,81 @@ describe("PermissionDialog", () => {
     )
     expect(container.querySelector("pre")).toBeNull()
   })
+
+  it("lists what each option grants from _meta.permission.changes (codex ≥1.1.8)", () => {
+    // codex-acp #342 hangs a structured, already-humanized change list on each
+    // permission option. The card must show those sentences so "Allow for
+    // Session" stops being an opaque button.
+    const permission: PendingPermission = {
+      request_id: "req-changes",
+      tool_call: { title: "Need extra access", kind: "other" },
+      options: [
+        {
+          option_id: "allow_permissions_session",
+          name: "Allow for Session",
+          kind: "allow_always",
+          meta: {
+            permission: {
+              version: 1,
+              changes: [
+                {
+                  type: "grant",
+                  operation: "grant",
+                  description: "Allow network access for this session",
+                  lifetime: { scope: "session" },
+                },
+                {
+                  type: "grant",
+                  operation: "grant",
+                  description:
+                    "Allow write access to /repo/tmp for this session",
+                  lifetime: { scope: "session" },
+                },
+              ],
+            },
+          },
+        },
+        { option_id: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    }
+    renderWithIntl(
+      <PermissionDialog permission={permission} onRespond={() => {}} />
+    )
+    expect(
+      screen.getByText(/Allow network access for this session/)
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/Allow write access to \/repo\/tmp for this session/)
+    ).toBeInTheDocument()
+    // The option's own label survives alongside its change list.
+    expect(screen.getByText("Allow for Session")).toBeInTheDocument()
+  })
+
+  it("ignores option metadata that is absent or of an unknown version", () => {
+    const permission: PendingPermission = {
+      request_id: "req-nochanges",
+      tool_call: { title: "Run unit tests", kind: "shell" },
+      options: [
+        {
+          option_id: "allow",
+          name: "Allow once",
+          kind: "allow_once",
+          // A future revision codeg does not understand must render nothing
+          // rather than a half-read list.
+          meta: {
+            permission: {
+              version: 2,
+              changes: [{ description: "Something new" }],
+            },
+          },
+        },
+        { option_id: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    }
+    renderWithIntl(
+      <PermissionDialog permission={permission} onRespond={() => {}} />
+    )
+    expect(screen.queryByText(/Something new/)).toBeNull()
+    expect(screen.getByText("Allow once")).toBeInTheDocument()
+  })
 })

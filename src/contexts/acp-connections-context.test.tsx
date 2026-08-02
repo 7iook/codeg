@@ -1142,6 +1142,42 @@ describe("AcpConnectionsProvider Grok cross-agent-type model switch", () => {
     return latestAttachHandlers()
   }
 
+  it("applies a mid-turn config_option_update while the turn is still prompting", async () => {
+    // codex-acp ≥1.1.8 flips `collaboration_mode` back to the default IN THE
+    // MIDDLE of a turn once the user approves a plan review, then keeps
+    // streaming the implementation under the same session/prompt. The selector
+    // must follow — this is metadata, not agent output, so the out-of-turn
+    // guards that drop tool calls / deltas must not touch it.
+    const handlers = await connectGrokOwner()
+
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "session_config_options",
+      config_options: grokModelOptions("grok-4.5"),
+    })
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "prompting",
+    })
+    expect(h.store!.getConnection(TAB)!.status).toBe("prompting")
+
+    emitAcpEvent(handlers, {
+      seq: 3,
+      connection_id: "spawned-conn",
+      type: "session_config_options",
+      config_options: grokModelOptions("grok-composer-2.5-fast"),
+    })
+
+    const conn = h.store!.getConnection(TAB)!
+    expect(conn.status).toBe("prompting")
+    expect(conn.configOptions?.[0]?.kind.current_value).toBe(
+      "grok-composer-2.5-fast"
+    )
+  })
+
   it("reverts the optimistic pick, surfaces the localized error, and keeps the attempted preference", async () => {
     const handlers = await connectGrokOwner()
 

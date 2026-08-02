@@ -17,7 +17,11 @@ import { CodeBlock } from "@/components/ai-elements/code-block"
 import { UnifiedDiffPreview } from "@/components/diff/unified-diff-preview"
 import { MessageResponse } from "@/components/ai-elements/message"
 import type { PendingPermission } from "@/contexts/acp-connections-context"
-import { parsePermissionToolCall } from "@/lib/permission-request"
+import {
+  parsePermissionOptionChanges,
+  parsePermissionToolCall,
+} from "@/lib/permission-request"
+import { cn } from "@/lib/utils"
 
 interface PermissionDialogProps {
   permission: PendingPermission | null
@@ -38,7 +42,19 @@ export function PermissionDialog({
     () => parsePermissionToolCall(permission?.tool_call),
     [permission?.tool_call]
   )
+  // What each option would actually grant, keyed by option id. Empty for every
+  // agent that ships no `_meta.permission` (i.e. everything but codex ≥1.1.8).
+  const optionChanges = useMemo(() => {
+    const out: Record<string, string[]> = {}
+    for (const opt of permission?.options ?? []) {
+      const changes = parsePermissionOptionChanges(opt.meta)
+      if (changes.length > 0) out[opt.option_id] = changes
+    }
+    return out
+  }, [permission?.options])
   if (!permission) return null
+
+  const hasOptionChanges = Object.keys(optionChanges).length > 0
 
   const hasFileChanges = parsed.fileChanges.length > 0
   const hasPlan =
@@ -213,9 +229,19 @@ export function PermissionDialog({
         )}
       </div>
 
-      <div className="mt-3 flex flex-wrap gap-2">
+      {/* Options stack vertically once any of them spells out what it grants
+          (codex-acp ≥1.1.8 `_meta.permission.changes`) — a wrapped row of
+          multi-line buttons reads as a jumble. Without that metadata the
+          original compact row is preserved. */}
+      <div
+        className={cn(
+          "mt-3 gap-2",
+          hasOptionChanges ? "flex flex-col" : "flex flex-wrap"
+        )}
+      >
         {permission.options.map((opt) => {
           const isReject = opt.kind.startsWith("reject")
+          const changes = optionChanges[opt.option_id] ?? []
           return (
             <Button
               key={opt.option_id}
@@ -223,7 +249,18 @@ export function PermissionDialog({
               className="h-auto min-h-9 whitespace-normal break-words text-left"
               onClick={() => onRespond(permission.request_id, opt.option_id)}
             >
-              {opt.name}
+              <span className="min-w-0 flex-1">
+                <span className="block">{opt.name}</span>
+                {changes.length > 0 && (
+                  <span className="mt-0.5 block space-y-0.5 text-xs font-normal opacity-80">
+                    {changes.map((change, index) => (
+                      <span key={index} className="block">
+                        · {change}
+                      </span>
+                    ))}
+                  </span>
+                )}
+              </span>
             </Button>
           )
         })}

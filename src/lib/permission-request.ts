@@ -806,3 +806,42 @@ export function parsePermissionToolCall(
     jsonPreview: stringifyJson(toolCallObj ?? toolCall),
   }
 }
+
+/**
+ * Maximum permission-change descriptions rendered for one option, and the
+ * per-description character cap. The wire list is agent-authored and rides the
+ * broadcast event + snapshot, so a bound keeps a pathological (or simply very
+ * broad) grant from turning the permission card into a wall of text. Anything
+ * past the cap is dropped rather than summarized — the option's own name still
+ * states what it does.
+ */
+const MAX_PERMISSION_CHANGES = 6
+const MAX_PERMISSION_CHANGE_CHARS = 200
+
+/**
+ * Human-readable descriptions of what picking a permission option would change.
+ *
+ * codex-acp ≥1.1.8 (#342) hangs `_meta.permission = {version: 1, changes: [...]}`
+ * on each `PermissionOption`, where every change already carries a rendered
+ * English sentence ("Allow access to api.example.com for this session", "Allow
+ * commands starting with npm test"). Only `version: 1` is read — a future
+ * revision may reshape `changes`, and showing it half-understood is worse than
+ * showing nothing. The structural fields (`targets`, `lifetime`, `ruleBehavior`)
+ * are deliberately ignored: `description` is the agent's own summary of them.
+ */
+export function parsePermissionOptionChanges(
+  meta: Record<string, unknown> | null | undefined
+): string[] {
+  const permission = asObject(pickValue(asObject(meta), ["permission"]))
+  if (!permission || permission.version !== 1) return []
+  const changes = permission.changes
+  if (!Array.isArray(changes)) return []
+  const out: string[] = []
+  for (const change of changes) {
+    if (out.length >= MAX_PERMISSION_CHANGES) break
+    const description = pickString(asObject(change), ["description"])
+    if (!description) continue
+    out.push(description.slice(0, MAX_PERMISSION_CHANGE_CHARS))
+  }
+  return out
+}

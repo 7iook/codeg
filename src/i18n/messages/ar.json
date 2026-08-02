@@ -2865,6 +2865,9 @@
         "planMode": {
           "entered": "تم بدء وضع التخطيط",
           "planLabel": "الخطة",
+          "reviewApproved": "تمت الموافقة على الخطة — جارٍ التنفيذ",
+          "reviewKept": "الاستمرار في وضع الخطة",
+          "reviewPending": "في انتظار قرار الخطة",
           "submitted": "تم إرسال الخطة",
           "switched": "تم تبديل الوضع"
         },
