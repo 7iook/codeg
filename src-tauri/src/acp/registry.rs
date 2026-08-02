@@ -205,6 +205,64 @@ pub fn from_registry_id(id: &str) -> Option<AgentType> {
     }
 }
 
+/// The vendor CLI wrapped by a codeg entry that is really a THIRD-PARTY ACP
+/// *adapter*.
+///
+/// Ten of the twelve built-ins distribute the vendor's own CLI, so a user's
+/// existing global install is found by the launch gate as-is. Claude Code and
+/// Codex are the exceptions: neither `claude` nor `codex` speaks ACP, so codeg
+/// installs a separate adapter package (`claude-agent-acp` / `codex-acp`,
+/// maintained by the Agent Client Protocol org) whose command name has nothing
+/// to do with the vendor CLI's. That mismatch is the single most reported
+/// confusion ("I have claude installed, why does codeg say it isn't?"), so
+/// preflight and diagnostics probe the vendor CLI too and explain the split.
+#[derive(Debug, Clone, Copy)]
+pub struct AcpAdapterRelation {
+    /// The vendor CLI users install themselves, e.g. "claude".
+    pub native_cmd: &'static str,
+    /// Display name for that CLI, e.g. "Claude Code CLI".
+    pub native_label: &'static str,
+    /// Config/credential dir BOTH the vendor CLI and the adapter read, so
+    /// installing the adapter needs no second login.
+    pub shared_config_dir: &'static str,
+    /// Home-relative dirs the vendor's own installers use that a GUI app's PATH
+    /// commonly lacks. Probed after PATH and the npm global prefix.
+    pub extra_dirs: &'static [&'static str],
+    /// Where the "learn more" action points.
+    pub docs_url: &'static str,
+}
+
+/// Adapter relation for an agent, or `None` when codeg's entry IS the vendor's
+/// own CLI (every agent except these two).
+///
+/// Adding an entry here changes what preflight/diagnostics report — keep the
+/// `acp_adapter_relation_covers_only_wrapper_agents` test in sync.
+pub fn acp_adapter_relation(agent_type: AgentType) -> Option<AcpAdapterRelation> {
+    match agent_type {
+        AgentType::ClaudeCode => Some(AcpAdapterRelation {
+            native_cmd: "claude",
+            native_label: "Claude Code CLI",
+            shared_config_dir: "~/.claude",
+            // The native installer targets ~/.local/bin; older builds used
+            // ~/.claude/local.
+            extra_dirs: &[".local/bin", ".claude/local"],
+            docs_url: ACP_ADAPTER_DOCS_URL,
+        }),
+        AgentType::Codex => Some(AcpAdapterRelation {
+            native_cmd: "codex",
+            native_label: "Codex CLI",
+            shared_config_dir: "~/.codex",
+            extra_dirs: &[".local/bin"],
+            docs_url: ACP_ADAPTER_DOCS_URL,
+        }),
+        _ => None,
+    }
+}
+
+/// Docs anchor explaining the adapter/vendor-CLI split. The zh mirror carries
+/// the same explicit `{#acp-adapters}` anchor.
+const ACP_ADAPTER_DOCS_URL: &str = "https://docs.codeg.app/guide/supported-agents#acp-adapters";
+
 pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
     if let AgentType::Custom(id) = agent_type {
         return crate::acp::custom_registry::get(id)
@@ -781,6 +839,33 @@ mod tests {
     // other agent (current and future) keeps it `true`. Iterating the full
     // registry means a newly-added agent that wrongly opts out — or a
     // regression flipping OpenClaw back on — trips this assert.
+    // Only Claude Code and Codex ship as a third-party ACP adapter wrapping a
+    // vendor CLI of a different name. Every other agent's registry `cmd` IS the
+    // vendor CLI, so claiming an adapter relation for one would make preflight
+    // explain a split that doesn't exist.
+    #[test]
+    fn acp_adapter_relation_covers_only_wrapper_agents() {
+        for agent_type in all_acp_agents() {
+            let relation = acp_adapter_relation(agent_type);
+            let expected = matches!(agent_type, AgentType::ClaudeCode | AgentType::Codex);
+            assert_eq!(
+                relation.is_some(),
+                expected,
+                "unexpected adapter relation for {agent_type:?}"
+            );
+            // The whole point is that the vendor CLI's name differs from the
+            // adapter command codeg actually launches.
+            if let Some(relation) = relation {
+                match get_agent_meta(agent_type).distribution {
+                    AgentDistribution::Npx { cmd, .. } => {
+                        assert_ne!(cmd, relation.native_cmd, "{agent_type:?}")
+                    }
+                    other => panic!("expected npx distribution for {agent_type:?}, got {other:?}"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn only_openclaw_opts_out_of_mcp() {
         for agent_type in all_acp_agents() {

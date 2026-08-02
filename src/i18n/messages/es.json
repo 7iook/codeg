@@ -1123,6 +1123,16 @@
       "remoteUnavailable": "{versionText}. La versión remota no está disponible por ahora.",
       "latest": "{versionText}. Ya está en la última versión."
     },
+    "adapter": {
+      "label": "Adaptador ACP",
+      "badge": "Adaptador ACP",
+      "badgeHint": "Para este agente Codeg instala un paquete adaptador ACP, no la CLI del proveedor. Son independientes y comparten la misma configuración.",
+      "learnMore": "Más información",
+      "missingWithNative": "Se encontró tu {nativeLabel} en {nativePath}. Codeg habla con los agentes mediante ACP y esa CLI no habla ACP, así que Codeg necesita un paquete adaptador aparte, {adapterPackage}, mantenido por el proyecto Agent Client Protocol (originalmente Zed). Incluye su propio runtime, nunca modifica ni reemplaza tu comando {nativeCmd} y lee el mismo {configDir}: tu sesión y tus ajustes actuales se conservan. Instálalo abajo.",
+      "missing": "Codeg habla con los agentes mediante ACP y la {nativeLabel} no habla ACP, así que Codeg necesita un paquete adaptador aparte, {adapterPackage}, mantenido por el proyecto Agent Client Protocol (originalmente Zed). Incluye su propio runtime, por lo que no hace falta instalar antes la CLI {nativeCmd}; si ya la tienes, ambas conviven y comparten la sesión y los ajustes de {configDir}. Instálalo abajo.",
+      "readyWithNative": "El adaptador {adapterCmd} está instalado: es lo que Codeg ejecuta, no tu propio {nativeCmd} en {nativePath}. Son paquetes distintos que conviven y ambos leen {configDir}, así que la sesión y los ajustes son compartidos.",
+      "ready": "El adaptador {adapterCmd} está instalado: es lo que Codeg ejecuta. Incluye su propio runtime, así que la {nativeLabel} no es necesaria; si la instalas después, ambas conviven y comparten {configDir}."
+    },
     "cline": {
       "configDescription": "Configure el proveedor de API y las credenciales de Cline. La configuración se guarda en ~/.cline/data/."
     },
@@ -2321,7 +2331,8 @@
           "missingConfig": "No se puede leer la configuración actual del agente.",
           "disabled": "{agent} está deshabilitado en Ajustes de agentes. Actívalo antes de conectar.",
           "unavailable": "{agent} no está disponible en la plataforma actual.",
-          "sdkMissing": "El SDK de {agent} no está instalado"
+          "sdkMissing": "El SDK de {agent} no está instalado",
+          "adapterMissing": "El adaptador ACP de {agent} no está instalado"
         },
         "backendErrors": {
           "initializeTimeout": "Se agotó el tiempo del handshake de conexión de {agent} (sin respuesta tras 60 segundos). Abre Ajustes para revisar la configuración del agente y de la red.",
@@ -2335,7 +2346,9 @@
           "turnFailedMaxTurnRequests": "{agent} alcanzó el número máximo de solicitudes permitidas para este turno.",
           "turnFailedUnknown": "{agent} finalizó el turno con un motivo de parada no reconocido.",
           "grokModelSwitchIncompatibleAgent": "{agent} no puede cambiar a ese modelo en una conversación existente. Inicia una nueva sesión para usarlo.",
-          "turnFailedEmpty": "{agent} finalizó el turno sin producir ninguna respuesta. Revisa la configuración del agente."
+          "turnFailedEmpty": "{agent} finalizó el turno sin producir ninguna respuesta. Despliega los detalles para ver la salida del agente.",
+          "turnFailedEmptyProtocol": "{agent} produjo una salida que codeg no pudo analizar; la versión del agente podría no coincidir con el protocolo. Despliega los detalles para ver más.",
+          "turnFailedEmptyMetadata": "{agent} solo envió actualizaciones de estado en este turno (plan / modo / uso) y ninguna respuesta. Despliega los detalles para ver más."
         },
         "unableReadAgentConfig": "No se puede leer la configuración del agente: {message}",
         "connectFailedTitle": "Falló la conexión de {agent}",
@@ -2449,7 +2462,8 @@
         "prepareSessionFailed": "No se pudo preparar la sesión de chat. Inténtalo de nuevo.",
         "createConversationFailed": "No se pudo crear la conversación. Inténtalo de nuevo.",
         "askAnythingPlaceholder": "Pregunta lo que sea...",
-        "agentNotInstalled": "{agent} no está instalado · abre la configuración de Agents para instalarlo"
+        "agentNotInstalled": "{agent} no está instalado · abre la configuración de Agents para instalarlo",
+        "agentAdapterNotInstalled": "El adaptador ACP de {agent} no está instalado (es aparte de tu propia CLI) · abre la configuración de Agents para instalarlo"
       },
       "welcomePanel": {
         "greeting": "¿Qué te gustaría <highlight>hacer hoy</highlight>?",
@@ -4359,7 +4373,9 @@
       "homebrew_bin_not_on_path": "Se instaló en el bin de Homebrew, que no está en el PATH de la app (división de keg en Apple Silicon).",
       "terminal_only_path": "El comando se resuelve en tu terminal pero no en la app: una diferencia de PATH de la GUI. Inicia la app desde una terminal o reinstala desde Ajustes de agentes.",
       "npm_prefix_timeout": "npm prefix -g fue demasiado lento (más de 1,5 s), por lo que se omitió la detección de reserva. Reinicia la app e inténtalo de nuevo.",
-      "node_too_old": "Tu Node.js activo es más antiguo de lo que requiere este agente. Actualiza Node.js."
+      "node_too_old": "Tu Node.js activo es más antiguo de lo que requiere este agente. Actualiza Node.js.",
+      "adapter_missing_native_present": "Tu CLI de {agent} sí está instalada, pero Codeg ejecuta un paquete adaptador ACP aparte, y ese todavía no lo está. Instálalo desde la configuración de agentes: no toca tu CLI y comparte la misma sesión.",
+      "adapter_missing": "Codeg ejecuta un paquete adaptador ACP aparte para {agent} y aún no está instalado. Instálalo desde la configuración de agentes: instalar solo la CLI del proveedor no basta."
     }
   }
 }

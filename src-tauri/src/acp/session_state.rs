@@ -165,6 +165,11 @@ pub struct PendingPermissionState {
 pub struct SessionLastError {
     pub message: String,
     pub code: Option<String>,
+    /// Mirrors `AcpEvent::Error.details` so a client that attached after the
+    /// error (snapshot path) sees the same diagnostic evidence as one that was
+    /// live for it. Already redacted at the source.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub details: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -940,7 +945,12 @@ impl SessionState {
                 // already done — the event fires only once per connection.
                 self.selectors_ready = true;
             }
-            AcpEvent::Error { message, code, .. } => {
+            AcpEvent::Error {
+                message,
+                code,
+                details,
+                ..
+            } => {
                 // Capture so post-mortem readers (probe path, debug
                 // snapshots) can surface the agent's own error message
                 // after the connection task has cleaned up its map
@@ -949,6 +959,7 @@ impl SessionState {
                 self.last_error = Some(SessionLastError {
                     message: message.clone(),
                     code: code.clone(),
+                    details: details.clone(),
                 });
             }
             AcpEvent::DelegationStarted {
@@ -1784,6 +1795,7 @@ mod tests {
             message: "ACP protocol error: forbidden".into(),
             agent_type: "claude_code".into(),
             code: Some("forbidden".into()),
+            details: None,
             terminal: true,
         });
 
@@ -1793,6 +1805,7 @@ mod tests {
             Some(SessionLastError {
                 message: "ACP protocol error: forbidden".into(),
                 code: Some("forbidden".into()),
+                details: None,
             })
         );
 

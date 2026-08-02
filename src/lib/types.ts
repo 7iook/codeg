@@ -1557,6 +1557,17 @@ export type AcpEvent =
       agent_type: string
       /** Stable backend error identifier for localization (e.g. "initialize_timeout"). */
       code: string | null
+      /**
+       * Diagnostic evidence for errors the backend *inferred* rather than
+       * received — the `turn_failed_empty*` family, where the agent reported
+       * success and the wire carried no error. Agent stderr tail plus a
+       * summary of updates the backend could not parse.
+       *
+       * Already redacted and length-bounded by the backend. Render it in the
+       * alert detail only: it must not reach the OS notification or the
+       * connection-status tooltip.
+       */
+      details?: string | null
     }
   | {
       // codex-acp #289: a retryable turn error that keeps the turn alive (codex
@@ -1874,6 +1885,8 @@ export interface FeedbackItem {
 export interface SessionLastError {
   message: string
   code?: string | null
+  /** Mirrors `AcpEvent` error `details`; already redacted by the backend. */
+  details?: string | null
 }
 
 export interface LiveSessionSnapshot {
@@ -1962,6 +1975,14 @@ export interface AcpAgentInfo {
   description: string
   available: boolean
   distribution_type: string
+  /**
+   * Whether codeg's entry for this agent is a third-party ACP *adapter*
+   * wrapping a vendor CLI of a different name (Claude Code → claude-agent-acp,
+   * Codex → codex-acp). Surfaces without a preflight result use it to say "the
+   * ACP adapter isn't installed" rather than "the agent isn't" — the single
+   * most-reported confusion.
+   */
+  is_acp_adapter: boolean
   /**
    * For custom agents, where the definition came from ("registry" | "manual");
    * null for built-ins. A manual definition's registry_version is user-typed,
@@ -2177,6 +2198,8 @@ export interface AcpAgentStatus {
   available: boolean
   enabled: boolean
   installed_version: string | null
+  /** See AcpAgentInfo.is_acp_adapter. */
+  is_acp_adapter: boolean
 }
 
 // Environment diagnostics (returned by acp_env_diagnostics). Mirrors the Rust
@@ -2914,11 +2937,36 @@ export interface CheckItem {
   fixes: FixAction[]
 }
 
+/**
+ * Structured explainer data for agents whose codeg entry is a third-party ACP
+ * adapter rather than the vendor's own CLI (Claude Code, Codex). The backend
+ * ships only facts — the wording lives in i18n, the same way buildVersionCheck
+ * owns the version card's copy.
+ */
+export interface AdapterInfo {
+  /** npm spec codeg installs, e.g. "@agentclientprotocol/codex-acp@1.1.7". */
+  adapter_package: string
+  /** Command the launch gate resolves, e.g. "codex-acp". */
+  adapter_cmd: string
+  adapter_installed: boolean
+  /** The vendor CLI, e.g. "codex". */
+  native_cmd: string
+  /** Display name for the vendor CLI, e.g. "Codex CLI". */
+  native_label: string
+  /** Where the user's own vendor CLI was found. codeg never launches it. */
+  native_path: string | null
+  /** Config dir both read, so installing the adapter needs no second login. */
+  shared_config_dir: string
+  docs_url: string
+}
+
 export interface PreflightResult {
   agent_type: AgentType
   agent_name: string
   passed: boolean
   checks: CheckItem[]
+  /** Null unless this agent is an ACP adapter. Never affects `passed`. */
+  adapter: AdapterInfo | null
 }
 
 // ─── OpenCode Plugins ───
