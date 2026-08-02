@@ -224,6 +224,26 @@ pub enum GoalControlAction {
     Clear,
 }
 
+/// How the adapter disposed of a `_session/steering` message — the wire
+/// `outcome` string, parsed by [`parse_steer_outcome`]. The distinction that
+/// matters to callers is CONSUMPTION: `Injected` and `StartedNewTurn` mean the
+/// adapter took the content (record it delivered, never resend);
+/// `PromptRequired` means it did not (safe to resubmit as a normal prompt).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerOutcome {
+    /// Pushed into the RUNNING turn's input — consumed.
+    Injected,
+    /// The turn settled first and the adapter honored the
+    /// `idleBehavior = "promptRequired"` opt-in — NOT consumed, still
+    /// host-owned. The caller reroutes it through `session/prompt`.
+    PromptRequired,
+    /// The adapter ignored the opt-in (pre-0.64 claude adapter, codex-acp)
+    /// and spun up a detached turn no host request owns — consumed. The
+    /// manager records it delivered, warns, and downgrades
+    /// `native_steering_available` for the rest of the session.
+    StartedNewTurn,
+}
+
 /// Commands sent from Tauri command handlers to the ACP connection loop.
 pub enum ConnectionCommand {
     Prompt {
@@ -255,6 +275,18 @@ pub enum ConnectionCommand {
     Fork {
         reply:
             tokio::sync::oneshot::Sender<Result<crate::acp::types::ForkProtocolResult, AcpError>>,
+    },
+    /// Inject a live-feedback note into the RUNNING turn over the ACP
+    /// `_session/steering` extension (native push channel — see
+    /// `manager::submit_feedback`). The loop does the protocol round-trip
+    /// only and replies the parsed outcome; recording the note + the
+    /// `FeedbackSubmitted` broadcast happen in the manager's
+    /// cancellation-shielded task, mirroring Fork's protocol/persistence
+    /// split. The idle arm replies `Err(NoActiveTurn)` so the oneshot can
+    /// never hang.
+    Steer {
+        text: String,
+        reply: tokio::sync::oneshot::Sender<Result<SteerOutcome, AcpError>>,
     },
     Disconnect,
 }
@@ -1966,6 +1998,57 @@ fn build_grok_set_model_params(
     params
 }
 
+/// Send `_session/steering` (the ACP steering extension) to inject a message
+/// into the RUNNING turn. Untyped like `session/resume` — an extension method
+/// the schema has no typed request for. Always opts into the 0.64.0
+/// `promptRequired` idle contract; codeg only enables native steering for
+/// adapters proven to honor it (see [`synthesize_native_steering`]), but the
+/// caller still handles every outcome in case the proof was wrong.
+async fn send_steer_request(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    text: &str,
+) -> Result<SteerOutcome, AcpError> {
+    let params = build_steer_params(session_id.0.as_ref(), text);
+    let untyped_req = UntypedMessage::new("_session/steering", params).map_err(|e| {
+        AcpError::protocol(format!("Failed to build steering request: {e}"))
+    })?;
+    let raw = cx
+        .send_request_to(Agent, untyped_req)
+        .block_task()
+        .await
+        .map_err(|e| AcpError::protocol(format!("Steering request failed: {e}")))?;
+    parse_steer_outcome(&raw)
+}
+
+/// Build the `_session/steering` params. The prompt is a single text block
+/// (codeg steering is text-only), and `_meta.steering.idleBehavior =
+/// "promptRequired"` opts into the turn-end-race contract: a turn that
+/// settled first yields `{outcome:"promptRequired"}` WITHOUT consuming the
+/// content, so the host resubmits it through a normal `session/prompt`.
+fn build_steer_params(session_id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "sessionId": session_id,
+        "prompt": [{ "type": "text", "text": text }],
+        "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+    })
+}
+
+/// Parse a `_session/steering` response's top-level `outcome`. Strict on
+/// unknowns: a missing or unrecognized outcome is a protocol error, NOT a
+/// silent success — the caller must know whether the content was consumed
+/// before it decides between "record delivered" and "safe to resend".
+fn parse_steer_outcome(raw: &serde_json::Value) -> Result<SteerOutcome, AcpError> {
+    match raw.get("outcome").and_then(serde_json::Value::as_str) {
+        Some("injected") => Ok(SteerOutcome::Injected),
+        Some("promptRequired") => Ok(SteerOutcome::PromptRequired),
+        Some("startedNewTurn") => Ok(SteerOutcome::StartedNewTurn),
+        other => Err(AcpError::protocol(format!(
+            "unexpected _session/steering outcome: {other:?}"
+        ))),
+    }
+}
+
 /// On reconnect, re-apply the user's last-picked Grok model AND reasoning effort
 /// (both saved per agent by the frontend and shipped back as preferred config
 /// values), reflecting each in its selector's `current_value`. Model is applied
@@ -3273,6 +3356,32 @@ async fn run_connection(
                 init_resp.agent_capabilities.load_session, supports_fork, supports_resume
             );
 
+            // Native live-feedback steering, synthesized ONCE from three gates
+            // so every consumer (the submit split, the snapshot, the frontend)
+            // reads a single authoritative bool: (1) the adapter advertises
+            // the extension (top-level `_meta`), (2) the registry says this
+            // agent type honors the `promptRequired` idle opt-in, and (3) the
+            // RUNNING binary proves it via `agent_info.version` — launch
+            // prefers a PATH-resolved install over the pinned package, so (2)
+            // alone can't vouch for the process on the other end of the pipe.
+            // The raw advertisement is deliberately NOT stored: exposing it
+            // would tempt the frontend to re-derive eligibility and show the
+            // instant channel for adapters (codex) that advertise steering but
+            // would detach a turn on the idle race.
+            let steering_advertised = init_advertises_steering(init_resp.meta.as_ref());
+            let native_steering_available = synthesize_native_steering(
+                agent_type,
+                init_resp.meta.as_ref(),
+                init_resp.agent_info.as_ref(),
+            );
+            tracing::info!(
+                "[ACP][{}] steering: advertised={}, agent_version={:?}, native={}",
+                agent_type,
+                steering_advertised,
+                init_resp.agent_info.as_ref().map(|i| i.version.as_str()),
+                native_steering_available
+            );
+
             // Whether this agent accepts MCP server entries over the ACP wire
             // (`session/new`'s `mcpServers`). Almost all do; OpenClaw rejects
             // any server entry and fails session creation, so it must receive
@@ -3345,12 +3454,20 @@ async fn run_connection(
             } else {
                 None
             };
-            if let Some(ref injected) = delegate_injection {
+            {
                 let mut s = state.write().await;
-                s.delegation_token = Some(injected.token.clone());
-                // The agent's actual feedback capability for this session — the
-                // authoritative gate for submit + UI, fixed at launch.
-                s.feedback_tool_available = injected.feedback_available;
+                // Native steering is independent of the MCP companion — set it
+                // even when no codeg-mcp is injected (it's exactly the channel
+                // that needs no tool; OpenClaw-style `supports_mcp: false`
+                // agents could ship it someday).
+                s.native_steering_available = native_steering_available;
+                if let Some(ref injected) = delegate_injection {
+                    s.delegation_token = Some(injected.token.clone());
+                    // The agent's actual feedback capability for this session
+                    // — the authoritative gate for submit + UI, fixed at
+                    // launch.
+                    s.feedback_tool_available = injected.feedback_available;
+                }
             }
 
             // Emit fork support capability
@@ -6440,6 +6557,20 @@ async fn run_conversation_loop<'a>(
                                         .await;
                                     }
                                 }
+                                Some(ConnectionCommand::Steer { text, reply }) => {
+                                    // Protocol round-trip only — the manager's
+                                    // cancellation-shielded task records the
+                                    // note + broadcasts `FeedbackSubmitted`
+                                    // once this outcome arrives (Fork's
+                                    // protocol/persistence split). Awaiting
+                                    // inline matches SetMode/SetConfigOption:
+                                    // sacp pumps I/O on its own task, so the
+                                    // round-trip only defers other queued
+                                    // commands, not session updates. A dead
+                                    // receiver is fine — the reply is then
+                                    // moot (teardown), nothing to unwind.
+                                    let _ = reply.send(send_steer_request(&cx, &sid, &text).await);
+                                }
                                 Some(ConnectionCommand::Cancel) => {
                                     // Send CancelNotification to agent to stop the current turn
                                     let _ = cx.send_notification_to(
@@ -6652,6 +6783,13 @@ async fn run_conversation_loop<'a>(
                     )
                     .await;
                 }
+            }
+            Some(ConnectionCommand::Steer { text: _, reply }) => {
+                // Steering only means something for a RUNNING turn. Reply —
+                // never drop — so the manager's shielded task can't hang on
+                // the oneshot; the caller falls back to a normal prompt (the
+                // same reroute the frontend already has for a turn-end race).
+                let _ = reply.send(Err(AcpError::NoActiveTurn));
             }
             Some(ConnectionCommand::Cancel) => {
                 let cx = session.connection();
@@ -7297,6 +7435,64 @@ fn is_codex_plan_review(
         .and_then(|codex| codex.get("kind"))
         .and_then(serde_json::Value::as_str)
         == Some("plan_review")
+}
+
+/// True when an `initialize` response advertises the ACP steering extension —
+/// the TOP-LEVEL `_meta.steering.supported` flag, a sibling of
+/// `agentCapabilities` (NOT `agentCapabilities._meta`, which belongs to other
+/// conventions such as sacp's symposium capability ext). Both claude-agent-acp
+/// (0.61+) and codex-acp (1.1.6+) advertise here; whether codeg actually
+/// steers natively additionally requires the
+/// `registry::steering_prompt_required_min_version` policy plus the runtime
+/// version proof (see the synthesis in `run_connection`).
+fn init_advertises_steering(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    meta.and_then(|m| m.get("steering"))
+        .and_then(|s| s.get("supported"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Strict SemVer floor check: true when `version >= min` by SemVer
+/// PRECEDENCE. Prerelease ordering matters here — `0.64.0-rc1` precedes
+/// `0.64.0` and may predate the very commit that shipped the
+/// `promptRequired` guarantee, so it must NOT satisfy a `0.64.0` floor
+/// (`0.64.1-beta.2` still does: its numeric core is above the floor). Build
+/// metadata (`+sha`) is precedence-ignored per spec. Fail closed: anything
+/// `semver` can't parse (missing segments, `v` prefixes, garbage suffixes)
+/// routes live feedback to the MCP pull path — today's behavior.
+fn version_at_least(version: &str, min: &str) -> bool {
+    let (Ok(actual), Ok(floor)) = (
+        semver::Version::parse(version.trim()),
+        semver::Version::parse(min),
+    ) else {
+        return false;
+    };
+    actual.cmp_precedence(&floor) != std::cmp::Ordering::Less
+}
+
+/// Runtime half of the native-steering gate: does the adapter binary that is
+/// ACTUALLY running — which launch may have resolved from PATH rather than
+/// the pinned npx package (see `commands::acp::acp_get_agent_status_core`) —
+/// report an `agent_info.version` at or above the registry minimum? Fail
+/// closed on a missing `agent_info` or an unparseable version.
+fn steering_version_ok(agent_info: Option<&sacp::schema::Implementation>, min: &str) -> bool {
+    agent_info.is_some_and(|info| version_at_least(&info.version, min))
+}
+
+/// Synthesize `SessionState.native_steering_available` from an `initialize`
+/// response: extension advertised (top-level `_meta`) AND registry policy says
+/// this agent type honors `promptRequired` AND the running binary's
+/// `agent_info.version` proves it. Pure so the full gate matrix is unit-tested;
+/// `run_connection` calls it once and everything downstream reads the stored
+/// bool.
+fn synthesize_native_steering(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    agent_info: Option<&sacp::schema::Implementation>,
+) -> bool {
+    init_advertises_steering(meta)
+        && registry::steering_prompt_required_min_version(agent_type)
+            .is_some_and(|min| steering_version_ok(agent_info, min))
 }
 
 /// Extract a retryable-turn-error indicator from a Codex `session_info_update`'s
@@ -8500,6 +8696,127 @@ mod tests {
             serde_json::from_value::<GoalControlAction>(serde_json::json!("clear")).unwrap(),
             GoalControlAction::Clear
         );
+    }
+
+    // --- native steering: capability synthesis + wire helpers -------------
+    // (reuses the shared `meta_map` test helper defined above)
+
+    #[test]
+    fn init_advertises_steering_reads_the_top_level_meta_flag() {
+        let on = meta_map(serde_json::json!({"steering": {"supported": true}}));
+        assert!(init_advertises_steering(Some(&on)));
+
+        let off = meta_map(serde_json::json!({"steering": {"supported": false}}));
+        assert!(!init_advertises_steering(Some(&off)));
+
+        // Wrong nesting (e.g. another convention's namespace) must not count.
+        let nested = meta_map(
+            serde_json::json!({"symposium": {"steering": {"supported": true}}}),
+        );
+        assert!(!init_advertises_steering(Some(&nested)));
+
+        // Non-bool / absent → false.
+        let stringly = meta_map(serde_json::json!({"steering": {"supported": "true"}}));
+        assert!(!init_advertises_steering(Some(&stringly)));
+        assert!(!init_advertises_steering(None));
+    }
+
+    #[test]
+    fn version_at_least_is_strict_semver_and_fails_closed() {
+        assert!(version_at_least("0.64.0", "0.64.0"));
+        assert!(version_at_least("0.64.1", "0.64.0"));
+        assert!(version_at_least("0.65.0", "0.64.0"));
+        assert!(version_at_least("1.0.0", "0.64.0"));
+        // SemVer precedence: a prerelease of the FLOOR release precedes it —
+        // it may predate the commit that shipped the promptRequired
+        // guarantee, so it must not open the native channel…
+        assert!(!version_at_least("0.64.0-rc1", "0.64.0"));
+        // …while a prerelease whose numeric core is above the floor is fine.
+        assert!(version_at_least("0.64.1-beta.2", "0.64.0"));
+        // Build metadata is precedence-ignored per spec.
+        assert!(version_at_least("0.64.0+sha.deadbeef", "0.64.0"));
+        // Below the floor.
+        assert!(!version_at_least("0.63.9", "0.64.0"));
+        assert!(!version_at_least("0.9.9", "0.64.0"));
+        // Fail closed on anything semver can't parse.
+        assert!(!version_at_least("", "0.64.0"));
+        assert!(!version_at_least("beta", "0.64.0"));
+        assert!(!version_at_least("v0.64.0", "0.64.0"));
+        assert!(!version_at_least("0.64", "0.64.0"));
+        assert!(!version_at_least("0..1", "0.64.0"));
+        assert!(!version_at_least("0.64.1abc", "0.64.0"));
+    }
+
+    #[test]
+    fn synthesize_native_steering_stays_off_while_the_registry_disables_it() {
+        use sacp::schema::Implementation;
+        let advertised = meta_map(serde_json::json!({"steering": {"supported": true}}));
+        let proven = Implementation::new("claude-agent-acp", "0.64.0");
+
+        // claude-agent-acp #934: `injected` settles the owning prompt when
+        // the injection lands mid-generation, so the registry policy gate is
+        // None for EVERY agent — a perfect advertisement plus a proven
+        // version must still synthesize to the pull channel. The other two
+        // gates keep their direct coverage above (`init_advertises_steering_*`
+        // / `version_at_least_*`); when upstream ships the fix and the
+        // registry re-enables claude, restore the three-gate positive matrix
+        // here (advertisement × policy × version, including the stale-install
+        // fail-closed arm).
+        assert!(!synthesize_native_steering(
+            AgentType::ClaudeCode,
+            Some(&advertised),
+            Some(&proven)
+        ));
+        assert!(!synthesize_native_steering(
+            AgentType::Codex,
+            Some(&advertised),
+            Some(&proven)
+        ));
+        assert!(!synthesize_native_steering(
+            AgentType::ClaudeCode,
+            Some(&advertised),
+            None
+        ));
+        assert!(!synthesize_native_steering(
+            AgentType::ClaudeCode,
+            None,
+            Some(&proven)
+        ));
+    }
+
+    #[test]
+    fn build_steer_params_shape_carries_the_prompt_required_opt_in() {
+        let params = build_steer_params("sess-1", "use the staging db");
+        assert_eq!(params["sessionId"], "sess-1");
+        assert_eq!(params["prompt"][0]["type"], "text");
+        assert_eq!(params["prompt"][0]["text"], "use the staging db");
+        // The opt-in is what keeps the idle race host-owned — its absence
+        // would regress to detached `startedNewTurn` turns.
+        assert_eq!(params["_meta"]["steering"]["idleBehavior"], "promptRequired");
+    }
+
+    #[test]
+    fn parse_steer_outcome_maps_the_wire_strings_and_rejects_unknowns() {
+        assert_eq!(
+            parse_steer_outcome(&serde_json::json!({"outcome": "injected"})).unwrap(),
+            SteerOutcome::Injected
+        );
+        assert_eq!(
+            parse_steer_outcome(
+                &serde_json::json!({"outcome": "promptRequired", "reason": "noRunningTurn"})
+            )
+            .unwrap(),
+            SteerOutcome::PromptRequired
+        );
+        assert_eq!(
+            parse_steer_outcome(&serde_json::json!({"outcome": "startedNewTurn"})).unwrap(),
+            SteerOutcome::StartedNewTurn
+        );
+        // Unknown or missing outcome is a protocol error, not a silent
+        // success — the caller must know whether the content was consumed.
+        assert!(parse_steer_outcome(&serde_json::json!({"outcome": "queued"})).is_err());
+        assert!(parse_steer_outcome(&serde_json::json!({})).is_err());
+        assert!(parse_steer_outcome(&serde_json::json!({"outcome": 1})).is_err());
     }
 
     #[test]

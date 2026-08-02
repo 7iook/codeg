@@ -1925,6 +1925,11 @@ export interface LiveSessionSnapshot {
    *  The frontend gates the feedback bar on this — the agent's real capability —
    *  not the (possibly later-toggled) global setting. Absent → `false`. */
   feedback_tool_available?: boolean
+  /** Whether feedback notes ride the native `_session/steering` push channel
+   *  (synthesized backend-side from advertisement + registry policy + runtime
+   *  version proof — the frontend must NOT re-derive it from agent type).
+   *  Absent → `false`. */
+  native_steering_available?: boolean
   modes: SessionModeStateInfo | null
   current_mode: string | null
   config_options: SessionConfigOptionInfo[] | null

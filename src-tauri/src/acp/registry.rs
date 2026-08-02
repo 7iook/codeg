@@ -263,6 +263,45 @@ pub fn acp_adapter_relation(agent_type: AgentType) -> Option<AcpAdapterRelation>
 /// the same explicit `{#acp-adapters}` anchor.
 const ACP_ADAPTER_DOCS_URL: &str = "https://docs.codeg.app/guide/supported-agents#acp-adapters";
 
+/// Minimum adapter version whose `_session/steering` honors the
+/// `_meta.steering.idleBehavior = "promptRequired"` opt-in — one of the three
+/// gates for codeg's NATIVE live-feedback push channel (synthesized into
+/// `SessionState.native_steering_available` at initialize; see
+/// `connection.rs::init_advertises_steering`).
+///
+/// `None` means "never steer natively" even when the adapter advertises
+/// `_meta.steering.supported`: an adapter that ignores the opt-in falls back
+/// to `startedNewTurn` on the turn-end race — a detached turn no host request
+/// owns, which codeg's turn-scoped runtime must never trigger. codex-acp
+/// 1.1.8 ships `_session/steering` but not `promptRequired` (verified against
+/// the published tarball), so it stays `None` until a release implements the
+/// opt-in — then this is a one-line flip plus tests.
+///
+/// The static policy alone is NOT enough — launch prefers a PATH-resolved,
+/// user-installed adapter over the pinned npx package (see
+/// `commands::acp::acp_get_agent_status_core`, "Launch already prefers the
+/// PATH resolution"), so the synthesis must ALSO prove the running binary's
+/// `agent_info.version` meets this minimum.
+pub fn steering_prompt_required_min_version(_agent_type: AgentType) -> Option<&'static str> {
+    // DISABLED for every agent pending
+    // https://github.com/agentclientprotocol/claude-agent-acp/issues/934:
+    // claude-agent-acp 0.64.0's `injected` outcome is unsound when the
+    // injection lands mid-generation — the CLI closes the running result
+    // cycle, the adapter settles the owning session/prompt as a clean
+    // `end_turn` (observed 3ms after `injected`), and the steered
+    // continuation streams on as a detached, request-less turn: exactly the
+    // shape this gate exists to prevent, only reported as `injected` instead
+    // of `startedNewTurn` so the downgrade path never fires. Reproduced
+    // against the adapter's own SDK pin 0.3.220 (whose `SDKUserMessage` has
+    // no `priority` field, so the "now" stamp is a no-op).
+    //
+    // Once a release keeps the prompt pending through the steered
+    // continuation, restore the arm (and the positive matrices in this
+    // file's test + `connection.rs::synthesize_native_steering`'s):
+    //   AgentType::ClaudeCode => Some("<fixed release>"), // 0.64.0 added the #919 opt-in
+    None
+}
+
 pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
     if let AgentType::Custom(id) = agent_type {
         return crate::acp::custom_registry::get(id)
@@ -301,9 +340,16 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // and when the turn it meant to steer already settled the adapter
             // returns `{outcome:"promptRequired", reason:"noRunningTurn"}`
             // WITHOUT consuming the content, so the host resubmits it through a
-            // normal `session/prompt` it owns. Not wired into codeg yet — live
-            // feedback still rides the codeg-mcp `check_user_feedback` pull (see
-            // `crate::acp::feedback`). 0.64.0 also marks the per-question
+            // normal `session/prompt` it owns. That opt-in was meant to make
+            // native steering safe to wire, but 0.64.0's ACTIVE path breaks
+            // the same contract (#934: a mid-generation `injected` settles the
+            // owning prompt as a clean `end_turn` and the continuation runs
+            // detached), so codeg keeps the native push channel OFF via
+            // `steering_prompt_required_min_version` and every session rides
+            // the codeg-mcp `check_user_feedback` pull (see
+            // `manager::submit_feedback`); the full wiring stays in place to
+            // re-enable on a fixed release. 0.64.0 also
+            // marks the per-question
             // free-text "Other" elicitation field with the deliberately
             // un-namespaced `_meta._askUserQuestionCustomAnswer` (#929, omitted
             // from the release notes) — see `question::is_custom_answer_property`.
@@ -349,7 +395,13 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // the injected `codeg-mcp` server always survives. 1.1.6 adds
             // steering (#309): `_session/steering` injects a user prompt into
             // the LIVE turn (initialize advertises `_meta.steering.supported`)
-            // — not wired into codeg yet. 1.1.7 (#326) emits Plan-mode plan
+            // — codeg keeps codex on the MCP pull channel because 1.1.8 still
+            // lacks the `promptRequired` idle opt-in
+            // (`steering_prompt_required_min_version` → None; flipping it on
+            // is a one-liner once a release implements the opt-in AND its
+            // active `injected` path provably keeps the owning prompt pending
+            // — claude's 0.64.0 didn't, see #934 in the fn comment). 1.1.7
+            // (#326) emits Plan-mode plan
             // contents as a plain `agent_message_chunk`
             // (`_meta.codex.phase = "final_answer"`, no `<proposed_plan>` tags),
             // which the adapter's tag-splitter simply no-ops on — tagged output
@@ -767,6 +819,26 @@ mod tests {
         match get_agent_meta(AgentType::OpenCode).distribution {
             AgentDistribution::Binary { dir_entry, .. } => assert!(dir_entry.is_none()),
             other => panic!("expected binary distribution for OpenCode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn steering_native_channel_disabled_for_all_agents_pending_upstream_934() {
+        // The native-steering policy bit is OFF across the board while
+        // claude-agent-acp #934 stands (`injected` settles the owning prompt
+        // mid-generation; see the fn comment). Every session — claude
+        // included — must ride the MCP pull channel. When upstream ships the
+        // fix, this becomes the "gates claude only" matrix again
+        // (ClaudeCode → Some("<fixed release>"), everyone else None).
+        for agent in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::Gemini,
+            AgentType::OpenClaw,
+            AgentType::Grok,
+            AgentType::Custom("acme"),
+        ] {
+            assert_eq!(steering_prompt_required_min_version(agent), None);
         }
     }
 

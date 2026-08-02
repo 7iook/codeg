@@ -1617,6 +1617,16 @@ const ConversationTabView = memo(function ConversationTabView({
     enabled: feedbackEnabled,
     onResendAsPrompt: resendFeedbackAsPrompt,
   })
+  // Composer "insert into current turn" (native steering only). Rethrows —
+  // MessageInput owns the enqueue fallback and draft-preservation policy, so
+  // this wrapper must not swallow the turn-end race the way `submit` does.
+  const feedbackSteer = feedback.steer
+  const handleSteer = useCallback(
+    async (text: string) => {
+      await feedbackSteer(text)
+    },
+    [feedbackSteer]
+  )
 
   return (
     <ConversationShell
@@ -1682,6 +1692,14 @@ const ConversationTabView = memo(function ConversationTabView({
         conn.supportsFork &&
         !forkSendBlockedByQueue(msgQueue.length)
           ? handleForkSend
+          : undefined
+      }
+      onSteer={
+        // Native channel only: on pull sessions the prompting branch must
+        // stay pixel-identical (Stop button alone). The prompting scope
+        // itself is enforced where the button renders.
+        feedback.featureEnabled && feedback.channel === "native"
+          ? handleSteer
           : undefined
       }
     >
@@ -1834,6 +1852,7 @@ const ConversationTabView = memo(function ConversationTabView({
         onSubmit={feedback.submit}
         submitting={feedback.submitting}
         agentName={getAgentLabel(selectedAgent)}
+        channel={feedback.channel}
       />
       <AgentDiagnosticsDialog
         open={composerDiagnosticsOpen}
