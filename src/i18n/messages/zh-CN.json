@@ -1508,7 +1508,7 @@
       "noFolders": "没有打开的文件夹",
       "newChatAction": "新建聊天",
       "automations": "自动化",
-      "tasks": "任务",
+      "tasks": "任务看板",
       "loadingSubsessions": "正在加载子会话…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "无分支"
   },
   "Tasks": {
-    "title": "任务",
+    "title": "任务看板",
     "new": "新建任务",
     "empty": "还没有任务",
     "emptyHint": "添加待办后即可处理——agent 在独立 worktree 中工作，你验收并合并结果。",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} 运行中…",
     "detailDescription": "任务详情",
     "detailSummary": "结果",
-    "detailAcceptance": "验收合并",
-    "detailActions": "操作",
     "detailFiles": "变更文件",
     "detailDiffAll": "查看全部差异",
     "detailDiffAllTitle": "全部差异",
     "detailNoChanges": "相对基准还没有变更",
     "detailTimeline": "推进记录",
     "detailTimelineEmpty": "暂无活动",
+    "showMore": "展开",
+    "showLess": "收起",
     "detailInfo": "详情",
     "detailBranch": "分支",
     "detailMergeCommit": "合并提交",

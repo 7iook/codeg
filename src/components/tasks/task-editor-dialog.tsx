@@ -535,17 +535,26 @@ function TaskEditorBody({
               ) : (
                 templates.map((tpl) => (
                   <div key={tpl.id} className="group flex items-center gap-1">
+                    {/* px-2 + gap-1.5 + a size-3.5 glyph puts this row's icon
+                        and text on exactly the same two x positions as the
+                        save entry below the divider. */}
                     <button
                       type="button"
                       onClick={() => applyTemplate(tpl)}
-                      className="flex min-w-0 flex-1 flex-col rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent"
+                      className="flex min-w-0 flex-1 items-start gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent"
                     >
-                      <span className="truncate text-sm">{tpl.name}</span>
-                      {tpl.config?.display_text ? (
-                        <span className="truncate text-xs text-muted-foreground">
-                          {tpl.config.display_text}
-                        </span>
-                      ) : null}
+                      <LayoutTemplate
+                        className="mt-[3px] size-3.5 shrink-0 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span className="truncate text-sm">{tpl.name}</span>
+                        {tpl.config?.display_text ? (
+                          <span className="truncate text-xs text-muted-foreground">
+                            {tpl.config.display_text}
+                          </span>
+                        ) : null}
+                      </span>
                     </button>
                     <Button
                       type="button"
@@ -562,12 +571,15 @@ function TaskEditorBody({
                 ))
               )}
             </div>
-            <div className="mt-1 border-t border-border pt-1">
+            {/* pt-2 matches the popover's own p-2 below the button, so it sits
+                the same distance from the divider as from the bottom edge;
+                mt-2 mirrors that above the divider. */}
+            <div className="mt-2 border-t border-border pt-2">
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="w-full justify-start gap-1.5 text-xs"
+                className="w-full justify-start gap-1.5 px-2 text-xs"
                 disabled={templateBusy || !title.trim() || !prompt.trim()}
                 onClick={() => void saveTemplate()}
               >

@@ -1508,7 +1508,7 @@
       "noFolders": "No hay carpetas abiertas",
       "newChatAction": "Nuevo chat",
       "automations": "Automatizaciones",
-      "tasks": "Tareas",
+      "tasks": "Tablero de tareas",
       "loadingSubsessions": "Cargando subconversaciones…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "Sin ramas"
   },
   "Tasks": {
-    "title": "Tareas",
+    "title": "Tablero de tareas",
     "new": "Nueva tarea",
     "empty": "Aún no hay tareas",
     "emptyHint": "Añade un pendiente y ejecútalo: el agente trabaja en un worktree aislado y tú revisas y fusionas el resultado.",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} en ejecución…",
     "detailDescription": "Detalle de la tarea",
     "detailSummary": "Resultado",
-    "detailAcceptance": "Revisar y fusionar",
-    "detailActions": "Acciones",
     "detailFiles": "Archivos modificados",
     "detailDiffAll": "Ver diff completo",
     "detailDiffAllTitle": "Diff completo",
     "detailNoChanges": "Aún no hay cambios respecto a la base",
     "detailTimeline": "Progreso",
     "detailTimelineEmpty": "Sin actividad todavía",
+    "showMore": "Ver más",
+    "showLess": "Ver menos",
     "detailInfo": "Detalles",
     "detailBranch": "Rama",
     "detailMergeCommit": "Commit de fusión",

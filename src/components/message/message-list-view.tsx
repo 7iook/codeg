@@ -50,7 +50,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
-  SquareKanban,
+  ListTodo,
 } from "lucide-react"
 import { useCreateTaskFromMessage } from "./use-create-task-from-message"
 import { Button } from "@/components/ui/button"
@@ -550,7 +550,7 @@ const UserMessageTaskButton = memo(function UserMessageTaskButton({
       onClick={createTask}
       size="icon-xs"
     >
-      <SquareKanban size={12} />
+      <ListTodo size={12} />
     </MessageAction>
   )
 })

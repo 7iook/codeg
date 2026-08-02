@@ -1508,7 +1508,7 @@
       "noFolders": "No folders open",
       "newChatAction": "New chat",
       "automations": "Automations",
-      "tasks": "Tasks",
+      "tasks": "Task Board",
       "loadingSubsessions": "Loading sub-conversations…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "No branches"
   },
   "Tasks": {
-    "title": "Tasks",
+    "title": "Task Board",
     "new": "New task",
     "empty": "No tasks yet",
     "emptyHint": "Add a to-do, then run it — the agent works in an isolated worktree and you review and merge the result.",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} running…",
     "detailDescription": "Task detail",
     "detailSummary": "Result",
-    "detailAcceptance": "Review & merge",
-    "detailActions": "Actions",
     "detailFiles": "Changed files",
     "detailDiffAll": "View full diff",
     "detailDiffAllTitle": "Full diff",
     "detailNoChanges": "No changes vs the base yet",
     "detailTimeline": "Progress",
     "detailTimelineEmpty": "No activity yet",
+    "showMore": "Show more",
+    "showLess": "Show less",
     "detailInfo": "Details",
     "detailBranch": "Branch",
     "detailMergeCommit": "Merge commit",

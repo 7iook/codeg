@@ -7,7 +7,7 @@ import {
   ListChevronsDownUp,
   ListChevronsUpDown,
   Search,
-  SquareKanban,
+  ListTodo,
   SquarePen,
   Zap,
   type LucideIcon,
@@ -422,7 +422,7 @@ export function Sidebar() {
           }
         />
         <SidebarNavButton
-          icon={SquareKanban}
+          icon={ListTodo}
           label={t("tasks")}
           active={routeId === "tasks"}
           onClick={() => setRoute("tasks")}

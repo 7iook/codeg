@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Reorder, type PanInfo } from "motion/react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
-import { Funnel, Play, Plus, Settings2, SquareKanban } from "lucide-react"
+import { Folder, Funnel, Play, Plus, Settings2, ListTodo } from "lucide-react"
 import { useTasksView } from "@/contexts/tasks-view-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import {
@@ -74,6 +74,12 @@ const EMPTY_LABEL_KEYS = {
 
 const ALL_FOLDERS = "__all__"
 
+/** The cards inside a column. gap-4 — the same gutter the columns keep from
+ *  each other and from the window edge — so a card is inset by 1rem on all
+ *  four sides instead of being packed tighter vertically than horizontally.
+ *  pb-1 keeps the last card clear of the scroll area's edge. */
+const CARD_LIST_CLASS = "flex flex-col gap-4 pb-1"
+
 /** Fired by the chrome-strip settings button; TasksPage owns the dialog (and
  *  the folder filter that scopes it), so the strip just asks it to open. */
 const OPEN_TASK_SETTINGS_EVENT = "codeg:open-task-settings"
@@ -86,11 +92,13 @@ export function TasksPageTitle() {
   return (
     <div className="flex h-10 shrink-0 items-center gap-2 pl-4">
       <h1 className="flex items-center gap-1.5 text-[0.8125rem] font-semibold leading-none">
-        <SquareKanban
-          className="size-4 text-muted-foreground"
-          aria-hidden="true"
-        />
+        <ListTodo className="size-4 text-muted-foreground" aria-hidden="true" />
         {t("title")}
+        {/* Untranslated on purpose: "Beta" reads as-is in every locale we
+            ship, and it is a release-stage marker, not prose. */}
+        <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[0.5625rem] font-semibold uppercase leading-none tracking-wide text-primary">
+          Beta
+        </span>
       </h1>
       <Button
         type="button"
@@ -337,18 +345,27 @@ export function TasksPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Toolbar (the page title renders in the chrome strip above the page,
-          which owns the divider — the toolbar itself is borderless). */}
-      <div className="flex shrink-0 flex-wrap items-center gap-2 px-4 py-2">
+          which owns the divider — the toolbar itself is borderless).
+          pt-4 / px-4, not py-2: the pills clear the title bar by the same 1rem
+          they clear the window's left edge, and pb-2 plus the board's own pt-2
+          makes the gap underneath 1rem too — the row sits on one inset. */}
+      <div className="flex shrink-0 flex-wrap items-center gap-2 px-4 pb-2 pt-4">
         <Select
           value={folderFilter == null ? ALL_FOLDERS : String(folderFilter)}
           onValueChange={(v) =>
             setFolderFilter(v === ALL_FOLDERS ? null : Number(v))
           }
         >
+          {/* Leads with a folder glyph like the Automations filter pill: "全部
+              文件夹" alone doesn't say WHICH axis the pill filters. */}
           <SelectTrigger
             size="sm"
-            className="h-8 w-auto min-w-0 gap-1.5 rounded-full border-transparent bg-muted/70 px-3 text-[0.8125rem] font-medium shadow-none ws-msg-chip hover:bg-muted"
+            className="h-8 w-auto min-w-0 max-w-[14rem] gap-1.5 rounded-full border-transparent bg-muted/70 px-3 text-[0.8125rem] font-medium shadow-none ws-msg-chip hover:bg-muted"
           >
+            <Folder
+              className="size-3.5 text-muted-foreground"
+              aria-hidden="true"
+            />
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -435,7 +452,7 @@ export function TasksPage() {
       {/* Board */}
       {!hasAnyTask ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-          <SquareKanban
+          <ListTodo
             className="size-10 text-muted-foreground/40"
             aria-hidden="true"
           />
@@ -457,9 +474,12 @@ export function TasksPage() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-x-auto">
-          {/* pt-2 (not p-4's 16px) ties the column headers to the toolbar so
-              the two rows read as one header block above the cards. */}
-          <div className="grid h-full min-w-[56rem] grid-cols-4 gap-4 px-4 pb-4 pt-2">
+          {/* pt-1, not p-4's 16px: the column headers belong to the toolbar
+              above, not to the cards below. It also evens out the folder
+              pill's optical margins — 8px of the toolbar's pb-2 plus this 4px
+              plus the header row's own ~4px of leading slack comes to the same
+              1rem the pill keeps above itself. */}
+          <div className="grid h-full min-w-[56rem] grid-cols-4 gap-4 px-4 pb-4 pt-1">
             {BOARD_COLUMN_IDS.map((col) => {
               const colTasks = col === "todo" ? todoTasks : columns[col]
               const cardFor = (task: WorkTask) => (
@@ -492,10 +512,14 @@ export function TasksPage() {
                   ref={col === "inProgress" ? inProgressColRef : undefined}
                   className="flex min-h-0 flex-col gap-2"
                 >
-                  <div className="flex h-6 shrink-0 items-center gap-1.5 px-0.5">
+                  <div className="flex h-6 shrink-0 items-center gap-2 px-0.5">
+                    {/* A short upright bar rather than a dot: it echoes the
+                        column it heads (and the pill radius of the toolbar
+                        above), and it reads as a marker instead of a bullet.
+                        Same tones as before. */}
                     <span
                       className={cn(
-                        "size-1.5 rounded-full",
+                        "h-3.5 w-[3px] shrink-0 rounded-full",
                         col === "todo" && "bg-muted-foreground/50",
                         col === "inProgress" && "bg-primary",
                         col === "attention" && "bg-amber-500",
@@ -506,12 +530,14 @@ export function TasksPage() {
                     <h2 className="text-xs font-semibold">
                       {t(COLUMN_LABEL_KEYS[col])}
                     </h2>
+                    {/* The count is a pill in the toolbar's muted-pill
+                        language, so the two header rows read as one block. */}
                     {col === "attention" && colTasks.length > 0 ? (
                       <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[0.625rem] font-semibold leading-none text-amber-600 tabular-nums dark:text-amber-400">
                         {colTasks.length}
                       </span>
                     ) : (
-                      <span className="text-[0.6875rem] text-muted-foreground/60 tabular-nums">
+                      <span className="rounded-full bg-muted/70 px-1.5 py-0.5 text-[0.625rem] font-medium leading-none text-muted-foreground tabular-nums">
                         {colTasks.length}
                       </span>
                     )}
@@ -563,7 +589,7 @@ export function TasksPage() {
                           axis="y"
                           values={todoTasks.map((task) => task.id)}
                           onReorder={(ids: number[]) => setDragOrder(ids)}
-                          className="flex flex-col gap-2 pb-1"
+                          className={CARD_LIST_CLASS}
                         >
                           {todoTasks.map((task) => (
                             <Reorder.Item
@@ -581,7 +607,7 @@ export function TasksPage() {
                           ))}
                         </Reorder.Group>
                       ) : (
-                        <div className="flex flex-col gap-2 pb-1">
+                        <div className={CARD_LIST_CLASS}>
                           {colTasks.map(cardFor)}
                         </div>
                       )}

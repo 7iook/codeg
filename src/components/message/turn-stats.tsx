@@ -7,7 +7,7 @@ import {
   CheckIcon,
   Coins,
   CopyIcon,
-  SquareKanban,
+  ListTodo,
   Timer,
 } from "lucide-react"
 import { useLocale, useTranslations } from "next-intl"
@@ -164,7 +164,7 @@ export function TurnStats({
                 className={iconButtonClass}
                 aria-label={tTasks("createFromMessage")}
               >
-                <SquareKanban aria-hidden="true" className="h-3.5 w-3.5" />
+                <ListTodo aria-hidden="true" className="h-3.5 w-3.5" />
               </button>
             </TooltipTrigger>
             <TooltipContent side="top">

@@ -1508,7 +1508,7 @@
       "noFolders": "لا توجد مجلدات مفتوحة",
       "newChatAction": "محادثة جديدة",
       "automations": "الأتمتة",
-      "tasks": "المهام",
+      "tasks": "لوحة المهام",
       "loadingSubsessions": "جارٍ تحميل المحادثات الفرعية…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "لا توجد فروع"
   },
   "Tasks": {
-    "title": "المهام",
+    "title": "لوحة المهام",
     "new": "مهمة جديدة",
     "empty": "لا توجد مهام بعد",
     "emptyHint": "أضف مهمة ثم شغّلها — يعمل الوكيل في worktree معزول، وتراجع النتيجة وتدمجها.",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} قيد التشغيل…",
     "detailDescription": "تفاصيل المهمة",
     "detailSummary": "النتيجة",
-    "detailAcceptance": "المراجعة والدمج",
-    "detailActions": "الإجراءات",
     "detailFiles": "الملفات المتغيرة",
     "detailDiffAll": "عرض كامل الفروق",
     "detailDiffAllTitle": "كامل الفروق",
     "detailNoChanges": "لا تغييرات بعد مقارنةً بالأساس",
     "detailTimeline": "سجل التقدم",
     "detailTimelineEmpty": "لا نشاط بعد",
+    "showMore": "عرض المزيد",
+    "showLess": "عرض أقل",
     "detailInfo": "التفاصيل",
     "detailBranch": "الفرع",
     "detailMergeCommit": "إيداع الدمج",

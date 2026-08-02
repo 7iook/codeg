@@ -87,12 +87,9 @@ export function StatusChip({ task }: { task: WorkTask }) {
       )
     case "done":
       return (
-        <span
-          className="inline-flex shrink-0 items-center text-emerald-500"
-          title={label}
-        >
-          <Check className="size-3.5" strokeWidth={3} aria-hidden="true" />
-          <span className="sr-only">{label}</span>
+        <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-1 text-[0.625rem] font-medium leading-none text-emerald-600 dark:text-emerald-400">
+          <Check className="size-2.5" strokeWidth={3} aria-hidden="true" />
+          {label}
         </span>
       )
     case "failed":
@@ -302,8 +299,12 @@ export function TaskCard({
       className={cn(
         // ws-msg-card: with a workspace background image on, the card goes
         // translucent like message-stream cards (e.g. the file-edit card).
-        "group/card flex cursor-pointer flex-col rounded-xl border border-border/70 bg-card ws-msg-card p-3 text-left",
-        "transition-[border-color,box-shadow] hover:border-border hover:shadow-sm",
+        // border-foreground/15, not border-border: a card is white-on-white
+        // here, and the token border all but vanishes on that canvas (the
+        // empty column's dashed outline had to be derived the same way).
+        "group/card flex cursor-pointer flex-col rounded-xl border border-foreground/15 bg-card ws-msg-card p-3 text-left",
+        // Hover is a border colour change only — no lift, no shadow.
+        "transition-colors hover:border-primary",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         archived && "opacity-60"
       )}
@@ -376,8 +377,11 @@ export function TaskCard({
         </p>
       ) : null}
 
+      {/* mt-3 / pt-3 = the card's own p-3: the divider clears the content above
+          it by the same 12px the buttons clear the card's left, right and
+          bottom edges, so the footer sits on one even inset. */}
       {primary || secondaries.length > 0 ? (
-        <div className="mt-2.5 flex items-center gap-1.5 border-t border-border/60 pt-2">
+        <div className="mt-3 flex items-center gap-1.5 border-t border-border/60 pt-3">
           {primary ? (
             <Button
               type="button"
@@ -395,7 +399,9 @@ export function TaskCard({
           <div className="flex-1" />
           {/* Secondaries are icon-only and round: they are one-per-status at
               most, so a "…" menu just hid them behind an extra click. The
-              session viewer always sorts last, anchoring the corner. */}
+              session viewer always sorts last, anchoring the corner. They
+              fade in on hover (opacity only — the row keeps its height, so
+              nothing reflows) and on keyboard focus. */}
           {secondaries.map((item) => (
             <CardIconAction key={item.label} item={item} />
           ))}
@@ -411,7 +417,7 @@ function CardIconAction({ item }: { item: CardActionItem }) {
       type="button"
       size="icon-xs"
       variant="outline"
-      className="rounded-full"
+      className="rounded-full opacity-0 transition-opacity focus-visible:opacity-100 group-focus-within/card:opacity-100 group-hover/card:opacity-100"
       title={item.label}
       aria-label={item.label}
       onClick={(e) => {

@@ -1508,7 +1508,7 @@
       "noFolders": "沒有開啟的資料夾",
       "newChatAction": "新增聊天",
       "automations": "自動化",
-      "tasks": "任務",
+      "tasks": "任務看板",
       "loadingSubsessions": "正在載入子會話…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "無分支"
   },
   "Tasks": {
-    "title": "任務",
+    "title": "任務看板",
     "new": "新增任務",
     "empty": "還沒有任務",
     "emptyHint": "新增待辦後即可處理——agent 在獨立 worktree 中工作，你驗收並合併結果。",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} 執行中…",
     "detailDescription": "任務詳情",
     "detailSummary": "結果",
-    "detailAcceptance": "驗收合併",
-    "detailActions": "操作",
     "detailFiles": "變更檔案",
     "detailDiffAll": "檢視全部差異",
     "detailDiffAllTitle": "全部差異",
     "detailNoChanges": "相對基準還沒有變更",
     "detailTimeline": "推進記錄",
     "detailTimelineEmpty": "暫無活動",
+    "showMore": "展開",
+    "showLess": "收起",
     "detailInfo": "詳情",
     "detailBranch": "分支",
     "detailMergeCommit": "合併提交",

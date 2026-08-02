@@ -1508,7 +1508,7 @@
       "noFolders": "Keine Ordner geöffnet",
       "newChatAction": "Neuer Chat",
       "automations": "Automatisierungen",
-      "tasks": "Aufgaben",
+      "tasks": "Aufgabenboard",
       "loadingSubsessions": "Unterkonversationen werden geladen…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "Keine Branches"
   },
   "Tasks": {
-    "title": "Aufgaben",
+    "title": "Aufgabenboard",
     "new": "Neue Aufgabe",
     "empty": "Noch keine Aufgaben",
     "emptyHint": "Füge ein To-do hinzu und starte es — der Agent arbeitet in einem isolierten Worktree, du prüfst und mergst das Ergebnis.",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} läuft…",
     "detailDescription": "Aufgabendetails",
     "detailSummary": "Ergebnis",
-    "detailAcceptance": "Prüfen & Mergen",
-    "detailActions": "Aktionen",
     "detailFiles": "Geänderte Dateien",
     "detailDiffAll": "Gesamtes Diff anzeigen",
     "detailDiffAllTitle": "Gesamtes Diff",
     "detailNoChanges": "Noch keine Änderungen gegenüber der Basis",
     "detailTimeline": "Verlauf",
     "detailTimelineEmpty": "Noch keine Aktivität",
+    "showMore": "Mehr anzeigen",
+    "showLess": "Weniger anzeigen",
     "detailInfo": "Details",
     "detailBranch": "Branch",
     "detailMergeCommit": "Merge-Commit",

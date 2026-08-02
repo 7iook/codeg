@@ -1508,7 +1508,7 @@
       "noFolders": "Nenhuma pasta aberta",
       "newChatAction": "Novo chat",
       "automations": "Automações",
-      "tasks": "Tarefas",
+      "tasks": "Quadro de tarefas",
       "loadingSubsessions": "Carregando subconversas…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "Sem branches"
   },
   "Tasks": {
-    "title": "Tarefas",
+    "title": "Quadro de tarefas",
     "new": "Nova tarefa",
     "empty": "Ainda não há tarefas",
     "emptyHint": "Adicione uma pendência e execute — o agente trabalha num worktree isolado e você revisa e faz merge do resultado.",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} em execução…",
     "detailDescription": "Detalhes da tarefa",
     "detailSummary": "Resultado",
-    "detailAcceptance": "Revisar e mesclar",
-    "detailActions": "Ações",
     "detailFiles": "Arquivos alterados",
     "detailDiffAll": "Ver diff completo",
     "detailDiffAllTitle": "Diff completo",
     "detailNoChanges": "Ainda não há mudanças em relação à base",
     "detailTimeline": "Progresso",
     "detailTimelineEmpty": "Nenhuma atividade ainda",
+    "showMore": "Ver mais",
+    "showLess": "Ver menos",
     "detailInfo": "Detalhes",
     "detailBranch": "Branch",
     "detailMergeCommit": "Commit de merge",

@@ -1508,7 +1508,7 @@
       "noFolders": "開いているフォルダがありません",
       "newChatAction": "新しいチャット",
       "automations": "オートメーション",
-      "tasks": "タスク",
+      "tasks": "タスクボード",
       "loadingSubsessions": "サブ会話を読み込み中…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "ブランチがありません"
   },
   "Tasks": {
-    "title": "タスク",
+    "title": "タスクボード",
     "new": "新規タスク",
     "empty": "タスクはまだありません",
     "emptyHint": "ToDo を追加して実行すると、エージェントが独立した worktree で作業し、結果をレビューしてマージできます。",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} 実行中…",
     "detailDescription": "タスク詳細",
     "detailSummary": "結果",
-    "detailAcceptance": "レビューとマージ",
-    "detailActions": "操作",
     "detailFiles": "変更ファイル",
     "detailDiffAll": "差分をすべて表示",
     "detailDiffAllTitle": "全差分",
     "detailNoChanges": "ベースからの変更はまだありません",
     "detailTimeline": "進行履歴",
     "detailTimelineEmpty": "まだアクティビティがありません",
+    "showMore": "もっと見る",
+    "showLess": "折りたたむ",
     "detailInfo": "詳細",
     "detailBranch": "ブランチ",
     "detailMergeCommit": "マージコミット",

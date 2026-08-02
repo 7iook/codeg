@@ -1508,7 +1508,7 @@
       "noFolders": "열린 폴더 없음",
       "newChatAction": "새 채팅",
       "automations": "자동화",
-      "tasks": "작업",
+      "tasks": "작업 보드",
       "loadingSubsessions": "하위 대화 로드 중…"
     },
     "conversation": {
@@ -4092,7 +4092,7 @@
     "branchNone": "브랜치 없음"
   },
   "Tasks": {
-    "title": "작업",
+    "title": "작업 보드",
     "new": "새 작업",
     "empty": "아직 작업이 없습니다",
     "emptyHint": "할 일을 추가하고 실행하세요. 에이전트가 독립된 worktree에서 작업하고, 결과를 검토한 뒤 병합합니다.",
@@ -4211,14 +4211,14 @@
     "preflightRunning": "{name} 실행 중…",
     "detailDescription": "작업 상세",
     "detailSummary": "결과",
-    "detailAcceptance": "검토 및 병합",
-    "detailActions": "동작",
     "detailFiles": "변경된 파일",
     "detailDiffAll": "전체 차이 보기",
     "detailDiffAllTitle": "전체 차이",
     "detailNoChanges": "기준 대비 변경 사항이 아직 없습니다",
     "detailTimeline": "진행 기록",
     "detailTimelineEmpty": "아직 활동이 없습니다",
+    "showMore": "더 보기",
+    "showLess": "접기",
     "detailInfo": "상세 정보",
     "detailBranch": "브랜치",
     "detailMergeCommit": "병합 커밋",
