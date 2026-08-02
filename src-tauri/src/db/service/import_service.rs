@@ -17,9 +17,9 @@ use crate::parsers::grok::GrokParser;
 use crate::parsers::hermes::HermesParser;
 use crate::parsers::kimi_code::KimiCodeParser;
 use crate::parsers::kiro::KiroParser;
-use crate::parsers::pi::PiParser;
 use crate::parsers::openclaw::OpenClawParser;
 use crate::parsers::opencode::OpenCodeParser;
+use crate::parsers::pi::PiParser;
 use crate::parsers::{path_eq_for_matching, AgentParser};
 
 /// Every locally-parsable agent, in the canonical parser order.
@@ -55,9 +55,9 @@ fn build_parser(agent_type: AgentType) -> Box<dyn AgentParser> {
         AgentType::Cursor => Box::new(CursorParser::new()),
         AgentType::Kiro => Box::new(KiroParser::new()),
         // Custom agents' history lives in codeg's own ACP transcript.
-        AgentType::Custom(_) => Box::new(crate::parsers::acp_native::AcpNativeParser::new(
-            agent_type,
-        )),
+        AgentType::Custom(_) => {
+            Box::new(crate::parsers::acp_native::AcpNativeParser::new(agent_type))
+        }
     }
 }
 
@@ -161,7 +161,14 @@ pub(crate) async fn import_summaries(
         }
     }
 
-    Ok((ImportResult { imported, updated, skipped }, updated_ids))
+    Ok((
+        ImportResult {
+            imported,
+            updated,
+            skipped,
+        },
+        updated_ids,
+    ))
 }
 
 /// Like [`import_summaries`] but resilient — a single row's DB error is logged
@@ -202,7 +209,15 @@ pub(crate) async fn import_summaries_resilient(
         }
     }
 
-    (ImportResult { imported, updated, skipped }, updated_ids, failed)
+    (
+        ImportResult {
+            imported,
+            updated,
+            skipped,
+        },
+        updated_ids,
+        failed,
+    )
 }
 
 /// Import (and refresh the titles of) the local agent sessions under
@@ -279,7 +294,8 @@ async fn import_one(
             .map(str::trim)
             .filter(|t| !t.is_empty())
         {
-            if conversation_service::refresh_auto_title(conn, existing.id, title.to_string()).await?
+            if conversation_service::refresh_auto_title(conn, existing.id, title.to_string())
+                .await?
             {
                 return Ok(ImportOutcome::Updated(existing.id));
             }
@@ -313,6 +329,7 @@ async fn import_one(
         updated_at: Set(updated_at),
         deleted_at: Set(None),
         pinned_at: Set(None),
+        origin_cwd: Set(None),
     };
     conv.insert(conn).await?;
     Ok(ImportOutcome::Imported)
@@ -358,9 +375,14 @@ mod tests {
         let folder = seed_folder(&db, "/tmp/codeg-import").await;
         let at = AgentType::ClaudeCode;
 
-        let first = import_one(&db.conn, folder, &at, &summary("ext-1", Some("first prompt")))
-            .await
-            .expect("import");
+        let first = import_one(
+            &db.conn,
+            folder,
+            &at,
+            &summary("ext-1", Some("first prompt")),
+        )
+        .await
+        .expect("import");
         assert_eq!(first, ImportOutcome::Imported);
 
         let id = find_id(&db.conn, "ext-1").await;
@@ -385,9 +407,14 @@ mod tests {
         let at = AgentType::ClaudeCode;
 
         assert_eq!(
-            import_one(&db.conn, folder, &at, &summary("ext-1", Some("first prompt")))
-                .await
-                .expect("import"),
+            import_one(
+                &db.conn,
+                folder,
+                &at,
+                &summary("ext-1", Some("first prompt"))
+            )
+            .await
+            .expect("import"),
             ImportOutcome::Imported
         );
 
@@ -427,9 +454,14 @@ mod tests {
         let folder = seed_folder(&db, "/tmp/codeg-import-lock").await;
         let at = AgentType::ClaudeCode;
 
-        import_one(&db.conn, folder, &at, &summary("ext-1", Some("first prompt")))
-            .await
-            .expect("import");
+        import_one(
+            &db.conn,
+            folder,
+            &at,
+            &summary("ext-1", Some("first prompt")),
+        )
+        .await
+        .expect("import");
         let id = find_id(&db.conn, "ext-1").await;
         conversation_service::update_title(&db.conn, id, "User Pick".into())
             .await
@@ -522,9 +554,14 @@ mod tests {
             .to_string();
 
         // A root conversation to parent the child.
-        import_one(&db.conn, folder, &at, &summary("parent-ext", Some("parent")))
-            .await
-            .expect("import parent");
+        import_one(
+            &db.conn,
+            folder,
+            &at,
+            &summary("parent-ext", Some("parent")),
+        )
+        .await
+        .expect("import parent");
         let parent_id = find_id(&db.conn, "parent-ext").await;
 
         // A delegation child carrying its own external_id, as a parser would
@@ -549,14 +586,20 @@ mod tests {
             updated_at: Set(now),
             deleted_at: Set(None),
             pinned_at: Set(None),
+            origin_cwd: Set(None),
         }
         .insert(&db.conn)
         .await
         .expect("insert child");
 
-        let outcome = import_one(&db.conn, folder, &at, &summary("child-ext", Some("AI Summary")))
-            .await
-            .expect("re-import child");
+        let outcome = import_one(
+            &db.conn,
+            folder,
+            &at,
+            &summary("child-ext", Some("AI Summary")),
+        )
+        .await
+        .expect("re-import child");
         assert_eq!(
             outcome,
             ImportOutcome::Skipped,

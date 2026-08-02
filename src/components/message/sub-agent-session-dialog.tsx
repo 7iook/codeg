@@ -9,13 +9,14 @@
  * user can scroll the transcript without driving the child's turns. The
  * interactions it hosts are the child's blocking prompts that resolve
  * WITHOUT driving a new turn: the permission request (the child runs at
- * the user's configured permission level), and the codeg-mcp
- * `ask_user_question` multiple-choice card. Both are answered through the
- * CHILD connection id; the backend routes the response to the child's
- * parked tool call. The parent card itself stays non-interactive (it only
- * badges "awaiting approval"). The legacy free-text `pendingQuestion` path
- * is intentionally NOT hosted here — it is answered by sending a prompt,
- * which this read-only viewer deliberately cannot do.
+ * the user's configured permission level), the codeg-mcp
+ * `ask_user_question` multiple-choice card, and (Grok) the plan-approval
+ * card. All are answered through the CHILD connection id; the backend
+ * routes the response to the child's parked tool call. The parent card
+ * itself stays non-interactive (it only badges "awaiting approval"). The
+ * legacy free-text `pendingQuestion` path is intentionally NOT hosted
+ * here — it is answered by sending a prompt, which this read-only viewer
+ * deliberately cannot do.
  *
  * Streaming: while the dialog is open, the child connection's live
  * message and status (from `acp-connections-context`) are mirrored
@@ -24,8 +25,18 @@
  * while the dialog is mounted; once it closes, no further mirroring
  * happens. Persistence of completed turns comes from the broker's
  * own DB writes, surfaced via `useConversationDetail`.
+ *
+ * [merge-v0.23.0] upstream/main v0.23.0 extracted the read-only streaming
+ * surface into `LiveTranscriptView` (so the work-task transcript viewer can
+ * reuse it). We keep HEAD's inline `SubAgentSessionBody` implementation for
+ * this dialog because it hosts the delegation-continue-session pieces
+ * (`SubAgentContinuationComposer`, Open-in-Tab handoff,
+ * `delegation_session_update` refetch) that `LiveTranscriptView` does not
+ * expose — folding those into `LiveTranscriptView` is out of scope for the
+ * merge round.
  */
 
+// [merge-v0.23.0] HEAD imports for SubAgentSessionBody / ContinuationComposer.
 import {
   useCallback,
   useEffect,
@@ -84,6 +95,9 @@ interface Props {
   kickoffTask?: string | null
 }
 
+// [merge-v0.23.0] HEAD-side live bridge helpers kept — SubAgentSessionBody
+// consumes them below. upstream/main lifted equivalent code into
+// LiveTranscriptView; we do not switch this dialog over (see file-level note).
 function useChildConnectionState(
   connectionId: string | null
 ): ConnectionState | undefined {
@@ -285,6 +299,10 @@ export function SubAgentSessionDialog({
           {t("detailDescription")}
         </DialogDescription>
         {open ? (
+          // [merge-v0.23.0] HEAD dispatches to SubAgentSessionBody (below);
+          // upstream/main used the shared LiveTranscriptView inline, but that
+          // would drop this dialog's continuation composer and Open-in-Tab
+          // affordance. See file-level merge note.
           <SubAgentSessionBody
             childConversationId={childConversationId}
             childConnectionId={childConnectionId}
@@ -298,6 +316,9 @@ export function SubAgentSessionDialog({
   )
 }
 
+// [merge-v0.23.0] HEAD-only body + continuation composer kept in full.
+// upstream/main removed both (its simplified dialog uses LiveTranscriptView
+// inline); the file-level note explains why we don't switch this dialog over.
 function SubAgentSessionBody({
   childConversationId,
   childConnectionId,
@@ -685,3 +706,4 @@ function SubAgentContinuationComposer({
     </div>
   )
 }
+

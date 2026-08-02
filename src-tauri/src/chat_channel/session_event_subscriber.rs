@@ -1545,6 +1545,7 @@ mod error_terminal_gate_tests {
                 message: "Failed to set mode: bad id".into(),
                 agent_type: "claude_code".into(),
                 code: None,
+                details: None,
                 terminal: false,
             },
         };
@@ -1577,6 +1578,7 @@ mod error_terminal_gate_tests {
                 message: "transport closed".into(),
                 agent_type: "claude_code".into(),
                 code: None,
+                details: None,
                 terminal: true,
             },
         };

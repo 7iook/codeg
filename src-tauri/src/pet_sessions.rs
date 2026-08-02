@@ -153,6 +153,7 @@ mod tests {
                 message: "x".into(),
                 agent_type: "claude_code".into(),
                 code: None,
+                details: None,
                 terminal: true,
             },
             AcpEvent::PermissionRequest {
@@ -177,8 +178,14 @@ mod tests {
     #[test]
     fn relevant_filter_ignores_high_volume_events() {
         let ignored = [
-            AcpEvent::ContentDelta { text: "x".into(), parent_tool_use_id: None },
-            AcpEvent::Thinking { text: "x".into(), parent_tool_use_id: None },
+            AcpEvent::ContentDelta {
+                text: "x".into(),
+                parent_tool_use_id: None,
+            },
+            AcpEvent::Thinking {
+                text: "x".into(),
+                parent_tool_use_id: None,
+            },
             AcpEvent::UsageUpdate { used: 1, size: 1 },
         ];
         for ev in &ignored {

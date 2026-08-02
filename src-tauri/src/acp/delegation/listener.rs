@@ -19,12 +19,14 @@ use crate::acp::delegation::broker::{DelegationBroker, StatusWait};
 use crate::acp::delegation::transport::{
     read_frame, write_frame, BrokerAskRequest, BrokerCancelRequest, BrokerCancelTaskRequest,
     BrokerCommitFeedbackRequest, BrokerFeedbackRequest, BrokerMessage, BrokerRequest,
-    BrokerResponse, BrokerSessionRequest, BrokerStatusRequest,
+    BrokerResponse, BrokerSessionRequest, BrokerStatusRequest, BrokerTaskCompleteRequest,
+    BrokerTaskProgressRequest,
 };
 use crate::acp::delegation::types::{DelegationRequest, DelegationTaskReport, TaskStatus};
 use crate::acp::feedback::{PendingFeedback, SessionFeedbackAccess};
 use crate::acp::question::{QuestionOutcome, SessionQuestionAccess};
 use crate::acp::session_info::{SessionInfo, SessionInfoAccess};
+use crate::acp::work_task_tools::{TaskReportAck, WorkTaskToolAccess};
 use crate::models::AgentType;
 use serde_json::Value;
 
@@ -94,6 +96,10 @@ pub struct DelegationListener {
     /// other arms this is NOT parent-scoped — it looks any non-deleted session up
     /// by its codeg conversation id (still token-gated against an invalid caller).
     pub session_info: Arc<dyn SessionInfoAccess>,
+    /// Records work-task reports (`task_progress` / `task_complete`) against the
+    /// task the parent connection is executing. Same token → parent-connection
+    /// scoping as the delegation arms.
+    pub tasks: Arc<dyn WorkTaskToolAccess>,
 }
 
 impl DelegationListener {
@@ -105,6 +111,7 @@ impl DelegationListener {
         feedback: Arc<dyn SessionFeedbackAccess>,
         questions: Arc<dyn SessionQuestionAccess>,
         session_info: Arc<dyn SessionInfoAccess>,
+        tasks: Arc<dyn WorkTaskToolAccess>,
     ) -> Arc<Self> {
         Arc::new(Self {
             broker,
@@ -113,6 +120,7 @@ impl DelegationListener {
             feedback,
             questions,
             session_info,
+            tasks,
         })
     }
 
@@ -310,6 +318,12 @@ impl DelegationListener {
                 // a long-poll or a human — the bounded parse always completes —
                 // and there is nothing to tear down on cancel.
                 session_response(self.process_session_info(req).await)?
+            }
+            BrokerMessage::TaskProgress(req) => {
+                task_ack_response(self.process_task_progress(req).await)?
+            }
+            BrokerMessage::TaskComplete(req) => {
+                task_ack_response(self.process_task_complete(req).await)?
             }
             BrokerMessage::Cancel(cancel) => {
                 self.process_cancel(cancel).await;
@@ -577,6 +591,31 @@ impl DelegationListener {
             .await
     }
 
+    /// Validate the token and hand the progress report to the task engine,
+    /// which resolves the parent connection to its owning task + generation.
+    async fn process_task_progress(&self, req: BrokerTaskProgressRequest) -> TaskReportAck {
+        let Some(entry) = self.tokens.lookup(&req.token).await else {
+            return TaskReportAck::rejected("invalid token");
+        };
+        self.tasks
+            .report_progress(&entry.parent_connection_id, &req.message)
+            .await
+    }
+
+    /// Validate the token and hand the final verdict to the task engine.
+    async fn process_task_complete(&self, req: BrokerTaskCompleteRequest) -> TaskReportAck {
+        let Some(entry) = self.tokens.lookup(&req.token).await else {
+            return TaskReportAck::rejected("invalid token");
+        };
+        self.tasks
+            .complete(
+                &entry.parent_connection_id,
+                &req.verdict,
+                req.summary.as_deref(),
+            )
+            .await
+    }
+
     async fn process(&self, req: BrokerRequest) -> DelegationTaskReport {
         // 1. Token + parent_connection_id consistency check. Treat both as
         //    "canceled" since the LLM can't usefully react to either —
@@ -702,6 +741,17 @@ fn ask_response(outcome: &QuestionOutcome) -> std::io::Result<BrokerResponse> {
 fn session_response(info: SessionInfo) -> std::io::Result<BrokerResponse> {
     Ok(BrokerResponse {
         outcome: serde_json::to_value(&info).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("encode: {e}"))
+        })?,
+    })
+}
+
+/// Serialize a [`TaskReportAck`] into a [`BrokerResponse`] for the
+/// `TaskProgress` / `TaskComplete` arms — the companion renders it into the
+/// tool result.
+fn task_ack_response(ack: TaskReportAck) -> std::io::Result<BrokerResponse> {
+    Ok(BrokerResponse {
+        outcome: serde_json::to_value(&ack).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, format!("encode: {e}"))
         })?,
     })
@@ -918,6 +968,24 @@ mod tests {
         }
     }
 
+    /// No-engine stub: every report is rejected, mirroring a process without a
+    /// running task engine.
+    struct StubTaskTools;
+    #[async_trait]
+    impl WorkTaskToolAccess for StubTaskTools {
+        async fn report_progress(&self, _parent: &str, _message: &str) -> TaskReportAck {
+            TaskReportAck::rejected("no task engine in this process")
+        }
+        async fn complete(
+            &self,
+            _parent: &str,
+            _verdict: &str,
+            _summary: Option<&str>,
+        ) -> TaskReportAck {
+            TaskReportAck::rejected("no task engine in this process")
+        }
+    }
+
     use tokio::sync::oneshot;
 
     async fn make_broker(mock: Arc<MockSpawner>) -> Arc<DelegationBroker> {
@@ -950,6 +1018,7 @@ mod tests {
             Arc::new(StubFeedback::default()),
             Arc::new(StubQuestion::default()),
             Arc::new(StubSessionInfo::default()),
+            Arc::new(StubTaskTools),
         )
     }
 
@@ -970,6 +1039,7 @@ mod tests {
             feedback,
             Arc::new(StubQuestion::default()),
             Arc::new(StubSessionInfo::default()),
+            Arc::new(StubTaskTools),
         )
     }
 
@@ -991,6 +1061,7 @@ mod tests {
             Arc::new(StubFeedback::default()),
             questions,
             Arc::new(StubSessionInfo::default()),
+            Arc::new(StubTaskTools),
         )
     }
 
@@ -1011,6 +1082,7 @@ mod tests {
             Arc::new(StubFeedback::default()),
             Arc::new(StubQuestion::default()),
             session_info,
+            Arc::new(StubTaskTools),
         )
     }
 

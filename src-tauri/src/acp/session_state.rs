@@ -49,8 +49,12 @@ pub enum LiveContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_tool_use_id: Option<String>,
     },
-    ToolCallRef { tool_call_id: String },
-    Plan { entries: serde_json::Value },
+    ToolCallRef {
+        tool_call_id: String,
+    },
+    Plan {
+        entries: serde_json::Value,
+    },
 }
 
 /// 工具调用的运行态。turn 完成时统一 clear。
@@ -165,6 +169,11 @@ pub struct PendingPermissionState {
 pub struct SessionLastError {
     pub message: String,
     pub code: Option<String>,
+    /// Mirrors `AcpEvent::Error.details` so a client that attached after the
+    /// error (snapshot path) sees the same diagnostic evidence as one that was
+    /// live for it. Already redacted at the source.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub details: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -394,6 +403,10 @@ pub struct SessionState {
     /// (possibly later-toggled) global setting.
     pub feedback_tool_available: bool,
 
+    // [merge-v0.23.0] union: BOTH HEAD's agent_supports_load_session/resume/fork/steering
+    // fields (self-reported continuation + steering capabilities) AND upstream/main's
+    // native_steering_available (initialize-time synthesized native push channel gate).
+    // All are set at initialize and read independently.
     /// Continuation capabilities the agent SELF-REPORTED in its `initialize`
     /// response (design D3.1): `agent_capabilities.load_session`,
     /// `session_capabilities.resume` (Claude's raw-meta resume), and
@@ -418,6 +431,17 @@ pub struct SessionState {
     /// whether steering is legal). The frontend-facing mirror is
     /// `steering_supported`, which rides the snapshot + a latch event.
     pub agent_supports_steering: bool,
+
+    /// Whether live-feedback notes for THIS session go over the native ACP
+    /// `_session/steering` push channel instead of the `check_user_feedback`
+    /// pull tool. Synthesized ONCE at initialize from three gates (extension
+    /// advertised + registry policy + `agent_info.version` runtime proof — see
+    /// `connection.rs::init_advertises_steering`) so every consumer reads one
+    /// authoritative bool and the frontend never re-derives it from agent
+    /// type. Downgraded to `false` for the rest of the session if a steer ever
+    /// comes back `startedNewTurn` (adapter ignored the `promptRequired`
+    /// opt-in), rerouting subsequent notes to the MCP pull path.
+    pub native_steering_available: bool,
 
     /// Concatenated text content of the just-completed turn's assistant
     /// message. Captured at TurnComplete (just before live_message is
@@ -560,10 +584,13 @@ impl SessionState {
             recent_events: RecentEventsBuffer::new(),
             delegation_token: None,
             feedback_tool_available: false,
+            // [merge-v0.23.0] init BOTH HEAD's self-reported capability fields
+            // AND upstream's native_steering_available (defaults false; set at initialize).
             agent_supports_load_session: false,
             agent_supports_resume: false,
             agent_supports_fork: false,
             agent_supports_steering: false,
+            native_steering_available: false,
             last_assistant_text: None,
             pending_user_message: None,
             pending_user_message_started_at: None,
@@ -1034,7 +1061,12 @@ impl SessionState {
                 // already done — the event fires only once per connection.
                 self.selectors_ready = true;
             }
-            AcpEvent::Error { message, code, .. } => {
+            AcpEvent::Error {
+                message,
+                code,
+                details,
+                ..
+            } => {
                 // Capture so post-mortem readers (probe path, debug
                 // snapshots) can surface the agent's own error message
                 // after the connection task has cleaned up its map
@@ -1043,6 +1075,7 @@ impl SessionState {
                 self.last_error = Some(SessionLastError {
                     message: message.clone(),
                     code: code.clone(),
+                    details: details.clone(),
                 });
             }
             AcpEvent::DelegationStarted {
@@ -1427,6 +1460,7 @@ impl SessionState {
             feedback: self.feedback.clone(),
             background_outstanding: self.background_outstanding,
             feedback_tool_available: self.feedback_tool_available,
+            native_steering_available: self.native_steering_available,
             modes: self.modes.clone(),
             current_mode: self.current_mode.clone(),
             config_options: self.config_options.clone(),
@@ -1519,6 +1553,12 @@ pub struct LiveSessionSnapshot {
     /// it. Always serialized (a plain bool) so the frontend can rely on it.
     #[serde(default)]
     pub feedback_tool_available: bool,
+    /// Whether feedback notes ride the native `_session/steering` push channel
+    /// (see `SessionState.native_steering_available`). `#[serde(default)]` so
+    /// older payloads deserialize to `false`; always serialized (plain bool)
+    /// like `feedback_tool_available` so the frontend can rely on it.
+    #[serde(default)]
+    pub native_steering_available: bool,
     pub modes: Option<SessionModeStateInfo>,
     pub current_mode: Option<String>,
     pub config_options: Option<Vec<SessionConfigOptionInfo>>,
@@ -2050,6 +2090,7 @@ mod tests {
             message: "ACP protocol error: forbidden".into(),
             agent_type: "claude_code".into(),
             code: Some("forbidden".into()),
+            details: None,
             terminal: true,
         });
 
@@ -2059,6 +2100,7 @@ mod tests {
             Some(SessionLastError {
                 message: "ACP protocol error: forbidden".into(),
                 code: Some("forbidden".into()),
+                details: None,
             })
         );
 
@@ -2184,7 +2226,10 @@ mod tests {
             text: "Answer ".into(),
             parent_tool_use_id: None,
         });
-        s.apply_event(&AcpEvent::Thinking { text: "hmm".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::Thinking {
+            text: "hmm".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&AcpEvent::ContentDelta {
             text: "continues here".into(),
             parent_tool_use_id: None,
@@ -2380,9 +2425,18 @@ mod tests {
     #[test]
     fn thinking_delta_creates_separate_block_from_text() {
         let mut s = fresh_state();
-        s.apply_event(&AcpEvent::ContentDelta { text: "T".into(), parent_tool_use_id: None });
-        s.apply_event(&AcpEvent::Thinking { text: "X".into(), parent_tool_use_id: None });
-        s.apply_event(&AcpEvent::ContentDelta { text: "Y".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "T".into(),
+            parent_tool_use_id: None,
+        });
+        s.apply_event(&AcpEvent::Thinking {
+            text: "X".into(),
+            parent_tool_use_id: None,
+        });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "Y".into(),
+            parent_tool_use_id: None,
+        });
         let live = s.live_message.as_ref().unwrap();
         assert_eq!(live.content.len(), 3);
         match &live.content[0] {
@@ -2698,7 +2752,10 @@ mod tests {
     #[test]
     fn turn_complete_clears_live_and_tool_calls_and_pending_permission() {
         let mut s = fresh_state();
-        s.apply_event(&AcpEvent::ContentDelta { text: "hi".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "hi".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&AcpEvent::ToolCall {
             tool_call_id: "tc-1".into(),
             title: "x".into(),
@@ -3663,7 +3720,10 @@ mod tests {
     fn plan_update_appends_at_end_replacing_existing() {
         use crate::acp::types::PlanEntryInfo;
         let mut s = fresh_state();
-        s.apply_event(&AcpEvent::ContentDelta { text: "A".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "A".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&AcpEvent::PlanUpdate {
             entries: vec![PlanEntryInfo {
                 content: "step v1".into(),
@@ -3671,7 +3731,10 @@ mod tests {
                 status: "pending".into(),
             }],
         });
-        s.apply_event(&AcpEvent::ContentDelta { text: "B".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "B".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&AcpEvent::PlanUpdate {
             entries: vec![PlanEntryInfo {
                 content: "step v2".into(),
@@ -3733,7 +3796,10 @@ mod tests {
     fn turn_complete_clears_plan_and_tool_refs() {
         use crate::acp::types::PlanEntryInfo;
         let mut s = fresh_state();
-        s.apply_event(&AcpEvent::ContentDelta { text: "x".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "x".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&tool_call_event("tc-1", "ls"));
         s.apply_event(&AcpEvent::PlanUpdate {
             entries: vec![PlanEntryInfo {
@@ -3763,7 +3829,10 @@ mod tests {
         let env = EventEnvelope {
             seq: 7,
             connection_id: "conn-x".into(),
-            payload: AcpEvent::ContentDelta { text: "abc".into(), parent_tool_use_id: None },
+            payload: AcpEvent::ContentDelta {
+                text: "abc".into(),
+                parent_tool_use_id: None,
+            },
         };
         let json = serde_json::to_string(&env).unwrap();
         let back: EventEnvelope = serde_json::from_str(&json).unwrap();

@@ -1877,7 +1877,9 @@ fn codebuddy_config_path() -> PathBuf {
 }
 
 fn codebuddy_settings_path() -> PathBuf {
-    home_dir_or_default().join(".codebuddy").join("settings.json")
+    home_dir_or_default()
+        .join(".codebuddy")
+        .join("settings.json")
 }
 
 fn read_codebuddy_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
@@ -2604,12 +2606,7 @@ fn scan_local_servers() -> Result<Vec<LocalMcpServer>, AppCommandError> {
                 entry.1.insert(McpAppType::Kiro);
             }
         }
-        Err(err)
-            if matches!(
-                err.code,
-                crate::app_error::AppErrorCode::PermissionDenied
-            ) =>
-        {
+        Err(err) if matches!(err.code, crate::app_error::AppErrorCode::PermissionDenied) => {
             tracing::debug!("[MCP] Kiro entries omitted from scan: {}", err.message);
         }
         Err(err) => return Err(err),
@@ -2729,7 +2726,10 @@ fn kimi_code_entry_to_canonical(spec: &Value, id: &str) -> Result<Value, AppComm
     // Read the discriminant into an owned value first so the map isn't borrowed when
     // we mutate it below. `transport` absent ⇒ infer; present-but-non-string or an
     // unknown literal ⇒ reject (as Kimi would).
-    let explicit_transport = obj.get("transport").and_then(Value::as_str).map(str::to_string);
+    let explicit_transport = obj
+        .get("transport")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if obj.contains_key("transport") {
         let canonical_type = match explicit_transport.as_deref() {
             Some("stdio") => "stdio",
@@ -2742,7 +2742,10 @@ fn kimi_code_entry_to_canonical(spec: &Value, id: &str) -> Result<Value, AppComm
                 )));
             }
         };
-        obj.insert("type".to_string(), Value::String(canonical_type.to_string()));
+        obj.insert(
+            "type".to_string(),
+            Value::String(canonical_type.to_string()),
+        );
     }
     obj.remove("transport");
     canonicalize_spec(&Value::Object(obj), &format!("Kimi Code config '{id}'"))
@@ -2809,7 +2812,10 @@ fn canonical_to_kimi_code_entry(spec: &Value) -> Result<Value, AppCommandError> 
         }
     }
     if let Some(transport) = transport {
-        out.insert("transport".to_string(), Value::String(transport.to_string()));
+        out.insert(
+            "transport".to_string(),
+            Value::String(transport.to_string()),
+        );
     }
     Ok(Value::Object(out))
 }
@@ -2818,11 +2824,7 @@ fn upsert_kimi_code_server(id: &str, spec: &Value) -> Result<(), AppCommandError
     upsert_kimi_code_server_at(&kimi_code_mcp_json_path(), id, spec)
 }
 
-fn upsert_kimi_code_server_at(
-    path: &Path,
-    id: &str,
-    spec: &Value,
-) -> Result<(), AppCommandError> {
+fn upsert_kimi_code_server_at(path: &Path, id: &str, spec: &Value) -> Result<(), AppCommandError> {
     let mut root = read_json_file(path)?;
     if !root.is_object() {
         root = json!({});
@@ -2915,7 +2917,10 @@ fn write_grok_root_toml_at(path: &Path, root: &toml::Value) -> Result<(), AppCom
         fs::create_dir_all(parent).map_err(AppCommandError::io)?;
     }
     let serialized = toml::to_string_pretty(root).map_err(|e| {
-        mcp_configuration_invalid(format!("failed to serialize TOML for {}: {e}", path.display()))
+        mcp_configuration_invalid(format!(
+            "failed to serialize TOML for {}: {e}",
+            path.display()
+        ))
     })?;
     fs::write(path, format!("{serialized}\n")).map_err(AppCommandError::io)
 }
@@ -2936,7 +2941,10 @@ fn canonical_to_grok_entry(spec: &Value) -> Result<toml::Value, AppCommandError>
             let command = obj.get("command").and_then(Value::as_str).ok_or_else(|| {
                 mcp_invalid_input("Grok conversion: stdio MCP spec missing command")
             })?;
-            table.insert("command".to_string(), toml::Value::String(command.to_string()));
+            table.insert(
+                "command".to_string(),
+                toml::Value::String(command.to_string()),
+            );
             if let Some(args) = obj.get("args").and_then(Value::as_array) {
                 let values = args
                     .iter()
@@ -3045,8 +3053,15 @@ fn grok_entry_to_canonical(id: &str, value: &toml::Value) -> Result<Value, AppCo
         || (has_url && explicit_type != Some("stdio"));
 
     if is_remote {
-        let canonical_type = if explicit_type == Some("sse") { "sse" } else { "http" };
-        spec.insert("type".to_string(), Value::String(canonical_type.to_string()));
+        let canonical_type = if explicit_type == Some("sse") {
+            "sse"
+        } else {
+            "http"
+        };
+        spec.insert(
+            "type".to_string(),
+            Value::String(canonical_type.to_string()),
+        );
         if let Some(url) = table.get("url").and_then(toml::Value::as_str) {
             spec.insert("url".to_string(), Value::String(url.trim().to_string()));
         }
@@ -3187,7 +3202,10 @@ fn remove_grok_server_at(path: &Path, id: &str) -> Result<bool, AppCommandError>
         return Ok(false);
     };
     let mut removed = false;
-    if let Some(mcp_servers) = table.get_mut("mcp_servers").and_then(toml::Value::as_table_mut) {
+    if let Some(mcp_servers) = table
+        .get_mut("mcp_servers")
+        .and_then(toml::Value::as_table_mut)
+    {
         removed |= mcp_servers.remove(id).is_some();
         if mcp_servers.is_empty() {
             table.remove("mcp_servers");
@@ -3224,7 +3242,10 @@ fn cursor_mcp_json_path() -> PathBuf {
     // user-level MCP config from a hardcoded `~/.cursor/mcp.json` (every
     // loader in the 2026.07.16 bundle joins `homedir()`), even when
     // `CURSOR_CONFIG_DIR`/`XDG_CONFIG_HOME` relocate chats + cli-config.json.
-    dirs::home_dir().unwrap_or_default().join(".cursor").join("mcp.json")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".cursor")
+        .join("mcp.json")
 }
 
 fn read_cursor_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
@@ -3682,7 +3703,8 @@ pub fn read_kiro_scoped_view(workspace: Option<&Path>) -> Result<KiroMcpView, Ap
 fn build_kiro_scoped_view(kiro_home: &Path, workspace: Option<&Path>) -> KiroMcpView {
     let global_path = kiro_home.join("settings").join("mcp.json");
     let mut failures = Vec::new();
-    let mut contributions: Vec<(KiroMcpScope, Option<String>, BTreeMap<String, Value>)> = Vec::new();
+    let mut contributions: Vec<(KiroMcpScope, Option<String>, BTreeMap<String, Value>)> =
+        Vec::new();
 
     // Global.
     contributions.push((
@@ -5912,7 +5934,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("mcp.json");
 
-        assert!(read_cursor_servers_at(&path).expect("read missing").is_empty());
+        assert!(read_cursor_servers_at(&path)
+            .expect("read missing")
+            .is_empty());
         assert!(!remove_cursor_server_at(&path, "ctx7").expect("remove missing"));
 
         // Upsert a stdio server; the canonical `type` must not reach disk.
@@ -5932,7 +5956,10 @@ mod tests {
         // Read-back canonicalizes (command ⇒ stdio).
         let servers = read_cursor_servers_at(&path).expect("read back");
         assert_eq!(
-            servers.get("ctx7").and_then(|s| s.get("type")).and_then(Value::as_str),
+            servers
+                .get("ctx7")
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str),
             Some("stdio")
         );
 
@@ -5949,7 +5976,10 @@ mod tests {
         assert!(root2.pointer("/mcpServers/remote/type").is_none());
         let servers2 = read_cursor_servers_at(&path).expect("read back 2");
         assert_eq!(
-            servers2.get("remote").and_then(|s| s.get("type")).and_then(Value::as_str),
+            servers2
+                .get("remote")
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str),
             Some("http"),
             "url-only entries classify as http (Cursor auto-negotiates)"
         );
@@ -5957,7 +5987,9 @@ mod tests {
         // Remove round-trips.
         assert!(remove_cursor_server_at(&path, "ctx7").expect("remove"));
         assert!(remove_cursor_server_at(&path, "remote").expect("remove remote"));
-        assert!(read_cursor_servers_at(&path).expect("read after remove").is_empty());
+        assert!(read_cursor_servers_at(&path)
+            .expect("read after remove")
+            .is_empty());
     }
 
     #[test]
@@ -5967,11 +5999,8 @@ mod tests {
         // file also holds unrelated `[cli]`/`[ui]` sections that must survive.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "[cli]\nauto_update = true\n\n[ui]\nyolo = false\n",
-        )
-        .expect("seed config");
+        std::fs::write(&path, "[cli]\nauto_update = true\n\n[ui]\nyolo = false\n")
+            .expect("seed config");
 
         // Missing entry → no servers; removing is a no-op.
         assert!(read_grok_servers_at(&path).expect("read seed").is_empty());
@@ -6015,7 +6044,9 @@ mod tests {
         let remote = servers.get("remote").expect("remote present");
         assert_eq!(remote.get("type").and_then(Value::as_str), Some("http"));
         assert_eq!(
-            remote.pointer("/headers/Authorization").and_then(Value::as_str),
+            remote
+                .pointer("/headers/Authorization")
+                .and_then(Value::as_str),
             Some("Bearer xyz")
         );
         let linear = servers.get("linear").expect("linear present");
@@ -6321,8 +6352,9 @@ mod tests {
         );
 
         // Full writer→reader round-trip stays canonical and transport-free.
-        let written = canonical_to_kimi_code_entry(&json!({"type": "sse", "url": "https://x/stream"}))
-            .expect("write sse");
+        let written =
+            canonical_to_kimi_code_entry(&json!({"type": "sse", "url": "https://x/stream"}))
+                .expect("write sse");
         let back = kimi_code_entry_to_canonical(&written, "srv").expect("read back");
         assert_eq!(back.get("type").and_then(Value::as_str), Some("sse"));
         assert!(back.get("transport").is_none());
@@ -6348,11 +6380,9 @@ mod tests {
 
         // An on-disk `type` with NO `transport` does not classify: Kimi strips `type`
         // and infers HTTP from the url, so codeg must too (not report it as SSE).
-        let stale_type = kimi_code_entry_to_canonical(
-            &json!({"type": "sse", "url": "https://host/mcp"}),
-            "s",
-        )
-        .expect("type-without-transport");
+        let stale_type =
+            kimi_code_entry_to_canonical(&json!({"type": "sse", "url": "https://host/mcp"}), "s")
+                .expect("type-without-transport");
         assert_eq!(stale_type.get("type").and_then(Value::as_str), Some("http"));
 
         // Explicit `transport: "sse"` yields SSE (and `type` is ignored, matching
@@ -6379,10 +6409,11 @@ mod tests {
             );
         }
         // A non-string transport is rejected too (Kimi's literals are exact).
-        assert!(
-            kimi_code_entry_to_canonical(&json!({"url": "https://host/mcp", "transport": 3}), "s")
-                .is_err()
-        );
+        assert!(kimi_code_entry_to_canonical(
+            &json!({"url": "https://host/mcp", "transport": 3}),
+            "s"
+        )
+        .is_err());
 
         // The `transport` discriminant wins over the entry's key shape: an explicit
         // `sse` on an entry that ALSO carries `command` is SSE (Kimi ignores the
@@ -6392,7 +6423,10 @@ mod tests {
             "s",
         )
         .expect("transport wins over command");
-        assert_eq!(sse_over_cmd.get("type").and_then(Value::as_str), Some("sse"));
+        assert_eq!(
+            sse_over_cmd.get("type").and_then(Value::as_str),
+            Some("sse")
+        );
     }
 
     #[test]
@@ -6409,8 +6443,14 @@ mod tests {
         .expect("http entry");
         let obj = entry.as_object().expect("object");
         assert_eq!(obj.get("transport").and_then(Value::as_str), Some("http"));
-        assert!(!obj.contains_key("enabled"), "wrong-typed enabled must be dropped");
-        assert!(!obj.contains_key("autoApprove"), "foreign key must be dropped");
+        assert!(
+            !obj.contains_key("enabled"),
+            "wrong-typed enabled must be dropped"
+        );
+        assert!(
+            !obj.contains_key("autoApprove"),
+            "foreign key must be dropped"
+        );
 
         // A correctly-typed `enabled` bool is preserved.
         let ok = canonical_to_kimi_code_entry(&json!({
@@ -6418,7 +6458,9 @@ mod tests {
         }))
         .expect("http entry");
         assert_eq!(
-            ok.as_object().and_then(|o| o.get("enabled")).and_then(Value::as_bool),
+            ok.as_object()
+                .and_then(|o| o.get("enabled"))
+                .and_then(Value::as_bool),
             Some(true)
         );
     }
@@ -6455,7 +6497,10 @@ mod tests {
         .as_table()
         .cloned()
         .expect("table");
-        assert_eq!(entry.get("enabled").and_then(toml::Value::as_bool), Some(true));
+        assert_eq!(
+            entry.get("enabled").and_then(toml::Value::as_bool),
+            Some(true)
+        );
         for dropped in [
             "type",
             "required",
@@ -6689,7 +6734,10 @@ mod tests {
         // the single `resolve_kiro_home_dir` (R4.1 / R4.1.7), and it is NOT an
         // agent definition file (R4.1.1).
         let path = kiro_mcp_json_path();
-        assert!(path.ends_with(Path::new("settings").join("mcp.json")), "{path:?}");
+        assert!(
+            path.ends_with(Path::new("settings").join("mcp.json")),
+            "{path:?}"
+        );
         assert_eq!(
             path.parent().and_then(Path::parent),
             Some(crate::parsers::kiro::resolve_kiro_home_dir().as_path())
@@ -6704,7 +6752,9 @@ mod tests {
         let path = tree.path().join("settings").join("mcp.json");
 
         // Missing file → empty set, and removing is a no-op (R4.1.11).
-        assert!(read_kiro_servers_at(&path).expect("read missing").is_empty());
+        assert!(read_kiro_servers_at(&path)
+            .expect("read missing")
+            .is_empty());
         assert!(!remove_kiro_server_at(&path, "absent").expect("remove missing"));
 
         let spec = json!({
@@ -6967,7 +7017,10 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .filter(|name| name.contains("codeg-tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "staging files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "staging files left behind: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -7094,7 +7147,10 @@ mod tests {
         assert!(view.scope_failures.is_empty());
 
         // Global-only, and no workspace at all (project scope skipped).
-        home.write("settings/mcp.json", r#"{"mcpServers":{"a":{"command":"a"}}}"#);
+        home.write(
+            "settings/mcp.json",
+            r#"{"mcpServers":{"a":{"command":"a"}}}"#,
+        );
         let view = build_kiro_scoped_view(home.path(), None);
         assert_eq!(view.servers.len(), 1);
         assert_eq!(view.servers[0].scope, KiroMcpScope::Global);
@@ -7108,7 +7164,10 @@ mod tests {
         let home = TempTree::new("scopes-corrupt-home");
         let workspace = TempTree::new("scopes-corrupt-ws");
 
-        home.write("settings/mcp.json", r#"{"mcpServers":{"aws":{"command":"a"}}}"#);
+        home.write(
+            "settings/mcp.json",
+            r#"{"mcpServers":{"aws":{"command":"a"}}}"#,
+        );
         workspace.write(".kiro/settings/mcp.json", "{ broken json");
         home.write(
             "agents/reviewer.json",
@@ -7135,7 +7194,10 @@ mod tests {
         // so we neither assert a default nor let such a file suppress the lower
         // scopes — accumulate-unless-same-name is the baseline.
         let home = TempTree::new("scopes-agentless");
-        home.write("settings/mcp.json", r#"{"mcpServers":{"aws":{"command":"a"}}}"#);
+        home.write(
+            "settings/mcp.json",
+            r#"{"mcpServers":{"aws":{"command":"a"}}}"#,
+        );
         home.write(
             "agents/main.json",
             r#"{"name":"main","prompt":"p","tools":["fs_read"],"useLegacyMcpJson":true}"#,
@@ -7218,10 +7280,7 @@ mod tests {
         // message, detail, or i18n params.
         for op in KIRO_OPS {
             let err = kiro_admission_decision(McpEntryPoint::Http, false, op).expect_err("deny");
-            let rendered = format!(
-                "{} {:?} {:?}",
-                err.message, err.detail, err.i18n_params
-            );
+            let rendered = format!("{} {:?} {:?}", err.message, err.detail, err.i18n_params);
             for secret in ["plaintext-secret", "Bearer", "sk-", "BRAVE_API_KEY"] {
                 assert!(
                     !rendered.contains(secret),
@@ -7238,9 +7297,7 @@ mod tests {
         let observed = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime")
-            .block_on(async {
-                with_http_entry_point(async { current_entry_point() }).await
-            });
+            .block_on(async { with_http_entry_point(async { current_entry_point() }).await });
         assert_eq!(observed, McpEntryPoint::Http);
     }
 

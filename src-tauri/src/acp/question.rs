@@ -30,9 +30,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sacp::schema::{
-    CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction,
-    ElicitationContentValue, ElicitationMode, ElicitationPropertySchema, ElicitationScope,
-    MultiSelectItems, StringPropertySchema,
+    CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
+    ElicitationAction, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
+    ElicitationScope, MultiSelectItems, StringPropertySchema,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -352,7 +352,9 @@ pub fn validate_specs(specs: &[QuestionSpec]) -> Result<(), String> {
         let mut seen_labels = std::collections::HashSet::new();
         for (oi, o) in q.options.iter().enumerate() {
             if o.label.trim().is_empty() {
-                return Err(format!("questions[{qi}].options[{oi}] has an empty `label`"));
+                return Err(format!(
+                    "questions[{qi}].options[{oi}] has an empty `label`"
+                ));
             }
             if o.label.chars().count() > MAX_QUESTION_TEXT_CHARS {
                 return Err(format!(
@@ -752,11 +754,41 @@ pub enum ElicitationPlan {
 /// `<questionId>__other` (`__other1`, `__other2`… on collision). The card
 /// offers its own "Other" on every question, so companions are skipped and the
 /// typed answer rides the main field (codex falls back to it).
+///
+/// Name-based, and deliberately kept alongside the `_meta` marker below:
+/// codex-acp 1.1.9 (the pinned version) still emits ONLY this shape.
 fn is_other_companion(id: &str) -> bool {
     let Some(pos) = id.rfind("__other") else {
         return false;
     };
-    pos > 0 && id[pos + "__other".len()..].chars().all(|c| c.is_ascii_digit())
+    pos > 0
+        && id[pos + "__other".len()..]
+            .chars()
+            .all(|c| c.is_ascii_digit())
+}
+
+/// True when the raw schema property carries the shared custom-answer marker
+/// (`_meta._askUserQuestionCustomAnswer.isCustomAnswer`), i.e. it is the
+/// free-text "Other" companion of a sibling select question.
+///
+/// claude-agent-acp 0.64.0 (#929) introduced this key deliberately WITHOUT an
+/// agent namespace so every AskUserQuestion bridge can be recognized the same
+/// way; its own companion fields are named `question_<n>_custom`, which
+/// [`is_other_companion`]'s `__other` heuristic does not match. Reading the
+/// marker means codeg keeps collapsing the companion into the card's built-in
+/// "Other" input no matter which adapter produced the form.
+///
+/// Like [`is_secret_property`], this reads the raw JSON: the typed sacp
+/// property structs drop `_meta`.
+fn is_custom_answer_property(raw: &Value, id: &str) -> bool {
+    raw.get("requestedSchema")
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.get(id))
+        .and_then(|prop| prop.get("_meta"))
+        .and_then(|m| m.get("_askUserQuestionCustomAnswer"))
+        .and_then(|c| c.get("isCustomAnswer"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// True when the request is codex's MCP tool-call approval elicitation. The
@@ -903,7 +935,11 @@ fn approval_from_form(
                 label: if c.label.trim().is_empty() {
                     value.to_string()
                 } else {
-                    c.label.trim().chars().take(MAX_QUESTION_TEXT_CHARS).collect()
+                    c.label
+                        .trim()
+                        .chars()
+                        .take(MAX_QUESTION_TEXT_CHARS)
+                        .collect()
                 },
                 kind: if value == "once" {
                     "allow_once"
@@ -961,8 +997,11 @@ fn parse_form_questions(
             );
             break;
         }
-        // Skip codex's synthetic free-text "Other" companion fields.
-        if is_other_companion(id) {
+        // Skip synthetic free-text "Other" companion fields — codex's
+        // name-based `<id>__other[N]` shape, and any adapter's `_meta`-marked
+        // companion (claude-agent-acp ≥0.64). The card always offers its own
+        // "Other" input, so a companion would render as a duplicate question.
+        if is_other_companion(id) || is_custom_answer_property(raw, id) {
             continue;
         }
         let (title, description, kind, multi_select, choices) = match prop {
@@ -1089,6 +1128,14 @@ fn parse_bool_answer(v: &str) -> Option<bool> {
 /// omitted rather than sent mistyped. A declined card or an empty result maps
 /// to `Decline`, which the agent reads as "no answer" and proceeds — never
 /// worse than the pre-bridge behavior.
+///
+/// Every value is written under the MAIN field id, including a free-text
+/// "Other": the companion property skipped by [`is_custom_answer_property`] /
+/// [`is_other_companion`] is never written back. That is correct for codex,
+/// which falls back to the main field. If codeg ever advertises
+/// `elicitation.form` to an agent that requires the answer under the companion
+/// key instead (claude-agent-acp reads `question_<n>_custom` separately), this
+/// has to route the free-text answer there using the marker's `questionId`.
 pub fn build_elicitation_response(
     questions: &ElicitationQuestions,
     outcome: &QuestionOutcome,
@@ -1109,7 +1156,13 @@ pub fn build_elicitation_response(
         let mapped: Vec<String> = item
             .selected
             .iter()
-            .map(|l| field.value_by_label.get(l).cloned().unwrap_or_else(|| l.clone()))
+            .map(|l| {
+                field
+                    .value_by_label
+                    .get(l)
+                    .cloned()
+                    .unwrap_or_else(|| l.clone())
+            })
             .collect();
         let value = match field.kind {
             ElicitationFieldKind::Text => match mapped.into_iter().next() {
@@ -1361,7 +1414,11 @@ mod tests {
         assert_eq!(q.specs[0].header, "Approach");
         assert!(!q.specs[0].multi_select);
         assert!(!q.specs[0].is_secret);
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Incremental", "Rewrite"]);
         assert_eq!(q.fields[0].kind, ElicitationFieldKind::Text);
         // The elicitation's toolCallId rides along so the connection handler can
@@ -1410,6 +1467,64 @@ mod tests {
     }
 
     #[test]
+    fn classify_elicitation_skips_meta_marked_custom_answer_companion() {
+        // claude-agent-acp ≥0.64 (#929) names its companion `question_<n>_custom`
+        // — the `__other` heuristic misses it — and marks it with the shared,
+        // un-namespaced `_meta._askUserQuestionCustomAnswer`. The marker alone
+        // must collapse it into the card's built-in "Other" input.
+        let raw = elicitation_raw(
+            json!({
+                "question_0": {
+                    "type": "string",
+                    "title": "Pick one",
+                    "enum": ["a", "b"],
+                },
+                "question_0_custom": {
+                    "type": "string",
+                    "title": "Other",
+                    "description": "Type your own answer instead.",
+                    "_meta": {
+                        "_askUserQuestionCustomAnswer": {
+                            "questionId": "question_0",
+                            "isCustomAnswer": true,
+                        }
+                    },
+                },
+            }),
+            json!([]),
+        );
+        let q = expect_questions(classify_elicitation(&raw).unwrap());
+        assert_eq!(q.specs.len(), 1, "companion must not render as a question");
+        assert_eq!(q.specs[0].id, "question_0");
+        assert_eq!(q.specs[0].options.len(), 2);
+    }
+
+    #[test]
+    fn classify_elicitation_keeps_unmarked_free_text_field() {
+        // Defense against over-skipping: a plain string field that merely sits
+        // next to a select — no marker, no `__other` name — is a real question.
+        let raw = elicitation_raw(
+            json!({
+                "question_0": {"type": "string", "title": "Pick one", "enum": ["a", "b"]},
+                "notes": {"type": "string", "title": "Notes"},
+                "unmarked_custom": {
+                    "type": "string",
+                    "title": "Other",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"questionId": "question_0"}},
+                },
+            }),
+            json!([]),
+        );
+        let q = expect_questions(classify_elicitation(&raw).unwrap());
+        let ids: Vec<&str> = q.specs.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["notes", "question_0", "unmarked_custom"],
+            "only `isCustomAnswer: true` skips; a marker without it does not"
+        );
+    }
+
+    #[test]
     fn classify_elicitation_multi_select_marks_multi_and_maps_values() {
         let raw = elicitation_raw(
             json!({
@@ -1429,7 +1544,11 @@ mod tests {
         assert_eq!(q.specs.len(), 1);
         assert!(q.specs[0].multi_select);
         // Titles display; consts ride back on accept.
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Rust", "TS"]);
         let answer = QuestionAnswer {
             answers: vec![QuestionAnswerItem {
@@ -1457,7 +1576,11 @@ mod tests {
         assert_eq!(q.specs.len(), 3);
         // Booleans render as Yes/No; numbers as free text.
         let confirm = q.specs.iter().position(|s| s.id == "confirm").unwrap();
-        let labels: Vec<_> = q.specs[confirm].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[confirm]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Yes", "No"]);
 
         let answer = QuestionAnswer {
@@ -1552,16 +1675,22 @@ mod tests {
         assert_eq!(approval.message, "Allow tool call?");
         assert_eq!(approval.tool_call_id.as_deref(), Some("call-1"));
         assert!(approval.persist_in_content);
-        let ids: Vec<_> = approval.options.iter().map(|o| o.option_id.as_str()).collect();
-        assert_eq!(ids, ["once", "session", "always", ELICITATION_DECLINE_OPTION_ID]);
+        let ids: Vec<_> = approval
+            .options
+            .iter()
+            .map(|o| o.option_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["once", "session", "always", ELICITATION_DECLINE_OPTION_ID]
+        );
         assert_eq!(approval.options[0].label, "Allow once");
         assert_eq!(approval.options[0].kind, "allow_once");
         assert_eq!(approval.options[1].kind, "allow_always");
 
         // Accepting echoes the chosen persist back in content…
-        let v =
-            serde_json::to_value(build_elicitation_approval_response(&approval, "session"))
-                .unwrap();
+        let v = serde_json::to_value(build_elicitation_approval_response(&approval, "session"))
+            .unwrap();
         assert_eq!(v["action"], "accept");
         assert_eq!(v["content"]["persist"], "session");
         // …declining (or an unknown option) maps to decline.
@@ -1571,8 +1700,8 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["action"], "decline");
-        let v = serde_json::to_value(build_elicitation_approval_response(&approval, "bogus"))
-            .unwrap();
+        let v =
+            serde_json::to_value(build_elicitation_approval_response(&approval, "bogus")).unwrap();
         assert_eq!(v["action"], "decline");
     }
 
@@ -1591,10 +1720,14 @@ mod tests {
         });
         let approval = expect_approval(classify_elicitation(&raw).unwrap());
         assert!(!approval.persist_in_content);
-        let ids: Vec<_> = approval.options.iter().map(|o| o.option_id.as_str()).collect();
+        let ids: Vec<_> = approval
+            .options
+            .iter()
+            .map(|o| o.option_id.as_str())
+            .collect();
         assert_eq!(ids, ["accept", ELICITATION_DECLINE_OPTION_ID]);
-        let v = serde_json::to_value(build_elicitation_approval_response(&approval, "accept"))
-            .unwrap();
+        let v =
+            serde_json::to_value(build_elicitation_approval_response(&approval, "accept")).unwrap();
         assert_eq!(v["action"], "accept");
         assert!(
             v.get("content").is_none() || v["content"].is_null(),
@@ -1609,7 +1742,11 @@ mod tests {
         let raw = elicitation_raw(json!({}), json!([]));
         let approval = expect_approval(classify_elicitation(&raw).unwrap());
         assert_eq!(approval.message, "Input requested");
-        let ids: Vec<_> = approval.options.iter().map(|o| o.option_id.as_str()).collect();
+        let ids: Vec<_> = approval
+            .options
+            .iter()
+            .map(|o| o.option_id.as_str())
+            .collect();
         assert_eq!(ids, ["accept", ELICITATION_DECLINE_OPTION_ID]);
     }
 
@@ -1716,7 +1853,10 @@ mod tests {
             validate_specs(&[spec("ok", 2, MAX_QUESTION_TEXT_CHARS + 1)]).is_err(),
             "oversized option label"
         );
-        assert!(validate_specs(&[spec("   ", 2, 0)]).is_err(), "blank question");
+        assert!(
+            validate_specs(&[spec("   ", 2, 0)]).is_err(),
+            "blank question"
+        );
 
         // Duplicate question id across the set (spec() hardcodes id "q") — answer
         // routing + UI state key on id, so duplicates must be rejected.
@@ -1858,7 +1998,13 @@ mod tests {
                 labels: vec!["x".into()],
             });
         }
-        let outcome = build_outcome(&qs, &QuestionAnswer { answers: items, declined: false });
+        let outcome = build_outcome(
+            &qs,
+            &QuestionAnswer {
+                answers: items,
+                declined: false,
+            },
+        );
         assert_eq!(outcome.answers.len(), 1);
         // Cap = options.len() + 1 = 3 (every real option plus one "Other"); the
         // FIRST three are kept (early break — labels past the cap and the 10k
@@ -1999,7 +2145,10 @@ mod tests {
             .collect();
         let specs = parse_grok_ext_questions(&grok_params(json!(many))).unwrap();
         assert_eq!(specs.len(), MAX_QUESTIONS, "questions clamped");
-        assert!(specs.iter().all(|s| s.options.len() == MAX_OPTIONS), "options clamped");
+        assert!(
+            specs.iter().all(|s| s.options.len() == MAX_OPTIONS),
+            "options clamped"
+        );
         validate_specs(&specs).unwrap();
     }
 
@@ -2073,8 +2222,14 @@ mod tests {
             answers: vec![],
             declined: true,
         };
-        assert_eq!(build_grok_ext_response(&outcome), json!({ "outcome": "skip_interview" }));
-        assert_eq!(grok_ext_skip_response(), json!({ "outcome": "skip_interview" }));
+        assert_eq!(
+            build_grok_ext_response(&outcome),
+            json!({ "outcome": "skip_interview" })
+        );
+        assert_eq!(
+            grok_ext_skip_response(),
+            json!({ "outcome": "skip_interview" })
+        );
     }
 
     #[test]
@@ -2169,7 +2324,10 @@ mod tests {
         );
         let input = grok_result_card_input(&specs);
         let output = grok_result_card_output(&outcome);
-        assert_eq!(input["questions"][0]["question"], output["answers"][0]["question"]);
+        assert_eq!(
+            input["questions"][0]["question"],
+            output["answers"][0]["question"]
+        );
         assert_eq!(output["answers"][0]["header"], "");
     }
 }

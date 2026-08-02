@@ -83,8 +83,7 @@ pub struct KiroScopedViewParams {
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_scan_local() -> Result<Json<Vec<LocalMcpServer>>, AppCommandError> {
-    let result =
-        mcp_commands::with_http_entry_point(mcp_commands::mcp_scan_local()).await?;
+    let result = mcp_commands::with_http_entry_point(mcp_commands::mcp_scan_local()).await?;
     Ok(Json(result))
 }
 

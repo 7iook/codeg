@@ -11,6 +11,7 @@ import {
   Pin,
   PinOff,
   CheckCircle2,
+  FolderX,
   Info,
   ChevronRight,
   GitBranch,
@@ -326,6 +327,8 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
                   {formatConversationTitle(conversation.title) ||
                     t("untitledConversation")}
                 </span>
+                {/* [merge-v0.23.0] union: HEAD 的 delegation 徽章 + upstream 的
+                    worktree-removed 徽章共存。两个都是 span,轮流出现不冲突。 */}
                 {/* Delegated sub-session marker: without it a nested row is
                     indistinguishable from a worktree-indented ordinary session
                     (both sit at depth ≥ 1). */}
@@ -366,6 +369,23 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
                     {t("subsessionCountLabel", { count: childCountHint })}
                   </span>
                 )}
+                {/* Re-parented out of a removed worktree: history loads fine,
+                    but "continue" may need a fresh session (the agent's files
+                    were keyed to the old path). */}
+                {conversation.origin_cwd ? (
+                  <span
+                    className="inline-flex shrink-0 items-center"
+                    title={tSidebar("worktreeRemovedBadge")}
+                  >
+                    <FolderX
+                      className="h-3 w-3 text-muted-foreground/60"
+                      aria-hidden
+                    />
+                    <span className="sr-only">
+                      {tSidebar("worktreeRemovedBadge")}
+                    </span>
+                  </span>
+                ) : null}
               </button>
 
               {/* Expand/collapse affordance for delegation children. It overlays

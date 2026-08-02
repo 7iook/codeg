@@ -117,6 +117,7 @@ async fn create_inner(
         updated_at: Set(now),
         deleted_at: Set(None),
         pinned_at: Set(None),
+        origin_cwd: Set(None),
     };
     Ok(model.insert(conn).await?)
 }
@@ -270,6 +271,9 @@ pub async fn update_external_id(
     Ok(())
 }
 
+// [merge-v0.23.0] union: keep local (kiro-agent) delegate resume-credential guards
+// AND upstream (work_task) reparent_folder_conversations. Both are additive new fns.
+
 /// Resume-safe variant of [`update_external_id`] (Requirement 3.3a): for a
 /// `kind = Delegate` child row, `external_id` is the RESUME CREDENTIAL — once
 /// set, a DIFFERING incoming session id can only originate from a
@@ -345,6 +349,34 @@ pub async fn update_external_id_skip_delegate(
     update_external_id(conn, conversation_id, external_id).await
 }
 
+// [merge-v0.23.0] Below is upstream v0.23.0 addition (work_task worktree migration).
+
+/// Re-parent every live conversation of `from_folder_id` (a task worktree
+/// folder about to be removed) onto the project folder, stamping `origin_cwd`
+/// with the worktree's original path. History loading is external_id-driven and
+/// unaffected; the Gemini/Cline/OpenClaw stale-id fallback matches on
+/// `origin_cwd ?? folder.path`, which this preserves.
+pub async fn reparent_folder_conversations(
+    conn: &DatabaseConnection,
+    from_folder_id: i32,
+    to_folder_id: i32,
+    origin_cwd: &str,
+) -> Result<u64, DbError> {
+    use sea_orm::sea_query::Expr;
+    let res = conversation::Entity::update_many()
+        .col_expr(conversation::Column::FolderId, Expr::value(to_folder_id))
+        .col_expr(
+            conversation::Column::OriginCwd,
+            Expr::value(Some(origin_cwd.to_string())),
+        )
+        .col_expr(conversation::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(conversation::Column::FolderId.eq(from_folder_id))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .exec(conn)
+        .await?;
+    Ok(res.rows_affected)
+}
+
 pub async fn soft_delete(conn: &DatabaseConnection, conversation_id: i32) -> Result<(), DbError> {
     let conv = conversation::Entity::find_by_id(conversation_id)
         .filter(conversation::Column::DeletedAt.is_null())
@@ -398,6 +430,7 @@ fn conv_to_summary(r: conversation::Model) -> DbConversationSummary {
         parent_id: r.parent_id,
         parent_tool_use_id: r.parent_tool_use_id,
         delegation_call_id: r.delegation_call_id,
+        origin_cwd: r.origin_cwd,
     }
 }
 

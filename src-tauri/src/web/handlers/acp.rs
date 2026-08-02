@@ -41,9 +41,10 @@ pub async fn acp_list_agents(
     Extension(state): Extension<Arc<AppState>>,
 ) -> Result<Json<Vec<AcpAgentInfo>>, AppCommandError> {
     let db = &state.db;
-    let result = crate::commands::mcp::with_http_entry_point(acp_commands::acp_list_agents_core(db))
-        .await
-        .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
+    let result =
+        crate::commands::mcp::with_http_entry_point(acp_commands::acp_list_agents_core(db))
+            .await
+            .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
     Ok(Json(result))
 }
 
@@ -977,8 +978,8 @@ pub async fn acp_update_pi_config(
     Ok(Json(()))
 }
 
-pub async fn acp_load_pi_config(
-) -> Result<Json<acp_commands::PiConfigProjection>, AppCommandError> {
+pub async fn acp_load_pi_config() -> Result<Json<acp_commands::PiConfigProjection>, AppCommandError>
+{
     Ok(Json(acp_commands::load_pi_config_core()))
 }
 

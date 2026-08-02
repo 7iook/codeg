@@ -330,14 +330,14 @@ fn parse_count_from_output(stdout: &[u8]) -> Option<usize> {
     String::from_utf8_lossy(stdout).trim().parse::<usize>().ok()
 }
 
-fn git_command_error(operation: &str, stderr: &[u8]) -> AppCommandError {
+pub(crate) fn git_command_error(operation: &str, stderr: &[u8]) -> AppCommandError {
     let stderr = String::from_utf8_lossy(stderr).trim().to_string();
     AppCommandError::external_command(format!("git {operation} failed"), stderr)
 }
 
 use crate::git_repo::ensure_git_repo;
 
-async fn detect_conflicts(path: &str) -> Result<Vec<String>, AppCommandError> {
+pub(crate) async fn detect_conflicts(path: &str) -> Result<Vec<String>, AppCommandError> {
     let output = crate::process::tokio_command("git")
         .args(["-c", "core.quotePath=false"])
         .args(["diff", "--name-only", "--diff-filter=U"])
@@ -981,10 +981,7 @@ pub struct GitHeadInfo {
     pub short_sha: Option<String>,
 }
 
-async fn git_output(
-    path: &str,
-    args: &[&str],
-) -> Result<std::process::Output, AppCommandError> {
+async fn git_output(path: &str, args: &[&str]) -> Result<std::process::Output, AppCommandError> {
     crate::process::tokio_command("git")
         .args(args)
         .current_dir(path)
@@ -996,7 +993,7 @@ async fn git_output(
 /// Resolve the current `HEAD` state. The common cases (on a branch / detached)
 /// cost a single git invocation; the rarer unborn-branch and non-repository
 /// cases fall through to `symbolic-ref` and `--is-inside-work-tree`.
-async fn resolve_git_head(path: &str) -> Result<GitHeadInfo, AppCommandError> {
+pub(crate) async fn resolve_git_head(path: &str) -> Result<GitHeadInfo, AppCommandError> {
     // `rev-parse --abbrev-ref HEAD` prints the branch name, the literal "HEAD"
     // when detached, and fails on an unborn branch or a non-repository.
     let head = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
@@ -1508,6 +1505,7 @@ pub async fn git_worktree_add(
     path: String,
     branch_name: String,
     worktree_path: String,
+    base: Option<String>,
 ) -> Result<(), AppCommandError> {
     // 校验分支是否已存在
     let check = crate::process::tokio_command("git")
@@ -1534,9 +1532,21 @@ pub async fn git_worktree_add(
         );
     }
 
-    // 执行 git worktree add -b <branch> <path>
+    // 执行 git worktree add -b <branch> <path> [<base>]
+    // 显式 base（提交/引用）消除「读分支 → 建 worktree」间用户切分支的漂移窗口；
+    // 省略时沿用 HEAD（既有调用方行为不变）。
+    let mut args = vec![
+        "worktree".to_string(),
+        "add".to_string(),
+        "-b".to_string(),
+        branch_name,
+        worktree_path,
+    ];
+    if let Some(base) = base {
+        args.push(base);
+    }
     let output = crate::process::tokio_command("git")
-        .args(["worktree", "add", "-b", &branch_name, &worktree_path])
+        .args(&args)
         .current_dir(&path)
         .output()
         .await
@@ -2374,8 +2384,7 @@ pub async fn resolve_worktree_folder_core(
     let folder_id = folders
         .into_iter()
         .find(|f| {
-            let canon =
-                std::fs::canonicalize(&f.path).unwrap_or_else(|_| PathBuf::from(&f.path));
+            let canon = std::fs::canonicalize(&f.path).unwrap_or_else(|_| PathBuf::from(&f.path));
             canon == canonical_wt
         })
         .map(|f| f.id);
@@ -2843,10 +2852,7 @@ fn unquote_git_path(path: &str) -> String {
     }
 }
 
-pub(crate) fn resolve_tree_path(
-    root: &Path,
-    rel_path: &str,
-) -> Result<PathBuf, AppCommandError> {
+pub(crate) fn resolve_tree_path(root: &Path, rel_path: &str) -> Result<PathBuf, AppCommandError> {
     let rel = Path::new(rel_path);
     if rel.is_absolute() {
         return Err(AppCommandError::invalid_input("Path must be relative"));
@@ -3565,17 +3571,14 @@ pub async fn read_workspace_file_base64(
         // read race: the original `target` symlink can't be re-resolved (we use
         // the canonical path), a final-component symlink swapped in after the
         // check makes the open fail, and metadata/read never re-look-up the path.
-        let canonical_root =
-            std::fs::canonicalize(&root).map_err(AppCommandError::io)?;
-        let canonical_target =
-            std::fs::canonicalize(&target).map_err(AppCommandError::io)?;
+        let canonical_root = std::fs::canonicalize(&root).map_err(AppCommandError::io)?;
+        let canonical_target = std::fs::canonicalize(&target).map_err(AppCommandError::io)?;
         if !canonical_target.starts_with(&canonical_root) {
             return Err(AppCommandError::invalid_input(
                 "Path is outside workspace root",
             ));
         }
-        let mut file =
-            open_no_follow(&canonical_target).map_err(AppCommandError::io)?;
+        let mut file = open_no_follow(&canonical_target).map_err(AppCommandError::io)?;
         let metadata = file.metadata().map_err(AppCommandError::io)?;
         if !metadata.is_file() {
             return Err(AppCommandError::invalid_input("Path is not a file"));
@@ -4650,10 +4653,7 @@ async fn get_unpushed_hashes(
             .current_dir(path)
             .output()
             .await
-            .map(|o| {
-                o.status.success()
-                    && !String::from_utf8_lossy(&o.stdout).trim().is_empty()
-            })
+            .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
         let mut rev_args = vec!["rev-list".to_string(), limit_arg.clone()];
         if let Some(a) = author.filter(|a| !a.is_empty()) {
@@ -4862,10 +4862,7 @@ mod tests {
         // BRE metacharacters are backslash-escaped...
         assert_eq!(git_author_match_pattern("a.b*c"), "^a\\.b\\*c <");
         assert_eq!(git_author_match_pattern("na[me]"), "^na\\[me\\] <");
-        assert_eq!(
-            git_author_match_pattern("back\\slash"),
-            "^back\\\\slash <"
-        );
+        assert_eq!(git_author_match_pattern("back\\slash"), "^back\\\\slash <");
         // ...but `|` is literal in BRE, so a name like `程相|cx` is left as-is.
         assert_eq!(git_author_match_pattern("程相|cx"), "^程相|cx <");
     }
@@ -4993,9 +4990,9 @@ mod tests {
         // Intermediate directory entries are emitted alongside files — the
         // `@`-mention picker relies on directories being present.
         assert!(
-            entries.iter().any(
-                |e| e.path == "a" && matches!(e.kind, WorkspaceEntryKind::Dir)
-            ),
+            entries
+                .iter()
+                .any(|e| e.path == "a" && matches!(e.kind, WorkspaceEntryKind::Dir)),
             "directory entries must be present"
         );
     }
@@ -5274,7 +5271,7 @@ mod tests {
 
         let result = git_log(
             p.to_string_lossy().to_string(),
-            Some(5),                   // limit → status window is `-5`
+            Some(5), // limit → status window is `-5`
             None,
             None,
             None,
@@ -5313,7 +5310,14 @@ mod tests {
         // combination that made the literal-HEAD comparison wrong. Remote-tracking
         // refs are faked with update-ref so the test needs no network.
         git_run(p, &["update-ref", "refs/remotes/origin/main", &base]);
-        git_run(p, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git_run(
+            p,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
         git_run(p, &["checkout", "-q", "-b", "feature"]);
         git_run(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
         let f1 = git_capture(p, &["rev-parse", "HEAD"]);
@@ -5392,7 +5396,14 @@ mod tests {
         git_run(p, &["commit", "-q", "--allow-empty", "-m", "c1"]);
         let c1 = git_capture(p, &["rev-parse", "HEAD"]);
         git_run(p, &["update-ref", "refs/remotes/origin/main", &c1]);
-        git_run(p, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git_run(
+            p,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
         git_run(p, &["commit", "-q", "--allow-empty", "-m", "c2"]);
         git_run(p, &["checkout", "-q", "--detach"]);
 
@@ -5711,7 +5722,10 @@ branch refs/heads/main";
             "src/inner".to_string(),
         )
         .await;
-        assert!(res.is_err(), "moving a dir into its own descendant must fail");
+        assert!(
+            res.is_err(),
+            "moving a dir into its own descendant must fail"
+        );
         assert!(root.path().join("src/inner").is_dir(), "source untouched");
     }
 
@@ -5790,8 +5804,7 @@ mod workspace_confinement_tests {
         let root = tempfile::tempdir().expect("root");
         let outside = tempfile::tempdir().expect("outside");
         std::fs::write(outside.path().join("secret"), b"top").expect("write");
-        symlink(outside.path().join("secret"), root.path().join("link"))
-            .expect("symlink");
+        symlink(outside.path().join("secret"), root.path().join("link")).expect("symlink");
         // The canonical target resolves outside the root, so the read is denied
         // even though `root/link` is lexically inside the workspace.
         let res = read_workspace_file_base64(
@@ -5800,7 +5813,10 @@ mod workspace_confinement_tests {
             None,
         )
         .await;
-        assert!(res.is_err(), "symlink escaping the workspace must be rejected");
+        assert!(
+            res.is_err(),
+            "symlink escaping the workspace must be rejected"
+        );
     }
 
     #[test]
@@ -5834,7 +5850,10 @@ mod workspace_confinement_tests {
             "sub".to_string(),
         )
         .await;
-        assert!(res.is_err(), "must not clobber a dangling destination symlink");
+        assert!(
+            res.is_err(),
+            "must not clobber a dangling destination symlink"
+        );
         assert!(
             std::fs::symlink_metadata(root.path().join("sub/a.txt")).is_ok(),
             "dangling symlink must remain intact",
@@ -5846,11 +5865,7 @@ mod workspace_confinement_tests {
     async fn move_file_tree_entry_moves_a_symlink_entry() {
         let root = tempfile::tempdir().expect("root");
         std::fs::write(root.path().join("target.txt"), b"x").expect("write");
-        symlink(
-            root.path().join("target.txt"),
-            root.path().join("link.txt"),
-        )
-        .expect("symlink");
+        symlink(root.path().join("target.txt"), root.path().join("link.txt")).expect("symlink");
         std::fs::create_dir(root.path().join("sub")).expect("mkdir");
 
         let new_rel = move_file_tree_entry(
@@ -5862,8 +5877,8 @@ mod workspace_confinement_tests {
         .expect("move symlink");
         assert_eq!(new_rel.replace('\\', "/"), "sub/link.txt");
         // The moved entry is still a symlink (the link itself moved, not its target).
-        let meta = std::fs::symlink_metadata(root.path().join("sub/link.txt"))
-            .expect("moved link exists");
+        let meta =
+            std::fs::symlink_metadata(root.path().join("sub/link.txt")).expect("moved link exists");
         assert!(meta.file_type().is_symlink(), "entry stays a symlink");
         assert!(!root.path().join("link.txt").exists(), "old link gone");
     }

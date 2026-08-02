@@ -223,7 +223,9 @@ pub async fn run_automation_engine(engine: Arc<AutomationEngine>) {
     // holding the exclusive data-dir lock (see `build_engine`), so a process
     // sharing the data dir never reaches this point against another's live runs.
     match automation_service::boot_reconcile_interrupted(&engine.db.conn).await {
-        Ok(n) if n > 0 => tracing::info!("[automation] boot reconcile failed {n} interrupted run(s)"),
+        Ok(n) if n > 0 => {
+            tracing::info!("[automation] boot reconcile failed {n} interrupted run(s)")
+        }
         Ok(_) => {}
         Err(e) => tracing::warn!("[automation] boot reconcile error: {e}"),
     }
@@ -319,16 +321,21 @@ impl AutomationEngine {
             .await
             .map_err(|e| e.to_string())?
         {
-            let _ =
-                automation_service::record_skipped_run(&self.db.conn, automation_id, trigger, scheduled_for)
-                    .await;
+            let _ = automation_service::record_skipped_run(
+                &self.db.conn,
+                automation_id,
+                trigger,
+                scheduled_for,
+            )
+            .await;
             self.emit(AutomationChange::Upsert { id: automation_id });
             return Err("previous run still active".to_string());
         }
 
-        let run = automation_service::start_run(&self.db.conn, automation_id, trigger, scheduled_for)
-            .await
-            .map_err(|e| e.to_string())?;
+        let run =
+            automation_service::start_run(&self.db.conn, automation_id, trigger, scheduled_for)
+                .await
+                .map_err(|e| e.to_string())?;
         // Broadcast the running row immediately so every client sees it the
         // instant it exists — `launch` can take seconds (worktree add + agent
         // spawn) before it re-emits RunStarted with the live "View conversation"
@@ -362,10 +369,68 @@ impl AutomationEngine {
         }
     }
 
+    /// Fire an enqueue-task automation: create a todo work task carrying the
+    /// captured prompt (and the automation's agent as the per-task override),
+    /// then settle the run synchronously — there is no session to wait for, so
+    /// none of the TurnComplete / reconcile settle paths ever see this run.
+    async fn enqueue_task(
+        &self,
+        auto: &AutomationInfo,
+        cfg: &AutomationConfig,
+        run_id: i32,
+    ) -> Result<(), String> {
+        let folder_id = auto
+            .root_folder_id
+            .ok_or_else(|| "automation has no target folder".to_string())?;
+        let task_cfg = crate::models::WorkTaskConfig {
+            prompt_blocks: cfg.prompt_blocks.clone(),
+            display_text: cfg.display_text.clone(),
+            agent_type: Some(auto.agent_type.clone()),
+            mode_id: cfg.mode_id.clone(),
+            config_values: cfg.config_values.clone(),
+            label_snapshot: cfg.label_snapshot.clone(),
+        };
+        let draft = crate::models::WorkTaskDraft {
+            folder_id,
+            title: first_chars(&auto.name, 80),
+            config: serde_json::to_value(&task_cfg).map_err(|e| e.to_string())?,
+        };
+        // The command core (not the bare service) so the task board gets its
+        // `task://changed` broadcast and the work-task pump its nudge for free.
+        let info =
+            crate::commands::work_task::work_task_create_core(&self.emitter, &self.db, draft)
+                .await
+                .map_err(|e| e.to_string())?;
+
+        let settled = automation_service::settle_run(
+            &self.db.conn,
+            run_id,
+            AutomationRunStatus::Succeeded,
+            None,
+            None,
+            Some(format!("queued task #{}: {}", info.id, info.title)),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        if settled {
+            self.emit(AutomationChange::RunSettled {
+                automation_id: auto.id,
+                run_id,
+                status: "succeeded".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Replay the captured composer snapshot through the existing launch chain.
     async fn launch(&self, auto: &AutomationInfo, run_id: i32) -> Result<(), String> {
         let cfg: AutomationConfig =
             serde_json::from_value(auto.config.clone()).map_err(|e| format!("bad config: {e}"))?;
+        // Enqueue-task automations never touch the session machinery below —
+        // no worktree, no spawn; the work-task engine owns execution.
+        if cfg.action == crate::models::AutomationAction::EnqueueTask {
+            return self.enqueue_task(auto, &cfg, run_id).await;
+        }
         let agent_type = parse_agent_type(&auto.agent_type)?;
         let blocks = cfg
             .prompt_blocks
@@ -439,7 +504,8 @@ impl AutomationEngine {
         // Create the conversation row, then adopt it in send_prompt (Branch A).
         let title = first_chars(&cfg.display_text, 80);
         let conversation_id =
-            match create_conversation_core(&self.db.conn, cwd.folder_id, agent_type, Some(title)).await
+            match create_conversation_core(&self.db.conn, cwd.folder_id, agent_type, Some(title))
+                .await
             {
                 Ok(id) => id,
                 Err(e) => {
@@ -545,12 +611,12 @@ impl AutomationEngine {
                 // Retry once with a short suffix if a leftover collides (a prior
                 // attempt for this run id that failed before cleanup).
                 if let Err(e) =
-                    git_worktree_add(root.path.clone(), branch.clone(), wt_path.clone()).await
+                    git_worktree_add(root.path.clone(), branch.clone(), wt_path.clone(), None).await
                 {
                     let suffix = short_suffix(run_id);
                     let branch2 = format!("{branch}-{suffix}");
                     wt_path = sibling_path(&root.path, &format!("{dir}-{suffix}"));
-                    git_worktree_add(root.path.clone(), branch2, wt_path.clone())
+                    git_worktree_add(root.path.clone(), branch2, wt_path.clone(), None)
                         .await
                         .map_err(|_| format!("worktree add failed: {e}"))?;
                 }
@@ -1016,7 +1082,10 @@ mod tests {
     fn worktree_names_carry_ids() {
         assert_eq!(basename("/home/me/repo"), "repo");
         assert_eq!(basename("/home/me/repo/"), "repo");
-        assert_eq!(sibling_path("/home/me/repo", "repo-automation-3-run-7"), "/home/me/repo-automation-3-run-7");
+        assert_eq!(
+            sibling_path("/home/me/repo", "repo-automation-3-run-7"),
+            "/home/me/repo-automation-3-run-7"
+        );
     }
 
     #[test]

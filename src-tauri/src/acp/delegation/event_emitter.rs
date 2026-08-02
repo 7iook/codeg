@@ -255,7 +255,11 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
             .await
         {
             Some(pair) => Some(pair),
-            None => self.manager.get_state_and_emitter(child_connection_id).await,
+            None => {
+                self.manager
+                    .get_state_and_emitter(child_connection_id)
+                    .await
+            }
         };
         let Some((state_arc, emitter)) = resolved else {
             return;

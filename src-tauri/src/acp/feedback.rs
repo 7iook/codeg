@@ -66,6 +66,22 @@ impl FeedbackItem {
             delivered_at: None,
         }
     }
+
+    /// Build a note that is `Delivered` from birth — the native
+    /// `_session/steering` path, where the adapter has ALREADY consumed the
+    /// content by the time the note is recorded. Never `Pending`: that would
+    /// let `read_pending_feedback` hand the same text to a `check_user_feedback`
+    /// call and double-deliver it (the Pending-only read is the mutual
+    /// exclusion between the push and pull channels).
+    pub fn new_delivered(id: String, text: String, at: DateTime<Utc>) -> Self {
+        Self {
+            id,
+            text,
+            created_at: at,
+            status: FeedbackStatus::Delivered,
+            delivered_at: Some(at),
+        }
+    }
 }
 
 /// Per-note sanity bound for a live-feedback note, in characters. A steering
@@ -143,10 +159,7 @@ pub trait SessionFeedbackAccess: Send + Sync {
     /// per-launch token) WITHOUT marking it delivered. Returns an immediate
     /// snapshot. Read-only: abandoning it (peer-close) leaves state untouched.
     /// Empty when the connection is gone or nothing is pending.
-    async fn read_pending_feedback(
-        &self,
-        parent_connection_id: &str,
-    ) -> Vec<PendingFeedback>;
+    async fn read_pending_feedback(&self, parent_connection_id: &str) -> Vec<PendingFeedback>;
 
     /// Mark the named notes `Delivered` and broadcast the consumption. Called by
     /// the listener ONLY after the tool response was written to the companion.

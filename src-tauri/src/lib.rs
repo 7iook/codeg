@@ -41,6 +41,7 @@ mod terminal;
 pub mod turn_timings;
 pub mod update;
 pub mod web;
+pub mod work_task;
 pub mod workspace_state;
 pub mod workspace_transfer;
 
@@ -59,17 +60,40 @@ mod tauri_app {
     use crate::acp::manager::ConnectionManager;
     use crate::chat_channel::manager::ChatChannelManager;
     use crate::commands::{
-        acp as acp_commands, app_update as app_update_commands, automation as automation_commands,
-        background as background_commands, backup, chat_channel as chat_channel_commands,
-        conversations, custom_skills as custom_skills_commands, delegation as delegation_commands,
-        experts as experts_commands, feedback as feedback_commands, file_io, folder_commands,
-        folders, logging as logging_commands, mcp as mcp_commands,
-        model_provider as model_provider_commands, notification,
-        office_tools as office_tools_commands, pet as pet_commands, project_boot,
-        question as question_commands, quick_messages as quick_messages_commands,
-        remote_proxy as remote_proxy_commands, remote_workspace as remote_workspace_commands,
-        science as science_commands, session_info as session_info_commands, system_settings,
-        terminal as terminal_commands, version_control, windows,
+        acp as acp_commands,
+        app_update as app_update_commands,
+        automation as automation_commands,
+        background as background_commands,
+        backup,
+        chat_channel as chat_channel_commands,
+        conversations,
+        custom_skills as custom_skills_commands,
+        delegation as delegation_commands,
+        experts as experts_commands,
+        feedback as feedback_commands,
+        file_io,
+        folder_commands,
+        folders,
+        logging as logging_commands,
+        mcp as mcp_commands,
+        model_provider as model_provider_commands,
+        notification,
+        office_tools as office_tools_commands,
+        pet as pet_commands,
+        project_boot,
+        question as question_commands,
+        quick_messages as quick_messages_commands,
+        // [merge-v0.23.0] union: keep local extras (remote_workspace, science, session_info,
+        // terminal, version_control, windows) + upstream new work_task_commands.
+        remote_proxy as remote_proxy_commands,
+        remote_workspace as remote_workspace_commands,
+        science as science_commands,
+        session_info as session_info_commands,
+        system_settings,
+        terminal as terminal_commands,
+        version_control,
+        windows,
+        work_task as work_task_commands,
         workspace_state as workspace_state_commands,
     };
     use crate::terminal::manager::TerminalManager;
@@ -593,6 +617,7 @@ mod tauri_app {
                                 }),
                             ),
                         ),
+                        std::sync::Arc::new(crate::work_task::EngineWorkTaskTools),
                     );
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = listener.run(socket_path).await {
@@ -683,6 +708,23 @@ mod tauri_app {
                     effective_data_dir.clone(),
                 ) {
                     tauri::async_runtime::spawn(crate::automation::run_automation_engine(engine));
+                }
+
+                // Work-task engine: drives the todo→…→done pipeline, settles
+                // runs off the event bus, recovers merges from git truth on
+                // boot. One per process; mirrored in `bin/codeg_server.rs`.
+                if let Some(engine) = crate::work_task::build_task_engine(
+                    crate::db::AppDatabase {
+                        conn: app.state::<crate::db::AppDatabase>().conn.clone(),
+                    },
+                    app.state::<ConnectionManager>().clone_ref(),
+                    crate::web::event_bridge::EventEmitter::Tauri(app.handle().clone()),
+                    app.state::<std::sync::Arc<crate::acp::InternalEventBus>>()
+                        .inner()
+                        .clone(),
+                    effective_data_dir.clone(),
+                ) {
+                    tauri::async_runtime::spawn(crate::work_task::run_task_engine(engine));
                 }
 
                 // Single-window workspace: ensure the main window exists.
@@ -1225,6 +1267,33 @@ mod tauri_app {
                 automation_commands::automation_compute_next_run,
                 automation_commands::automation_run_now,
                 automation_commands::automation_cancel_run,
+                work_task_commands::work_task_list,
+                work_task_commands::work_task_get,
+                work_task_commands::work_task_events,
+                work_task_commands::work_task_attention_count,
+                work_task_commands::work_task_create,
+                work_task_commands::work_task_update,
+                work_task_commands::work_task_reorder,
+                work_task_commands::work_task_delete,
+                work_task_commands::work_task_start,
+                work_task_commands::work_task_start_all,
+                work_task_commands::work_task_retry,
+                work_task_commands::work_task_requeue,
+                work_task_commands::work_task_return,
+                work_task_commands::work_task_cancel,
+                work_task_commands::work_task_merge,
+                work_task_commands::work_task_archive,
+                work_task_commands::work_task_cleanup,
+                work_task_commands::work_task_diff,
+                work_task_commands::work_task_changed_files,
+                work_task_commands::work_task_settings_get,
+                work_task_commands::work_task_settings_get_own,
+                work_task_commands::work_task_settings_effective,
+                work_task_commands::work_task_settings_set,
+                work_task_commands::work_task_settings_delete,
+                work_task_commands::work_task_template_list,
+                work_task_commands::work_task_template_save,
+                work_task_commands::work_task_template_delete,
                 terminal_commands::terminal_spawn,
                 terminal_commands::terminal_write,
                 terminal_commands::terminal_resize,

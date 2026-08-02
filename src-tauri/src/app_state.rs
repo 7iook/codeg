@@ -136,10 +136,9 @@ pub fn build_delegation_stack(
     }) as Arc<dyn ConnectionSpawner>;
     let depth_lookup =
         Arc::new(DbDepthLookup { db: db_arc.clone() }) as Arc<dyn ConversationDepthLookup>;
-    let agent_availability = Arc::new(crate::acp::connection::DbAgentAvailabilityLookup {
-        db: db_arc.clone(),
-    })
-        as Arc<dyn crate::acp::connection::AgentAvailabilityLookup>;
+    let agent_availability =
+        Arc::new(crate::acp::connection::DbAgentAvailabilityLookup { db: db_arc.clone() })
+            as Arc<dyn crate::acp::connection::AgentAvailabilityLookup>;
     let status_lookup = Arc::new(DbChildStatusLookup { db: db_arc }) as Arc<dyn ChildStatusLookup>;
     let meta_writer = Arc::new(ConnectionManagerMetaWriter {
         manager: cm_arc.clone(),

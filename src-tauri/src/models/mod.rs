@@ -10,11 +10,12 @@ pub mod pet;
 pub mod quick_message;
 pub mod remote_workspace_connection;
 pub mod system;
+pub mod work_task;
 
 pub use agent::AgentType;
 pub use automation::{
-    AutomationConfig, AutomationDraft, AutomationInfo, AutomationRunInfo, AutomationRunStatus,
-    IsolationMode, TriggerKind,
+    AutomationAction, AutomationConfig, AutomationDraft, AutomationInfo, AutomationRunInfo,
+    AutomationRunStatus, IsolationMode, TriggerKind,
 };
 #[allow(unused_imports)]
 pub use chat_channel::{ChannelStatusInfo, ChatChannelInfo, ChatChannelMessageLogInfo};
@@ -40,4 +41,9 @@ pub use system::{
     AvailableTerminalShells, GitCredentials, GitDetectResult, GitHubAccountsSettings,
     GitHubTokenValidation, GitSettings, SystemLanguageSettings, SystemProxySettings,
     SystemTerminalSettings, TerminalShellOption,
+};
+pub use work_task::{
+    WorkTaskChangedFile, WorkTaskConfig, WorkTaskDraft, WorkTaskEventInfo, WorkTaskFolderSettings,
+    WorkTaskInfo, WorkTaskMergeState, WorkTaskPreflight, WorkTaskStatus, WorkTaskTemplateDraft,
+    WorkTaskTemplateInfo,
 };

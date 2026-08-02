@@ -450,7 +450,9 @@ fn parse_transcript(path: &Path) -> ParsedTranscript {
                 out.content_events += 1;
                 if out.first_user_text.is_none() {
                     out.first_user_text = blocks.iter().find_map(|b| match b {
-                        ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.clone()),
+                        ContentBlock::Text { text } if !text.trim().is_empty() => {
+                            Some(text.clone())
+                        }
                         _ => None,
                     });
                 }
@@ -528,7 +530,10 @@ fn label_of(kind: &str) -> String {
 /// every element yields exactly one block, so an unknown inner `kind` cannot
 /// discard its siblings (R3.6.2).
 fn content_blocks(data: Option<&Value>, out: &mut ParsedTranscript) -> Vec<ContentBlock> {
-    let Some(items) = data.and_then(|d| d.get("content")).and_then(Value::as_array) else {
+    let Some(items) = data
+        .and_then(|d| d.get("content"))
+        .and_then(Value::as_array)
+    else {
         return Vec::new();
     };
     items.iter().map(|item| content_block(item, out)).collect()
