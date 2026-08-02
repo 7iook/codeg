@@ -754,7 +754,7 @@ pub enum ElicitationPlan {
 /// typed answer rides the main field (codex falls back to it).
 ///
 /// Name-based, and deliberately kept alongside the `_meta` marker below:
-/// codex-acp 1.1.8 (the pinned version) still emits ONLY this shape.
+/// codex-acp 1.1.9 (the pinned version) still emits ONLY this shape.
 fn is_other_companion(id: &str) -> bool {
     let Some(pos) = id.rfind("__other") else {
         return false;

@@ -273,7 +273,7 @@ const ACP_ADAPTER_DOCS_URL: &str = "https://docs.codeg.app/guide/supported-agent
 /// `_meta.steering.supported`: an adapter that ignores the opt-in falls back
 /// to `startedNewTurn` on the turn-end race — a detached turn no host request
 /// owns, which codeg's turn-scoped runtime must never trigger. codex-acp
-/// 1.1.8 ships `_session/steering` but not `promptRequired` (verified against
+/// 1.1.9 ships `_session/steering` but not `promptRequired` (verified against
 /// the published tarball), so it stays `None` until a release implements the
 /// opt-in — then this is a one-line flip plus tests.
 ///
@@ -395,7 +395,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // the injected `codeg-mcp` server always survives. 1.1.6 adds
             // steering (#309): `_session/steering` injects a user prompt into
             // the LIVE turn (initialize advertises `_meta.steering.supported`)
-            // — codeg keeps codex on the MCP pull channel because 1.1.8 still
+            // — codeg keeps codex on the MCP pull channel because 1.1.9 still
             // lacks the `promptRequired` idle opt-in
             // (`steering_prompt_required_min_version` → None; flipping it on
             // is a one-liner once a release implements the opt-in AND its
@@ -419,14 +419,18 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // the SAME `session/prompt`. 1.1.8 (#342) also hangs a structured
             // `_meta.permission = {version, changes[]}` on each permission
             // option, whose `changes[].description` codeg surfaces in the
-            // permission card. The 1.1.8 `clientCapabilities.plan` path
-            // (structured `plan_update`s) does NOT apply: sacp 11.0.0's schema
-            // has no such capability, so plans keep arriving as
-            // `agent_message_chunk`s. 1.1.8 still declares no `engines.node`, so
-            // the 20.0.0 floor is retained.
+            // permission card. The `clientCapabilities.plan` path (structured
+            // `plan_update`s) does NOT apply: sacp 11.0.0's schema has neither
+            // the capability nor the session-update variant, so plans keep
+            // arriving as `agent_message_chunk`s. That also makes 1.1.9 (#354,
+            // which coalesces streamed plan snapshots to one `plan_update`
+            // every 150ms and flushes them at item/turn/permission boundaries)
+            // inert here — it only runs behind that capability, and its
+            // dependency set is byte-identical to 1.1.8's. 1.1.9 still declares
+            // no `engines.node`, so the 20.0.0 floor is retained.
             distribution: AgentDistribution::Npx {
-                version: "1.1.8",
-                package: "@agentclientprotocol/codex-acp@1.1.8",
+                version: "1.1.9",
+                package: "@agentclientprotocol/codex-acp@1.1.9",
                 cmd: "codex-acp",
                 args: &[],
                 env: &[],
@@ -882,8 +886,8 @@ mod tests {
         );
         assert_npx_version(
             AgentType::Codex,
-            "1.1.8",
-            "@agentclientprotocol/codex-acp@1.1.8",
+            "1.1.9",
+            "@agentclientprotocol/codex-acp@1.1.9",
             Some("20.0.0"),
         );
         assert_npx_version(AgentType::Pi, "0.0.32", "pi-acp@0.0.32", Some("22.0.0"));

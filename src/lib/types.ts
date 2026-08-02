@@ -2949,7 +2949,7 @@ export interface CheckItem {
  * owns the version card's copy.
  */
 export interface AdapterInfo {
-  /** npm spec codeg installs, e.g. "@agentclientprotocol/codex-acp@1.1.7". */
+  /** npm spec codeg installs, e.g. "@agentclientprotocol/codex-acp@1.1.9". */
   adapter_package: string
   /** Command the launch gate resolves, e.g. "codex-acp". */
   adapter_cmd: string
