@@ -46,6 +46,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::models::agent::AgentType;
+
 /// Type-safe per-call CLI launch option.
 ///
 /// v1 only carries the Kiro persona nomination. Future CLIs get a NEW
@@ -304,6 +306,193 @@ pub fn resolve_preamble_at(_name: &str, _root: &Path) -> Result<String, PersonaE
     todo!("resolve_preamble_at lands in stage 3 (persona.rs safety impl)") // gate:allow-stub stage-1 signature-only landing; stage 3 lands the body
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Stage-2 · Provider capability dispatch
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// broker.rs consumes `provider_for(agent_type)` (stage 4) and never matches
+// on `AgentType` variants itself. Adding a fourth persona-supporting CLI is
+// a single new unit-struct + a match arm below; broker stays untouched.
+//
+// Rust does NOT allow `impl Trait for AgentType::Kiro` (variants are values,
+// not types), so each family gets a zero-sized unit-struct bridge. These
+// structs are static singletons — they hold no state and are handed out as
+// `&'static dyn PersonaCapability` from `provider_for`.
+//
+// **Stage-3 stub disclaimer**: `ClaudeCodeProvider` and `CodexProvider` do
+// NOT call [`resolve_preamble_at`] yet — it is a stage-1 stub through
+// stage 2 and hitting it would panic every broker unit test. They return
+// [`PersonaEffect::Failed`] with `wire_code = "invalid_persona"` and a
+// stage-3 marker in `reason`, so the broker's Err-path plumbing is already
+// exercised end-to-end. Stage 3 replaces the stub body with a call to
+// `resolve_preamble_at(name, &<root>)`.
+
+/// Unit-struct bridge that hangs [`PersonaCapability`] off the `Kiro`
+/// [`AgentType`] variant. Zero-sized; a single static reference is handed
+/// out via [`provider_for`].
+// gate:allow-unwired stage-4 broker.rs wires this via provider_for
+#[allow(dead_code)]
+pub struct KiroProvider;
+
+impl PersonaCapability for KiroProvider {
+    fn supports_persona(&self) -> bool {
+        true
+    }
+
+    fn resolve_persona_effect(&self, name: &str, _home_dir: &Path) -> PersonaEffect {
+        // Grammar gate — defence-in-depth. Broker also pre-checks, but a
+        // Provider caller that skips it must still get a typed Failed back
+        // rather than a panic in the downstream spawner.
+        if !is_valid_persona_name(name) {
+            return PersonaEffect::Failed {
+                wire_code: "invalid_persona",
+                reason: format!("persona name '{name}' violates grammar"),
+            };
+        }
+        // Kiro is the only tier with a REAL launch-option: kiro-cli reloads
+        // <KIRO_HOME>/agents/<name>.json at spawn (permissions / tools /
+        // prompt all take effect). `home_dir` is ignored — the KIRO_HOME
+        // resolution happens inside kiro-cli itself, not on this side.
+        PersonaEffect::Native {
+            launch_option: LaunchOption::KiroPersona(name.to_string()),
+        }
+    }
+}
+
+/// Claude Code persona provider. **Stage-2 stub**: hits stage-3 not-yet-
+/// implemented resolver, so returns `Failed{invalid_persona}` with a
+/// stage-3 marker. Stage 3 swaps this for a real
+/// [`resolve_preamble_at`] call rooted at
+/// `crate::parsers::claude::resolve_claude_config_dir().join("agents")`.
+// gate:allow-unwired stage-4 broker.rs wires this via provider_for
+#[allow(dead_code)]
+pub struct ClaudeCodeProvider;
+
+impl PersonaCapability for ClaudeCodeProvider {
+    fn supports_persona(&self) -> bool {
+        true
+    }
+
+    fn resolve_persona_effect(&self, name: &str, _home_dir: &Path) -> PersonaEffect {
+        if !is_valid_persona_name(name) {
+            return PersonaEffect::Failed {
+                wire_code: "invalid_persona",
+                reason: format!("persona name '{name}' violates grammar"),
+            };
+        }
+        // TODO(stage-3): replace with:
+        //   let root = crate::parsers::claude::resolve_claude_config_dir().join("agents");
+        //   match resolve_preamble_at(name, &root) {
+        //       Ok(body)  => PersonaEffect::Hint { preamble: body },
+        //       Err(e)    => PersonaEffect::Failed { wire_code: "invalid_persona", reason: e.to_string() },
+        //   }
+        // For now emit a typed Failed so the broker Err path is wired without
+        // panicking on the stage-1 stub inside resolve_preamble_at.
+        PersonaEffect::Failed {
+            wire_code: "invalid_persona",
+            reason: "persona resolver not yet implemented (stage 3)".to_string(),
+        }
+    }
+}
+
+/// Codex persona provider. **Stage-2 stub** — same shape as
+/// [`ClaudeCodeProvider`]. Stage 3 roots at
+/// `crate::parsers::codex::resolve_codex_home_dir().join("agents")`.
+// gate:allow-unwired stage-4 broker.rs wires this via provider_for
+#[allow(dead_code)]
+pub struct CodexProvider;
+
+impl PersonaCapability for CodexProvider {
+    fn supports_persona(&self) -> bool {
+        true
+    }
+
+    fn resolve_persona_effect(&self, name: &str, _home_dir: &Path) -> PersonaEffect {
+        if !is_valid_persona_name(name) {
+            return PersonaEffect::Failed {
+                wire_code: "invalid_persona",
+                reason: format!("persona name '{name}' violates grammar"),
+            };
+        }
+        // TODO(stage-3): replace with resolve_preamble_at rooted at
+        // resolve_codex_home_dir().join("agents"). See ClaudeCodeProvider
+        // comment for the shape.
+        PersonaEffect::Failed {
+            wire_code: "invalid_persona",
+            reason: "persona resolver not yet implemented (stage 3)".to_string(),
+        }
+    }
+}
+
+/// Catch-all provider for CLIs with no persona concept (Gemini, OpenCode,
+/// OpenClaw, Cline, Hermes, CodeBuddy, KimiCode, Pi, Grok, Cursor, and any
+/// user-registered `AgentType::Custom(...)`).
+///
+/// `supports_persona() == false` short-circuits the broker BEFORE any name
+/// grammar check or HOME lookup (R3 F1). `resolve_persona_effect` is
+/// defensive: if a caller ignores `supports_persona()` and calls anyway,
+/// it must still get [`PersonaEffect::Ignored`] rather than a panic.
+// gate:allow-unwired stage-4 broker.rs wires this via provider_for
+#[allow(dead_code)]
+pub struct UnsupportedProvider;
+
+impl PersonaCapability for UnsupportedProvider {
+    fn supports_persona(&self) -> bool {
+        false
+    }
+
+    fn resolve_persona_effect(&self, _name: &str, _home_dir: &Path) -> PersonaEffect {
+        PersonaEffect::Ignored
+    }
+}
+
+// Static singletons — every provider is zero-sized, so `&'static Self` is
+// free and lets `provider_for` return a `&'static dyn PersonaCapability`.
+static KIRO_PROVIDER: KiroProvider = KiroProvider;
+static CLAUDE_CODE_PROVIDER: ClaudeCodeProvider = ClaudeCodeProvider;
+static CODEX_PROVIDER: CodexProvider = CodexProvider;
+static UNSUPPORTED_PROVIDER: UnsupportedProvider = UnsupportedProvider;
+
+/// Dispatch an [`AgentType`] to its [`PersonaCapability`] provider.
+///
+/// # Broker call order (R3 F1, must be followed)
+///
+/// 1. `let provider = provider_for(agent_type);`
+/// 2. `if !provider.supports_persona() { /* Ignored — no name check, no HOME */ }`
+/// 3. `if !is_valid_persona_name(name) { /* InvalidPersona */ }`
+/// 4. `provider.resolve_persona_effect(name, &home_dir)`
+///
+/// # Adding a new supported CLI
+///
+/// 1. Add a `<Name>Provider` unit struct + `impl PersonaCapability`.
+/// 2. Add a `static <NAME>_PROVIDER: <Name>Provider = ...;`.
+/// 3. Add a `match` arm below.
+/// broker.rs does NOT change.
+// gate:allow-unwired stage-4 broker.rs wires this
+#[allow(dead_code)]
+pub fn provider_for(agent_type: AgentType) -> &'static dyn PersonaCapability {
+    match agent_type {
+        AgentType::Kiro => &KIRO_PROVIDER,
+        AgentType::ClaudeCode => &CLAUDE_CODE_PROVIDER,
+        AgentType::Codex => &CODEX_PROVIDER,
+        // Every other built-in CLI + `Custom(...)` user-registered agents
+        // fall to the unsupported path. Adding a new supported family
+        // means adding a new provider unit-struct and a match arm here,
+        // NOT touching broker.rs.
+        AgentType::OpenCode
+        | AgentType::Gemini
+        | AgentType::OpenClaw
+        | AgentType::Cline
+        | AgentType::Hermes
+        | AgentType::CodeBuddy
+        | AgentType::KimiCode
+        | AgentType::Pi
+        | AgentType::Grok
+        | AgentType::Cursor
+        | AgentType::Custom(_) => &UNSUPPORTED_PROVIDER,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +604,168 @@ mod tests {
         // Guards the stage boundary: any code that accidentally starts
         // calling the resolver in stage 1 / 2 must fail loudly.
         let _ = resolve_preamble_at("plan-reality-recon", &PathBuf::from("/tmp"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Stage-2 · Provider capability dispatch tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Small helper — the provider signature demands a `&Path`, but Kiro
+    /// ignores it and the stage-2 stubs for Claude/Codex don't touch disk
+    /// either. Any path literal works.
+    fn dummy_home() -> PathBuf {
+        PathBuf::from("/nonexistent-home-for-stage-2-tests")
+    }
+
+    #[test]
+    fn provider_for_kiro_returns_native_kiro_persona() {
+        let provider = provider_for(AgentType::Kiro);
+        assert!(provider.supports_persona(), "Kiro must support persona");
+        let effect = provider.resolve_persona_effect("plan-reality-recon", &dummy_home());
+        match effect {
+            PersonaEffect::Native {
+                launch_option: LaunchOption::KiroPersona(name),
+            } => assert_eq!(name, "plan-reality-recon"),
+            other => panic!("expected Native{{KiroPersona}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_for_claude_code_returns_stage3_stub_failed() {
+        let provider = provider_for(AgentType::ClaudeCode);
+        assert!(
+            provider.supports_persona(),
+            "ClaudeCode must support persona"
+        );
+        let effect = provider.resolve_persona_effect("code-reviewer", &dummy_home());
+        match effect {
+            PersonaEffect::Failed { wire_code, reason } => {
+                assert_eq!(wire_code, "invalid_persona");
+                // Stage-3 marker is load-bearing: stage 3 will replace this
+                // with real resolver output; if this assertion drifts,
+                // whoever changed the reason string is doing stage 3 work
+                // and should switch to `PersonaEffect::Hint`.
+                assert!(
+                    reason.contains("stage 3"),
+                    "expected stage-3 stub marker, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed{{invalid_persona, stage 3}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_for_codex_returns_stage3_stub_failed() {
+        let provider = provider_for(AgentType::Codex);
+        assert!(provider.supports_persona(), "Codex must support persona");
+        let effect = provider.resolve_persona_effect("critic", &dummy_home());
+        match effect {
+            PersonaEffect::Failed { wire_code, reason } => {
+                assert_eq!(wire_code, "invalid_persona");
+                assert!(
+                    reason.contains("stage 3"),
+                    "expected stage-3 stub marker, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed{{invalid_persona, stage 3}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_for_gemini_is_unsupported_and_returns_ignored() {
+        // Spot-check for the whole unsupported catch-all family.
+        let provider = provider_for(AgentType::Gemini);
+        assert!(
+            !provider.supports_persona(),
+            "Gemini must NOT support persona (R3 F1 short-circuit)"
+        );
+        let effect = provider.resolve_persona_effect("any-name", &dummy_home());
+        assert_eq!(effect, PersonaEffect::Ignored);
+    }
+
+    #[test]
+    fn provider_for_all_unsupported_variants_agree() {
+        // Guard against half-listed match arm drift: every non-supported
+        // built-in must resolve to the same UnsupportedProvider behaviour.
+        let unsupported = [
+            AgentType::OpenCode,
+            AgentType::Gemini,
+            AgentType::OpenClaw,
+            AgentType::Cline,
+            AgentType::Hermes,
+            AgentType::CodeBuddy,
+            AgentType::KimiCode,
+            AgentType::Pi,
+            AgentType::Grok,
+            AgentType::Cursor,
+        ];
+        for agent in unsupported {
+            let provider = provider_for(agent);
+            assert!(
+                !provider.supports_persona(),
+                "{agent:?} unexpectedly claims persona support"
+            );
+            assert_eq!(
+                provider.resolve_persona_effect("x", &dummy_home()),
+                PersonaEffect::Ignored,
+                "{agent:?} did not produce Ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_for_custom_agent_is_unsupported() {
+        // Custom(...) user-registered agents ride the unsupported path;
+        // hard-code an interned slug so we don't need the acp custom_registry.
+        let custom = AgentType::custom("goose").expect("valid custom slug");
+        let provider = provider_for(custom);
+        assert!(!provider.supports_persona());
+        assert_eq!(
+            provider.resolve_persona_effect("anything", &dummy_home()),
+            PersonaEffect::Ignored
+        );
+    }
+
+    #[test]
+    fn kiro_provider_rejects_invalid_name_defensively() {
+        // Broker also pre-checks, but the trait method must still guard
+        // itself. Invalid name never turns into a Native{KiroPersona}
+        // that the downstream spawner would happily hand to kiro-cli argv.
+        let provider = provider_for(AgentType::Kiro);
+        for bad in ["", "foo.bar", "path/traversal", &"a".repeat(65)] {
+            match provider.resolve_persona_effect(bad, &dummy_home()) {
+                PersonaEffect::Failed { wire_code, reason } => {
+                    assert_eq!(wire_code, "invalid_persona");
+                    assert!(
+                        reason.contains("grammar"),
+                        "expected grammar reason for {bad:?}, got: {reason}"
+                    );
+                }
+                other => panic!("Kiro accepted invalid name {bad:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn claude_and_codex_providers_reject_invalid_name_before_stage3_stub() {
+        // Invalid name must short-circuit BEFORE the stage-3 stub marker,
+        // so the reason string names the grammar problem — not the stub.
+        for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+            let provider = provider_for(agent);
+            match provider.resolve_persona_effect("foo.bar", &dummy_home()) {
+                PersonaEffect::Failed { wire_code, reason } => {
+                    assert_eq!(wire_code, "invalid_persona");
+                    assert!(
+                        reason.contains("grammar"),
+                        "{agent:?}: expected grammar reason, got: {reason}"
+                    );
+                    assert!(
+                        !reason.contains("stage 3"),
+                        "{agent:?}: grammar check must precede stage-3 stub, got: {reason}"
+                    );
+                }
+                other => panic!("{agent:?} accepted invalid name: {other:?}"),
+            }
+        }
     }
 }

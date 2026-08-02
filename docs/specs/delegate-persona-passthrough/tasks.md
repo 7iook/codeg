@@ -99,17 +99,68 @@
 
 ### 阶段 2 · Provider capability 三家 impl
 
-- [ ] 2. Provider capability 实现(R2 A2 采纳:broker 不识别 CLI)
-  - [ ] 2.1 在 `registry.rs` 或 `AcpAgentMeta` 上加 `impl PersonaCapability for AgentType::Kiro`,`supports_persona() = true`,`resolve_persona_effect(name, _) = PersonaEffect::Native { launch_option: LaunchOption::KiroPersona(name.to_string()) }`(Kiro 不需 home_dir)
+- [x] 2. Provider capability 实现(R2 A2 采纳:broker 不识别 CLI)
+
+  **Evidence**
+  - `commit pending`
+  - `verify: cargo check --features test-utils --message-format=short → EXIT=0; cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
+  - `files: src-tauri/src/acp/delegation/persona.rs (+349 行 · KiroProvider / ClaudeCodeProvider / CodexProvider / UnsupportedProvider unit-struct + PersonaCapability impls + provider_for match dispatch + 8 unit tests)`
+  - `AC: 2.1 Kiro→Native{KiroPersona} · 2.2/2.3 Claude/Codex→Failed{invalid_persona, stage-3 stub 桩} · 2.4 其它 AgentType(含 Custom)→Ignored · 2.5 8 条 unit tests 覆盖(见下)`
+
+  - [x] 2.1 Kiro provider — `KiroProvider` unit struct + `impl PersonaCapability`:`supports_persona()=true` · `resolve_persona_effect(name, _)` 名称校后返 `PersonaEffect::Native{launch_option: LaunchOption::KiroPersona(name)}` · home_dir 不需(KIRO_HOME 由 kiro-cli 侧解)
     - _Requirements: 2.1, 2.5_
-  - [ ] 2.2 `impl PersonaCapability for AgentType::ClaudeCode`,`supports_persona() = true`,`resolve_persona_effect(name, home) = { let p = home.join(".claude/agents"); persona::resolve_preamble_at(name, &p).map_or_else(err_to_failed, |body| PersonaEffect::Hint{preamble: body}) }`
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils / --no-default-features → EXIT=0`
+    - `files: persona.rs KiroProvider (定义) · provider_for::AgentType::Kiro (分派)`
+    - `AC: 2.1 Native{KiroPersona} 分支返回 · 名称非法防御 Failed{invalid_persona}`
+
+  - [x] 2.2 ClaudeCode provider — `ClaudeCodeProvider` unit struct + `impl PersonaCapability`:`supports_persona()=true` · `resolve_persona_effect(name, _)` 名称校后**返 stage-3 stub `PersonaEffect::Failed{wire_code:"invalid_persona", reason:"persona resolver not yet implemented (stage 3)"}`**;`TODO(stage-3)` inline comment 记录将替换为 `resolve_preamble_at(name, &resolve_claude_config_dir().join("agents"))`
+    - **偏离说明**:未走 spec 建议的 `home.join(".claude/agents")`(dirs::home_dir() 不认 `CLAUDE_CONFIG_DIR` env),按 design §5 §8 应复用 `crate::parsers::claude::resolve_claude_config_dir()`,stage 3 兑现;stage 2 桩状态下不解 HOME 也不读文件,不影响 broker Err 通路联调
     - _Requirements: 3.1, 3.2, 3.3_
-  - [ ] 2.3 `impl PersonaCapability for AgentType::Codex`,同 2.2 但路径 `.codex/agents`
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check → EXIT=0`
+    - `files: persona.rs ClaudeCodeProvider (定义) · provider_for::AgentType::ClaudeCode (分派)`
+    - `AC: 2.2 stub 返 Failed{invalid_persona, stage-3 marker} 让 broker Err 路径可联调不 panic`
+
+  - [x] 2.3 Codex provider — `CodexProvider` 同 2.2,`TODO(stage-3)` 指向 `resolve_codex_home_dir().join("agents")`
     - _Requirements: 3.1, 3.2, 3.3_
-  - [ ] 2.4 default impl / other AgentType variant → `supports_persona() = false`,`resolve_persona_effect(_, _) = PersonaEffect::Ignored`(default trait 方法或 catch-all)
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check → EXIT=0`
+    - `files: persona.rs CodexProvider (定义) · provider_for::AgentType::Codex (分派)`
+    - `AC: 2.3 同 2.2 shape`
+
+  - [x] 2.4 default catch-all — `UnsupportedProvider` unit struct:`supports_persona()=false` · `resolve_persona_effect(_,_)=PersonaEffect::Ignored` · match 列尽所有非支持 built-in(OpenCode/Gemini/OpenClaw/Cline/Hermes/CodeBuddy/KimiCode/Pi/Grok/Cursor)+ `Custom(_)` · 未来加 AgentType 变体会因 non-exhaustive match 编译失败,强制作者显式路由(fail-safe 而非 wildcard)
     - _Requirements: 4.1, 4.2_
-  - [ ]* 2.5 Provider unit tests:每家 provider 用 tmp home_dir + fixture persona 文件断言返回 Native/Hint/Ignored/Failed 各分支
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check → EXIT=0`
+    - `files: persona.rs UnsupportedProvider (定义) · provider_for::match 所有 unsupported variants + Custom(_) (分派)`
+    - `AC: 4.1 supports_persona=false · 4.2 resolve_persona_effect=Ignored · 未列举变体会编译失败(non-exhaustive 保护)`
+
+  - [x]* 2.5 Provider unit tests(8 条 · 见 `#[cfg(test)] mod tests` §Stage-2 段):
+    - `provider_for_kiro_returns_native_kiro_persona` — Kiro name → Native{KiroPersona}
+    - `provider_for_claude_code_returns_stage3_stub_failed` — Claude name → Failed{invalid_persona, stage-3 marker}
+    - `provider_for_codex_returns_stage3_stub_failed` — Codex name → Failed{invalid_persona, stage-3 marker}
+    - `provider_for_gemini_is_unsupported_and_returns_ignored` — Gemini name → Ignored
+    - `provider_for_all_unsupported_variants_agree` — 10 个非支持 built-in 全体一致返 Ignored + supports=false(guard against half-listed match arm drift)
+    - `provider_for_custom_agent_is_unsupported` — `AgentType::custom("goose")` → Ignored
+    - `kiro_provider_rejects_invalid_name_defensively` — 空 / `foo.bar` / `path/traversal` / 65 字符 → Failed{invalid_persona, grammar reason}
+    - `claude_and_codex_providers_reject_invalid_name_before_stage3_stub` — 非法名走 grammar 分支而非 stage-3 stub 分支(顺序 invariant)
     - _Requirements: 2.1, 3.2, 4.1_
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils → EXIT=0`(test 代码类型正确,tests 静态编译通过);**整体 `cargo test` 因 stage 1 update log 已声明的遗留 test-tree 债无法跑到(broker.rs/listener.rs/manager.rs test-tree 里的 DelegationSuccess/DelegationRequest struct literal 缺 stage-1 引入的 applied_persona/subagent_type 字段 · 硬约束禁触这三处 · stage 4/5 补齐后可整体跑)**
+    - `files: persona.rs #[cfg(test)] mod tests §Stage-2 段 (+8 tests)`
+    - `AC: 8 provider tests 静态通过 typecheck · 覆盖 Kiro/Claude/Codex/Unsupported/Custom + grammar 顺序 invariant`
+
 
 ### 阶段 3 · persona.rs 安全实现 + 全量 unit test
 
@@ -289,3 +340,4 @@
 
 - 2026-08-03 · tasks.md 落盘 · charter Mode 1 三件套齐 · 待用户批准 tasks.md 后 executor 进 TDD red→green 循环
 - 2026-08-03 · executor(claude-opus) · stage 1 complete · commit `393e8983` · types base(LaunchOption / AppliedPersona / PersonaEffect / PersonaError / PersonaCapability / DelegationRequest.subagent_type / DelegationSuccess.applied_persona / DelegationTaskReport.applied_persona / DelegationError::InvalidPersona / tool_schema.json subagent_type + `<<PERSONA_LISTS>>` 占位符)· cargo check 双模式 EXIT=0 · `resolve_preamble_at` body=`todo!()` 由 stage 3 兑现 · `#[cfg(test)]` 内 5 条 unit tests · 下游 16 处 struct literal 补 `None` 兜底 · cargo test 完整跑要等 stage 4/5 补 broker/manager tests 里的 mock literals(pre-existing manager.rs Steer variant drift 也归 stage 4/5 修)
+- 2026-08-03 · executor(claude-opus 4.7 1M) · stage 2 complete · commit `pending` · provider capability 分派层(KiroProvider / ClaudeCodeProvider / CodexProvider / UnsupportedProvider unit-struct + `impl PersonaCapability` + `provider_for(agent_type)->&'static dyn PersonaCapability` match 分派)· Kiro=Native{KiroPersona} · Claude/Codex=stage-3 stub Failed{invalid_persona} 让 broker Err 路径可联调不 panic · 其它 built-in + `Custom(_)`=Ignored · non-exhaustive match 强制新增 AgentType 时作者显式路由(fail-safe) · +8 unit tests(2.5 optional) 覆盖三家 + 10 个 unsupported built-in + Custom + grammar 顺序 invariant · cargo check 双模式 EXIT=0 · 分派形式选 trait-object(spec design §Components §6 骨架伪代码即 `provider.supports_persona()` / `.resolve_persona_effect(...)`)不选 flat fn(stage-1 已定义的 PersonaCapability trait 需被本 stage 兑现,否则沦为死符号)· 硬约束合规:未触碰 broker.rs/listener.rs/manager.rs · 未引入 resolve_preamble_at 实际 body · spawn 签名未改 · Claude/Codex 走 stage-3 桩偏离 spec 建议 `home.join(".claude/agents")`(design §5 §8 应复用 `resolve_claude_config_dir()` 认 CLAUDE_CONFIG_DIR env,stage 3 兑现);stage 2 桩状态不解 HOME 不读文件,不影响 broker 联调
