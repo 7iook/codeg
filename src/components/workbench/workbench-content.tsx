@@ -5,7 +5,10 @@ import {
   useWorkbenchRoute,
   type WorkbenchRouteId,
 } from "@/contexts/workbench-route-context"
-import { AutomationsPage } from "@/components/automations/automations-page"
+import {
+  AutomationsPage,
+  AutomationsPageTitle,
+} from "@/components/automations/automations-page"
 import { TasksPage, TasksPageTitle } from "@/components/tasks/tasks-page"
 
 /**
@@ -24,6 +27,7 @@ const WORKBENCH_ROUTES: Partial<Record<WorkbenchRouteId, ComponentType>> = {
  *  (the h-10 band the fixed corner overlays sit on) — e.g. the page title. */
 const WORKBENCH_ROUTE_STRIPS: Partial<Record<WorkbenchRouteId, ComponentType>> =
   {
+    automations: AutomationsPageTitle,
     tasks: TasksPageTitle,
   }
 
