@@ -11,6 +11,8 @@ import {
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import {
+  Archive,
+  ArchiveRestore,
   Ban,
   Bot,
   CircleAlert,
@@ -28,11 +30,11 @@ import {
   Pencil,
   Play,
   RotateCw,
-  ScrollText,
   Trash2,
   Undo2,
 } from "lucide-react"
 import {
+  workTaskArchive,
   workTaskCancel,
   getFolderConversation,
   workTaskChangedFiles,
@@ -50,7 +52,6 @@ import { formatTokenCount } from "@/lib/token-format"
 import { onTransportReconnect, subscribe } from "@/lib/platform"
 import { UnifiedDiffPreview } from "@/components/diff/unified-diff-preview"
 import { StatusChip, statusLabelKey } from "./task-card"
-import { TaskTranscriptDialog } from "./task-transcript-dialog"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -80,12 +81,7 @@ import {
 } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
-import type {
-  AgentType,
-  WorkTask,
-  WorkTaskChangedFile,
-  WorkTaskEvent,
-} from "@/lib/types"
+import type { WorkTask, WorkTaskChangedFile, WorkTaskEvent } from "@/lib/types"
 
 const WORK_TASK_CHANGED_EVENT = "task://changed"
 
@@ -95,21 +91,33 @@ interface TaskDetailSheetProps {
   /** The live task row (already refreshed by the board's provider). */
   task: WorkTask | null
   folderName: string | null
-  onOpenConversation: (task: WorkTask) => void
+  /** Opens the page-owned read-only live session viewer. */
+  onViewSession: (task: WorkTask) => void
   onMerge: (task: WorkTask) => void
   onEdit: (task: WorkTask) => void
 }
 
+/** One button of the sheet's action zone (see below). */
+interface ZoneAction {
+  icon: typeof Play
+  label: string
+  onClick: () => void
+  /** The status's single primary — filled; everything else outlined. */
+  filled?: boolean
+}
+
 /**
- * Right-side detail drawer: metadata, the acceptance panel (diff + merge /
- * return / abandon), and the append-only progress timeline (`work_task_event`).
+ * Right-side detail drawer: metadata, the action zone (the status's primary
+ * actions — the review acceptance panel takes its slot while reviewing), and
+ * the append-only progress timeline (`work_task_event`). The bottom bar keeps
+ * utilities only (cleanup recovery + delete).
  */
 export function TaskDetailSheet({
   open,
   onOpenChange,
   task,
   folderName,
-  onOpenConversation,
+  onViewSession,
   onMerge,
   onEdit,
 }: TaskDetailSheetProps) {
@@ -132,21 +140,15 @@ export function TaskDetailSheet({
   // transcript on open and re-read when the task settles (status flip), not on
   // every progress nudge (the parse is the expensive part).
   const [tokenTotal, setTokenTotal] = useState<number | null>(null)
-  // The conversation's actual agent — feeds the transcript viewer's renderer
-  // (a task without a per-task override has no agent on its own row).
-  const [convAgentType, setConvAgentType] = useState<AgentType | null>(null)
-  const [transcriptOpen, setTranscriptOpen] = useState(false)
   useEffect(() => {
     if (!open || conversationId == null) {
       setTokenTotal(null)
-      setConvAgentType(null)
       return
     }
     let cancelled = false
     getFolderConversation(conversationId)
       .then((detail) => {
         if (cancelled) return
-        setConvAgentType(detail.summary.agent_type ?? null)
         const stats = detail.session_stats
         const usage = stats?.total_usage ?? null
         const total =
@@ -234,6 +236,70 @@ export function TaskDetailSheet({
 
   // The user-authored brief, as typed (the agent receives the block form).
   const promptText = task.config?.display_text?.trim() || null
+  const archived = task.archived_at != null
+
+  const canEdit = task.status === "todo" || task.status === "failed"
+
+  // Action zone (non-review statuses; review renders the acceptance panel in
+  // the same slot): the board card's one filled primary plus archive, the
+  // only other action that advances the task's state. "查看会话" and "编辑"
+  // don't advance anything, so they sit in the bottom bar instead.
+  const zoneActions: ZoneAction[] = []
+  if (task.status !== "review") {
+    const archive = (label: string, filled?: boolean): ZoneAction => ({
+      icon: archived ? ArchiveRestore : Archive,
+      label,
+      filled,
+      onClick: () => run(() => workTaskArchive(task.id, !archived)),
+    })
+    if (archived) {
+      zoneActions.push(archive(t("actionUnarchive"), true))
+    } else {
+      switch (task.status) {
+        case "todo":
+          zoneActions.push({
+            icon: Play,
+            label: t("actionStart"),
+            filled: true,
+            onClick: () => run(() => workTaskStart(task.id)),
+          })
+          break
+        case "queued":
+        case "running":
+        case "awaiting_input":
+          zoneActions.push({
+            icon: Ban,
+            label: t("actionCancel"),
+            filled: true,
+            onClick: () => run(() => workTaskCancel(task.id)),
+          })
+          break
+        case "merging":
+          break
+        case "failed":
+          zoneActions.push({
+            icon: RotateCw,
+            label: t("actionRetry"),
+            filled: true,
+            onClick: () => run(() => workTaskRetry(task.id)),
+          })
+          zoneActions.push(archive(t("actionArchive")))
+          break
+        case "done":
+          zoneActions.push(archive(t("actionArchive"), true))
+          break
+        case "canceled":
+          zoneActions.push({
+            icon: RotateCw,
+            label: t("actionRequeue"),
+            filled: true,
+            onClick: () => run(() => workTaskRequeue(task.id)),
+          })
+          zoneActions.push(archive(t("actionArchive")))
+          break
+      }
+    }
+  }
 
   const submitReturn = () =>
     run(async () => {
@@ -442,6 +508,32 @@ export function TaskDetailSheet({
                 </section>
               ) : null}
 
+              {/* Action zone — below the result, above the details, same
+                  slot the acceptance panel occupies while reviewing. */}
+              {zoneActions.length > 0 ? (
+                <section className="flex flex-col gap-2.5 rounded-xl border border-border p-3">
+                  <h3 className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground">
+                    {t("detailActions")}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {zoneActions.map((action) => (
+                      <Button
+                        key={action.label}
+                        type="button"
+                        size="sm"
+                        variant={action.filled ? "default" : "outline"}
+                        className="gap-1.5"
+                        disabled={busy}
+                        onClick={action.onClick}
+                      >
+                        <action.icon className="size-3.5" aria-hidden="true" />
+                        {action.label}
+                      </Button>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
               {/* Key-value facts: git coordinates, change size, lifecycle. */}
               <section className="flex flex-col gap-1.5">
                 <h3 className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground">
@@ -586,101 +678,54 @@ export function TaskDetailSheet({
             </div>
           </ScrollArea>
 
-          {/* Footer: status-specific secondary actions. */}
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border px-5 py-3">
-            {task.status === "todo" ? (
-              <FooterAction
-                icon={Play}
-                label={t("actionStart")}
-                busy={busy}
-                emphasized
-                onClick={() => run(() => workTaskStart(task.id))}
-              />
-            ) : null}
-            {task.status === "failed" ? (
-              <FooterAction
-                icon={RotateCw}
-                label={t("actionRetry")}
-                busy={busy}
-                emphasized
-                onClick={() => run(() => workTaskRetry(task.id))}
-              />
-            ) : null}
-            {task.status === "todo" || task.status === "failed" ? (
-              <FooterAction
-                icon={Pencil}
-                label={t("actionEdit")}
-                busy={busy}
-                onClick={() => onEdit(task)}
-              />
-            ) : null}
-            {task.status === "canceled" ? (
-              <FooterAction
-                icon={RotateCw}
-                label={t("actionRequeue")}
-                busy={busy}
-                emphasized
-                onClick={() => run(() => workTaskRequeue(task.id))}
-              />
-            ) : null}
-            {["queued", "running", "awaiting_input"].includes(task.status) ? (
-              <FooterAction
-                icon={Ban}
-                label={t("actionCancel")}
-                busy={busy}
-                onClick={() => run(() => workTaskCancel(task.id))}
-              />
-            ) : null}
-            {task.conversation_id != null ? (
-              <FooterAction
-                icon={ScrollText}
-                label={t("actionTranscript")}
-                busy={false}
-                onClick={() => setTranscriptOpen(true)}
-              />
-            ) : null}
-            {task.conversation_id != null ? (
-              <FooterAction
-                icon={MessageSquareText}
-                label={t("actionOpenConversation")}
-                busy={false}
-                onClick={() => onOpenConversation(task)}
-              />
-            ) : null}
-            {hasWorktree &&
-            ["done", "canceled", "failed", "review"].includes(task.status) ? (
-              <FooterAction
-                icon={FolderX}
-                label={
-                  task.cleanup_state === "failed"
-                    ? t("actionRetryCleanup")
-                    : t("actionCleanup")
-                }
-                busy={busy}
-                onClick={() => run(() => workTaskCleanup(task.id))}
-              />
-            ) : null}
-            <div className="flex-1" />
-            {task.status !== "merging" ? (
-              <FooterAction
-                icon={Trash2}
-                label={t("actionDelete")}
-                busy={busy}
-                destructive
-                onClick={() => setDeleteOpen(true)}
-              />
-            ) : null}
-          </div>
+          {/* Footer: everything that does NOT advance the task's state — the
+              status's own actions live in the action zone / acceptance panel
+              above. Left: session viewer, edit (while editable), cleanup
+              retry; right: destructive delete (`merging` cannot be deleted).
+              Deleting offers the worktree checkbox in its confirm dialog, so
+              that is the only worktree affordance kept here. */}
+          {task.conversation_id != null ||
+          canEdit ||
+          task.status !== "merging" ? (
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border px-5 py-3">
+              {task.conversation_id != null ? (
+                <FooterAction
+                  icon={MessageSquareText}
+                  label={t("actionViewSession")}
+                  busy={false}
+                  onClick={() => onViewSession(task)}
+                />
+              ) : null}
+              {canEdit ? (
+                <FooterAction
+                  icon={Pencil}
+                  label={t("actionEdit")}
+                  busy={busy}
+                  onClick={() => onEdit(task)}
+                />
+              ) : null}
+              {hasWorktree && task.cleanup_state === "failed" ? (
+                <FooterAction
+                  icon={FolderX}
+                  label={t("actionRetryCleanup")}
+                  busy={busy}
+                  onClick={() => run(() => workTaskCleanup(task.id))}
+                />
+              ) : null}
+              <div className="flex-1" />
+              {task.status !== "merging" ? (
+                <FooterAction
+                  icon={Trash2}
+                  label={t("actionDelete")}
+                  busy={busy}
+                  destructive
+                  onClick={() => setDeleteOpen(true)}
+                />
+              ) : null}
+            </div>
+          ) : null}
         </SheetContent>
       </Sheet>
-
-      {/* Read-only live transcript of the task's agent session. */}
-      <TaskTranscriptDialog
-        open={transcriptOpen}
-        onOpenChange={setTranscriptOpen}
-        task={task}
-        agentType={convAgentType ?? task?.config?.agent_type ?? null}
-      />
 
       {/* Per-file / full diff viewer. */}
       <Dialog
@@ -830,27 +875,24 @@ function FooterAction({
   onClick,
   busy,
   destructive,
-  emphasized,
 }: {
   icon: typeof Play
   label: string
   onClick: () => void
   busy: boolean
   destructive?: boolean
-  /** The status's leading action — outlined so it stands out of the ghosts. */
-  emphasized?: boolean
 }) {
   return (
     <Button
       type="button"
       size="sm"
-      variant={emphasized ? "outline" : "ghost"}
+      variant="ghost"
       disabled={busy}
       className={cn(
         "h-7 gap-1.5 px-2.5 text-xs",
         destructive
           ? "text-destructive hover:text-destructive"
-          : !emphasized && "text-muted-foreground hover:text-foreground"
+          : "text-muted-foreground hover:text-foreground"
       )}
       onClick={onClick}
     >

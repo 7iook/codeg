@@ -1424,3 +1424,136 @@ describe("global acp://event listener is mount-once", () => {
     expect(unlisten).toHaveBeenCalledTimes(1)
   })
 })
+
+describe("delegation-child attach: mid-turn hydration", () => {
+  // A work-task session viewer attaches to a turn that is ALREADY running.
+  // On desktop the `acp://event` firehose carries only FUTURE events, so
+  // without a snapshot the child sits at DELEGATION_CHILD_ATTACH's synthetic
+  // "connected" with an empty live message — the viewer shows a stale
+  // persisted transcript and never streams. Real delegation children attach
+  // at spawn time and must NOT pay for a snapshot fetch.
+  const CHILD = "task-conn-1"
+
+  function attachChild(hydrate: boolean) {
+    h.actions!.attachDelegationChild({
+      connectionId: CHILD,
+      parentConnectionId: CHILD,
+      parentToolUseId: "work-task-9",
+      agentType: "claude_code",
+      hydrate,
+    })
+  }
+
+  beforeEach(() => {
+    // Desktop firehose path (the web attach protocol always opens with a
+    // snapshot, so the gap this covers is desktop-only).
+    h.eventStreamValue = null
+    vi.mocked(subscribe).mockClear()
+    h.acpGetSessionSnapshot.mockResolvedValue({
+      connection_id: CHILD,
+      event_seq: 7,
+    })
+    h.denormalizeSnapshot.mockReturnValue({
+      connectionId: CHILD,
+      status: "prompting",
+      sessionId: "sess-child",
+      modes: null,
+      configOptions: null,
+      availableCommands: null,
+      usage: null,
+      liveMessage: null,
+      pendingPermission: null,
+      pendingAskQuestion: null,
+      pendingUserMessage: null,
+      pendingPlanApproval: null,
+      promptCapabilities: null,
+      selectorsReady: false,
+      supportsFork: false,
+      configStale: false,
+      configStaleKind: null,
+      lastError: null,
+      eventSeq: 7,
+      activeDelegations: [],
+    })
+  })
+
+  it("hydrates the in-flight turn, then routes later firehose events", async () => {
+    await mountProvider()
+
+    await act(async () => {
+      attachChild(true)
+    })
+    await act(async () => {})
+
+    expect(h.acpGetSessionSnapshot).toHaveBeenCalledWith(CHILD)
+    // The load-bearing bit: "prompting" is what makes the read-only viewer
+    // render the live stream instead of a settled transcript.
+    expect(h.store!.getConnection(CHILD)?.status).toBe("prompting")
+    expect(h.store!.getConnection(CHILD)?.lastAppliedSeq).toBe(7)
+
+    // Reverse-map routing is installed AFTER hydration, so post-snapshot
+    // events still land (and pre-snapshot ones are deduped by seq).
+    const onEvent = vi.mocked(subscribe).mock.calls[0]![1] as (
+      envelope: EventEnvelope
+    ) => void
+    act(() => {
+      onEvent({
+        seq: 8,
+        connection_id: CHILD,
+        type: "content_delta",
+        text: "hi",
+      } as EventEnvelope)
+    })
+    expect(h.store!.getConnection(CHILD)?.lastAppliedSeq).toBe(8)
+  })
+
+  it("skips the snapshot for a spawn-time child attach", async () => {
+    await mountProvider()
+
+    await act(async () => {
+      attachChild(false)
+    })
+    await act(async () => {})
+
+    expect(h.acpGetSessionSnapshot).not.toHaveBeenCalled()
+    expect(h.store!.getConnection(CHILD)?.status).toBe("connected")
+  })
+
+  it("does not hydrate or route a child detached while the snapshot is in flight", async () => {
+    let resolveSnapshot: (v: unknown) => void = () => {}
+    h.acpGetSessionSnapshot.mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveSnapshot = res
+        })
+    )
+    await mountProvider()
+
+    await act(async () => {
+      attachChild(true)
+    })
+    await act(async () => {
+      h.actions!.detachDelegationChild(CHILD)
+    })
+    await act(async () => {
+      resolveSnapshot({ connection_id: CHILD, event_seq: 7 })
+    })
+    await act(async () => {})
+
+    // The viewer is gone: no resurrected connection state, and the firehose
+    // must not be routing to a contextKey nobody is watching.
+    expect(h.store!.getConnection(CHILD)).toBeUndefined()
+    const onEvent = vi.mocked(subscribe).mock.calls[0]![1] as (
+      envelope: EventEnvelope
+    ) => void
+    act(() => {
+      onEvent({
+        seq: 8,
+        connection_id: CHILD,
+        type: "content_delta",
+        text: "hi",
+      } as EventEnvelope)
+    })
+    expect(h.store!.getConnection(CHILD)).toBeUndefined()
+  })
+})

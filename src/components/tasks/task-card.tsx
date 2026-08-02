@@ -9,7 +9,6 @@ import {
   CircleAlert,
   CircleCheck,
   CircleX,
-  Ellipsis,
   GitMerge,
   Loader2,
   MessageSquareText,
@@ -18,12 +17,6 @@ import {
   RotateCw,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { formatRelative } from "@/components/conversations/sidebar-conversation-grouping"
 import { cn } from "@/lib/utils"
 import type { WorkTask } from "@/lib/types"
@@ -127,7 +120,8 @@ interface TaskCardProps {
   onCancel: () => void
   onRetry: () => void
   onRequeue: () => void
-  onOpenConversation: () => void
+  /** Opens the read-only live session viewer (TaskTranscriptDialog). */
+  onViewSession: () => void
   onMerge: () => void
   /** Toggles by `task.archived_at` (archive ⇄ unarchive). */
   onArchive: () => void
@@ -182,9 +176,11 @@ interface CardActionItem {
 
 /**
  * One board card. The whole card opens the detail sheet; the footer carries
- * the status's single primary action on the left and everything else behind a
- * "…" menu — the full action set lives in the sheet. `merging` is
- * deliberately action-less: it cannot be canceled.
+ * exactly one filled primary action per status on the left, and on the right a
+ * row of round icon buttons for the secondaries (edit / archive), always
+ * ending in "查看会话" when a session exists. The full action set — with
+ * labels — lives in the sheet. `merging` has no primary: it cannot be
+ * canceled.
  */
 export function TaskCard({
   task,
@@ -195,7 +191,7 @@ export function TaskCard({
   onCancel,
   onRetry,
   onRequeue,
-  onOpenConversation,
+  onViewSession,
   onMerge,
   onArchive,
   onEdit,
@@ -223,7 +219,7 @@ export function TaskCard({
 
   const { primary, more } = (() => {
     const more: CardActionItem[] = []
-    let primary: (CardActionItem & { emphasized?: boolean }) | null = null
+    let primary: CardActionItem | null = null
     // An archived card offers exactly one way back.
     if (archived) {
       primary = {
@@ -235,51 +231,21 @@ export function TaskCard({
     }
     switch (task.status) {
       case "todo":
-        primary = {
-          icon: Play,
-          label: t("actionStart"),
-          onClick: onStart,
-          emphasized: true,
-        }
+        primary = { icon: Play, label: t("actionStart"), onClick: onStart }
         more.push({ icon: Pencil, label: t("actionEdit"), onClick: onEdit })
         break
       case "queued":
-        primary = { icon: Ban, label: t("actionCancel"), onClick: onCancel }
-        break
       case "running":
       case "awaiting_input":
-        primary = {
-          icon: MessageSquareText,
-          label: t("actionOpenConversation"),
-          onClick: onOpenConversation,
-          emphasized: task.status === "awaiting_input",
-        }
-        more.push({ icon: Ban, label: t("actionCancel"), onClick: onCancel })
+        primary = { icon: Ban, label: t("actionCancel"), onClick: onCancel }
         break
       case "review":
-        primary = {
-          icon: GitMerge,
-          label: t("actionMerge"),
-          onClick: onMerge,
-          emphasized: true,
-        }
-        if (task.conversation_id != null) {
-          more.push({
-            icon: MessageSquareText,
-            label: t("actionOpenConversation"),
-            onClick: onOpenConversation,
-          })
-        }
+        primary = { icon: GitMerge, label: t("actionMerge"), onClick: onMerge }
         break
       case "merging":
         break
       case "failed":
-        primary = {
-          icon: RotateCw,
-          label: t("actionRetry"),
-          onClick: onRetry,
-          emphasized: true,
-        }
+        primary = { icon: RotateCw, label: t("actionRetry"), onClick: onRetry }
         more.push({ icon: Pencil, label: t("actionEdit"), onClick: onEdit })
         more.push({
           icon: Archive,
@@ -288,18 +254,11 @@ export function TaskCard({
         })
         break
       case "done":
-        if (task.conversation_id != null) {
-          primary = {
-            icon: MessageSquareText,
-            label: t("actionOpenConversation"),
-            onClick: onOpenConversation,
-          }
-        }
-        more.push({
+        primary = {
           icon: Archive,
           label: t("actionArchive"),
           onClick: onArchive,
-        })
+        }
         break
       case "canceled":
         primary = {
@@ -316,6 +275,18 @@ export function TaskCard({
     }
     return { primary, more }
   })()
+
+  // Round icon row on the right: the status's own secondaries, then the
+  // uniform session viewer — offered in every status once a session exists
+  // (live ones stream it in real time).
+  const secondaries = [...more]
+  if (task.conversation_id != null) {
+    secondaries.push({
+      icon: MessageSquareText,
+      label: t("actionViewSession"),
+      onClick: onViewSession,
+    })
+  }
 
   return (
     <div
@@ -405,13 +376,12 @@ export function TaskCard({
         </p>
       ) : null}
 
-      {primary || more.length > 0 ? (
+      {primary || secondaries.length > 0 ? (
         <div className="mt-2.5 flex items-center gap-1.5 border-t border-border/60 pt-2">
           {primary ? (
             <Button
               type="button"
               size="xs"
-              variant={primary.emphasized ? "default" : "outline"}
               onClick={(e) => {
                 // The card itself opens the detail sheet — keep actions local.
                 e.stopPropagation()
@@ -423,50 +393,34 @@ export function TaskCard({
             </Button>
           ) : null}
           <div className="flex-1" />
-          {more.length > 0 ? (
-            <CardMoreMenu items={more} label={t("more")} />
-          ) : null}
+          {/* Secondaries are icon-only and round: they are one-per-status at
+              most, so a "…" menu just hid them behind an extra click. The
+              session viewer always sorts last, anchoring the corner. */}
+          {secondaries.map((item) => (
+            <CardIconAction key={item.label} item={item} />
+          ))}
         </div>
       ) : null}
     </div>
   )
 }
 
-function CardMoreMenu({
-  items,
-  label,
-}: {
-  items: CardActionItem[]
-  label: string
-}) {
+function CardIconAction({ item }: { item: CardActionItem }) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="ghost"
-          className="text-muted-foreground"
-          aria-label={label}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <Ellipsis className="size-3.5" aria-hidden="true" />
-        </Button>
-      </DropdownMenuTrigger>
-      {/* Portaled content still bubbles through the React tree — without the
-          stop, picking a menu item would also open the card's detail sheet. */}
-      <DropdownMenuContent
-        align="end"
-        className="min-w-32"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {items.map((item) => (
-          <DropdownMenuItem key={item.label} onSelect={item.onClick}>
-            <item.icon className="size-3.5" aria-hidden="true" />
-            {item.label}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <Button
+      type="button"
+      size="icon-xs"
+      variant="outline"
+      className="rounded-full"
+      title={item.label}
+      aria-label={item.label}
+      onClick={(e) => {
+        // The card itself opens the detail sheet — keep actions local.
+        e.stopPropagation()
+        item.onClick()
+      }}
+    >
+      <item.icon aria-hidden="true" />
+    </Button>
   )
 }

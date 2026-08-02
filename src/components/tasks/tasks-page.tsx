@@ -6,8 +6,6 @@ import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { Funnel, Play, Plus, Settings2, SquareKanban } from "lucide-react"
 import { useTasksView } from "@/contexts/tasks-view-context"
-import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
-import { useTabActions } from "@/contexts/tab-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import {
   workTaskArchive,
@@ -26,6 +24,11 @@ import {
   CREATE_TASK_FROM_TEXT_EVENT,
   type CreateTaskFromTextDetail,
 } from "@/lib/task-compose-events"
+import {
+  DEFAULT_TASKS_BOARD_FILTER,
+  loadTasksBoardFilter,
+  saveTasksBoardFilter,
+} from "@/lib/tasks-board-filter-storage"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -52,6 +55,7 @@ import { TaskDetailSheet } from "./task-detail-sheet"
 import { TaskEditorDialog } from "./task-editor-dialog"
 import { TaskMergeDialog } from "./task-merge-dialog"
 import { TaskSettingsDialog } from "./task-settings-dialog"
+import { TaskTranscriptDialog } from "./task-transcript-dialog"
 import type { WorkTask, WorkTaskDraft } from "@/lib/types"
 
 const COLUMN_LABEL_KEYS = {
@@ -70,18 +74,37 @@ const EMPTY_LABEL_KEYS = {
 
 const ALL_FOLDERS = "__all__"
 
+/** Fired by the chrome-strip settings button; TasksPage owns the dialog (and
+ *  the folder filter that scopes it), so the strip just asks it to open. */
+const OPEN_TASK_SETTINGS_EVENT = "codeg:open-task-settings"
+
 /** Page title rendered into the window-chrome strip above the page (the h-10
- *  band shared with the fixed corner overlays) — see WorkbenchRouteStrip. */
+ *  band shared with the fixed corner overlays) — sized like the surrounding
+ *  window-chrome controls, with the settings entry right after the title. */
 export function TasksPageTitle() {
   const t = useTranslations("Tasks")
   return (
-    <h1 className="flex h-10 shrink-0 items-center gap-2 px-4 text-lg font-semibold leading-none tracking-tight">
-      <SquareKanban
-        className="size-4.5 text-muted-foreground"
-        aria-hidden="true"
-      />
-      {t("title")}
-    </h1>
+    <div className="flex h-10 shrink-0 items-center gap-2 pl-4">
+      <h1 className="flex items-center gap-1.5 text-[0.8125rem] font-semibold leading-none">
+        <SquareKanban
+          className="size-4 text-muted-foreground"
+          aria-hidden="true"
+        />
+        {t("title")}
+      </h1>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-6 gap-1.5 rounded-md px-2 text-xs font-normal text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+        onClick={() =>
+          window.dispatchEvent(new Event(OPEN_TASK_SETTINGS_EVENT))
+        }
+      >
+        <Settings2 className="size-3.5" aria-hidden="true" />
+        {t("settingsTitle")}
+      </Button>
+    </div>
   )
 }
 
@@ -95,8 +118,6 @@ export function TasksPageTitle() {
 export function TasksPage() {
   const t = useTranslations("Tasks")
   const { tasks, refetch } = useTasksView()
-  const { openConversations } = useWorkbenchRoute()
-  const { openTab } = useTabActions()
   const folders = useAppWorkspaceStore((s) => s.folders)
   const projectFolders = useMemo(
     () => folders.filter((f) => f.parent_id == null && f.kind === "regular"),
@@ -109,8 +130,13 @@ export function TasksPage() {
   }, [folders])
 
   const [folderFilter, setFolderFilter] = useState<number | null>(null)
-  const [showCanceled, setShowCanceled] = useState(false)
-  const [showArchived, setShowArchived] = useState(false)
+  // Restored synchronously from localStorage: this page mounts only after a
+  // client-side route switch (never prerendered), so there is no SSR markup to
+  // mismatch — and the board paints with the remembered filter right away.
+  const [boardFilter, setBoardFilter] = useState(loadTasksBoardFilter)
+  useEffect(() => {
+    saveTasksBoardFilter(boardFilter)
+  }, [boardFilter])
   // Drag state for the pending column (enabled only with a folder selected —
   // sort_order is per folder, so a mixed-folder列 has no persistable order).
   const [dragOrder, setDragOrder] = useState<number[] | null>(null)
@@ -150,6 +176,19 @@ export function TasksPage() {
   const [mergeTask, setMergeTask] = useState<WorkTask | null>(null)
   const [mergeOpen, setMergeOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Read-only live session viewer ("查看会话") — tracked by id so the dialog
+  // header's status chip follows the live row (like the detail sheet).
+  const [sessionTaskId, setSessionTaskId] = useState<number | null>(null)
+  const [sessionOpen, setSessionOpen] = useState(false)
+
+  // The settings entry lives in the chrome strip (TasksPageTitle), a separate
+  // tree branch — it asks this page (which owns the dialog + folder scope) to
+  // open via a window event, like the "task from message" hand-off above.
+  useEffect(() => {
+    const open = () => setSettingsOpen(true)
+    window.addEventListener(OPEN_TASK_SETTINGS_EVENT, open)
+    return () => window.removeEventListener(OPEN_TASK_SETTINGS_EVENT, open)
+  }, [])
 
   const visibleTasks = useMemo(
     () =>
@@ -159,8 +198,13 @@ export function TasksPage() {
     [tasks, folderFilter]
   )
   const columns = useMemo(
-    () => groupTasksByColumn(visibleTasks, showCanceled, showArchived),
-    [visibleTasks, showCanceled, showArchived]
+    () =>
+      groupTasksByColumn(
+        visibleTasks,
+        boardFilter.showCanceled,
+        boardFilter.showArchived
+      ),
+    [visibleTasks, boardFilter]
   )
   const dragEnabled = folderFilter != null
   // Optimistic order while a drag is live; server order otherwise.
@@ -180,6 +224,10 @@ export function TasksPage() {
     () => tasks.find((task) => task.id === detailTaskId) ?? null,
     [tasks, detailTaskId]
   )
+  const sessionTask = useMemo(
+    () => tasks.find((task) => task.id === sessionTaskId) ?? null,
+    [tasks, sessionTaskId]
+  )
 
   const act = useCallback(
     async (fn: () => Promise<unknown>) => {
@@ -194,23 +242,11 @@ export function TasksPage() {
     [refetch]
   )
 
-  const openConversation = useCallback(
-    (task: WorkTask) => {
-      if (task.conversation_id == null) return
-      // After cleanup the conversation lives re-parented under the project
-      // folder; before that, under its worktree folder.
-      const folderId = task.worktree_folder_id ?? task.folder_id
-      // Best-effort agent for the tab chrome (the conversation view reloads the
-      // authoritative agent from the DB): task override → folder default.
-      const agent =
-        task.config?.agent_type ??
-        folders.find((f) => f.id === task.folder_id)?.default_agent_type ??
-        "claude_code"
-      openConversations()
-      openTab(folderId, task.conversation_id, agent)
-    },
-    [openConversations, openTab, folders]
-  )
+  const openSession = useCallback((task: WorkTask) => {
+    if (task.conversation_id == null) return
+    setSessionTaskId(task.id)
+    setSessionOpen(true)
+  }, [])
 
   const submitEditor = useCallback(
     async (draft: WorkTaskDraft) => {
@@ -287,7 +323,15 @@ export function TasksPage() {
     )
   }, [act, columns.done])
 
-  const activeFilters = (showCanceled ? 1 : 0) + (showArchived ? 1 : 0)
+  // The badge counts deviations from the DEFAULT view (canceled shown,
+  // archived hidden), not checked boxes — a pristine board shows no badge.
+  const activeFilters =
+    (boardFilter.showCanceled === DEFAULT_TASKS_BOARD_FILTER.showCanceled
+      ? 0
+      : 1) +
+    (boardFilter.showArchived === DEFAULT_TASKS_BOARD_FILTER.showArchived
+      ? 0
+      : 1)
   const hasAnyTask = tasks.length > 0
 
   return (
@@ -317,15 +361,21 @@ export function TasksPage() {
           </SelectContent>
         </Select>
 
+        {/* Same pill treatment as the folder select so the left cluster reads
+            as one family of controls (the settings entry lives in the chrome
+            strip next to the page title). */}
         <Popover>
           <PopoverTrigger asChild>
             <Button
               type="button"
               size="sm"
               variant="ghost"
-              className="gap-1.5 px-2.5 text-[0.8125rem] font-normal text-muted-foreground hover:text-foreground"
+              className="h-8 gap-1.5 rounded-full bg-muted/70 px-3 text-[0.8125rem] font-medium ws-msg-chip hover:bg-muted"
             >
-              <Funnel className="size-3.5" aria-hidden="true" />
+              <Funnel
+                className="size-3.5 text-muted-foreground"
+                aria-hidden="true"
+              />
               {t("filter")}
               {activeFilters > 0 ? (
                 <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[0.625rem] font-medium leading-none text-primary tabular-nums">
@@ -340,31 +390,24 @@ export function TasksPage() {
           >
             <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-accent/50">
               <Checkbox
-                checked={showCanceled}
-                onCheckedChange={(v) => setShowCanceled(v === true)}
+                checked={boardFilter.showCanceled}
+                onCheckedChange={(v) =>
+                  setBoardFilter((f) => ({ ...f, showCanceled: v === true }))
+                }
               />
               {t("showCanceled")}
             </label>
             <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-accent/50">
               <Checkbox
-                checked={showArchived}
-                onCheckedChange={(v) => setShowArchived(v === true)}
+                checked={boardFilter.showArchived}
+                onCheckedChange={(v) =>
+                  setBoardFilter((f) => ({ ...f, showArchived: v === true }))
+                }
               />
               {t("showArchived")}
             </label>
           </PopoverContent>
         </Popover>
-
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="gap-1.5 px-2.5 text-[0.8125rem] font-normal text-muted-foreground hover:text-foreground"
-          onClick={() => setSettingsOpen(true)}
-        >
-          <Settings2 className="size-3.5" aria-hidden="true" />
-          {t("settingsTitle")}
-        </Button>
 
         <div className="flex-1" />
 
@@ -372,7 +415,7 @@ export function TasksPage() {
           type="button"
           size="sm"
           variant="ghost"
-          className="gap-1.5 px-2.5 text-[0.8125rem]"
+          className="h-8 gap-1.5 rounded-full px-3 text-[0.8125rem]"
           onClick={startAll}
         >
           <Play className="size-3.5" aria-hidden="true" />
@@ -381,7 +424,7 @@ export function TasksPage() {
         <Button
           type="button"
           size="sm"
-          className="gap-1 px-3.5 text-[0.8125rem]"
+          className="h-8 gap-1 rounded-full px-3.5 text-[0.8125rem]"
           onClick={openNewTask}
         >
           <Plus className="size-4" aria-hidden="true" />
@@ -414,7 +457,9 @@ export function TasksPage() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-x-auto">
-          <div className="grid h-full min-w-[56rem] grid-cols-4 gap-4 p-4">
+          {/* pt-2 (not p-4's 16px) ties the column headers to the toolbar so
+              the two rows read as one header block above the cards. */}
+          <div className="grid h-full min-w-[56rem] grid-cols-4 gap-4 px-4 pb-4 pt-2">
             {BOARD_COLUMN_IDS.map((col) => {
               const colTasks = col === "todo" ? todoTasks : columns[col]
               const cardFor = (task: WorkTask) => (
@@ -428,7 +473,7 @@ export function TasksPage() {
                   onCancel={() => void act(() => workTaskCancel(task.id))}
                   onRetry={() => void act(() => workTaskRetry(task.id))}
                   onRequeue={() => void act(() => workTaskRequeue(task.id))}
-                  onOpenConversation={() => openConversation(task)}
+                  onViewSession={() => openSession(task)}
                   onMerge={() => openMerge(task)}
                   onArchive={() =>
                     void act(() =>
@@ -569,7 +614,7 @@ export function TasksPage() {
         folderName={
           detailTask ? (folderNames.get(detailTask.folder_id) ?? null) : null
         }
-        onOpenConversation={openConversation}
+        onViewSession={openSession}
         onMerge={openMerge}
         onEdit={(task) => {
           setEditorTask(task)
@@ -580,6 +625,13 @@ export function TasksPage() {
         open={mergeOpen}
         onOpenChange={setMergeOpen}
         task={mergeTask}
+      />
+      {/* Rendered after the sheet so it stacks above it when opened from
+          within (both portal to body; later mount wins). */}
+      <TaskTranscriptDialog
+        open={sessionOpen && sessionTask != null}
+        onOpenChange={setSessionOpen}
+        task={sessionTask}
       />
       <TaskSettingsDialog
         open={settingsOpen}

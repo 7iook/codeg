@@ -2439,6 +2439,18 @@ export interface AcpActionsValue {
     parentConnectionId: string
     parentToolUseId: string
     agentType: AgentType
+    /**
+     * Backfill the in-flight turn from a session snapshot before routing
+     * live events. Required when attaching MID-TURN, which the desktop
+     * firehose cannot serve on its own: `acp://event` only carries FUTURE
+     * events, so without a snapshot the viewer misses everything the turn
+     * already produced and its status stays `connected` instead of
+     * `prompting` (no streaming affordance, empty live message). Real
+     * delegation children attach at `delegation_started` — before the
+     * child's first event — and leave this off. No effect on web/remote:
+     * the attach protocol always opens with a snapshot.
+     */
+    hydrate?: boolean
   }): void
   /**
    * Tear down a previously-attached delegation child. Releases the
@@ -4735,9 +4747,15 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       parentConnectionId: string
       parentToolUseId: string
       agentType: AgentType
+      hydrate?: boolean
     }) => {
-      const { connectionId, parentConnectionId, parentToolUseId, agentType } =
-        args
+      const {
+        connectionId,
+        parentConnectionId,
+        parentToolUseId,
+        agentType,
+        hydrate,
+      } = args
       const existing = storeRef.current.connections.get(connectionId)
       if (
         existing &&
@@ -4772,11 +4790,48 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       // Tauri desktop: the global acp://event listener routes by
       // reverseMap. Register the identity mapping and drain any
       // envelopes that arrived between the child's spawn and now.
-      reverseMapRef.current.set(connectionId, connectionId)
-      const buffered = consumeBufferedEvents(connectionId)
-      for (const env of buffered) {
-        applyMappedEnvelope(connectionId, env)
+      const route = () => {
+        reverseMapRef.current.set(connectionId, connectionId)
+        for (const env of consumeBufferedEvents(connectionId)) {
+          applyMappedEnvelope(connectionId, env)
+        }
       }
+      if (!hydrate) {
+        route()
+        return
+      }
+      // Mid-turn attach: the firehose carries only future events, so backfill
+      // the turn already in flight from a snapshot FIRST, then route (same
+      // order as `connectAsViewer` — anything that lands while the fetch is in
+      // flight stays in the unmapped buffer and is deduped by seq on drain).
+      void (async () => {
+        let patch: import("@/lib/snapshot-denormalize").SnapshotPatch | null =
+          null
+        try {
+          const snapshot = await acpGetSessionSnapshot(connectionId)
+          if (snapshot) patch = denormalizeSnapshot(snapshot)
+        } catch (e) {
+          console.warn(
+            "[acp-context] child snapshot fetch failed for",
+            connectionId,
+            e
+          )
+        }
+        // The viewer may have closed while the snapshot was in flight —
+        // never hydrate or install routing for a detached child.
+        const still = storeRef.current.connections.get(connectionId)
+        if (!still?.isDelegationChild || still.connectionId !== connectionId) {
+          return
+        }
+        if (patch) {
+          dispatch({
+            type: "HYDRATE_FROM_SNAPSHOT",
+            contextKey: connectionId,
+            patch,
+          })
+        }
+        route()
+      })()
     },
     [
       applyMappedEnvelope,

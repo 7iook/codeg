@@ -653,7 +653,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
     setWidth: setSidebarWidth,
   } = useSidebarContext()
   const {
-    isOpen: auxOpen,
+    isOpen: auxOpenRequested,
     restored: auxRestored,
     width: auxWidth,
     minWidth: auxMinWidth,
@@ -661,12 +661,22 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
     setWidth: setAuxWidth,
   } = useAuxPanelContext()
   const {
-    isOpen: terminalOpen,
+    isOpen: terminalOpenRequested,
     height: terminalHeight,
     minHeight: terminalMinHeight,
     maxHeight: terminalMaxHeight,
     setHeight: setTerminalHeight,
   } = useTerminalContext()
+  // A full-page workbench route (tasks / automations) replaces only the CENTER
+  // panel — the terminal sits below it and the aux panel beside it, both
+  // outside the overlay. Their toggles are hidden on those routes
+  // (RightEdgeChrome), so anything left open would be stranded on screen with
+  // no way to close it. Collapse both for the duration; the contexts keep the
+  // user's real open state (and the terminal keeps running), so switching back
+  // to conversations restores exactly what was there.
+  const { isConversations } = useWorkbenchRoute()
+  const auxOpen = auxOpenRequested && isConversations
+  const terminalOpen = terminalOpenRequested && isConversations
 
   // Animate the shell (horizontal) group while the sidebar/aux toggle and the
   // main (vertical) group while the terminal toggles, so the panes slide open

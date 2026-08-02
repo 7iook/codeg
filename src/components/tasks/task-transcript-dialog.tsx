@@ -1,9 +1,10 @@
 "use client"
 
 /**
- * Live transcript viewer for a work task's agent session — the same read-only
- * streaming surface as the delegation sub-agent dialog (`LiveTranscriptView`),
- * without opening the conversation in the workbench.
+ * Live session viewer for a work task — the same read-only streaming surface
+ * as the delegation sub-agent dialog (`LiveTranscriptView`), without opening
+ * the conversation in the workbench. Every "查看会话" affordance on the board
+ * (card secondary button, detail-sheet action zone) lands here.
  *
  * Unlike delegation children (attached by the delegation provider), a
  * headless work-task connection is invisible to the frontend until attached:
@@ -18,6 +19,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { useTranslations } from "next-intl"
+import { Loader2 } from "lucide-react"
 
 import { AgentIcon } from "@/components/agent-icon"
 import { LiveTranscriptView } from "@/components/message/live-transcript-view"
@@ -30,7 +32,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useAcpActions } from "@/contexts/acp-connections-context"
-import { workTaskEvents } from "@/lib/api"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { getFolderConversation, workTaskEvents } from "@/lib/api"
 import {
   extractRounds,
   firstTextOfParts,
@@ -43,8 +46,6 @@ interface TaskTranscriptDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   task: WorkTask | null
-  /** Resolved by the host (conversation summary → config override → null). */
-  agentType: AgentType | null
 }
 
 /** Statuses in which the engine holds a live connection worth attaching
@@ -61,7 +62,6 @@ export function TaskTranscriptDialog({
   open,
   onOpenChange,
   task,
-  agentType,
 }: TaskTranscriptDialogProps) {
   const t = useTranslations("Tasks")
 
@@ -76,11 +76,56 @@ export function TaskTranscriptDialog({
           {t("transcriptDescription")}
         </DialogDescription>
         {open && task != null && task.conversation_id != null ? (
-          <TaskTranscriptBody task={task} agentType={agentType} />
+          <TaskAgentResolver task={task} />
         ) : null}
       </DialogContent>
     </Dialog>
   )
+}
+
+/**
+ * Resolve the session's agent BEFORE the viewer mounts. The live-event parser
+ * is fixed by the attach latch below and never re-attached (a late change
+ * would drop buffered events), so guessing here would render live chunks with
+ * the wrong renderer. A per-task override is definitive and instant;
+ * otherwise one conversation read returns the agent recorded at dispatch,
+ * with the folder's default agent covering a failed read.
+ */
+function TaskAgentResolver({ task }: { task: WorkTask }) {
+  const folders = useAppWorkspaceStore((s) => s.folders)
+  const override = task.config?.agent_type ?? null
+  const folderDefault =
+    folders.find((f) => f.id === task.folder_id)?.default_agent_type ?? null
+  const conversationId = task.conversation_id as number // gated by the host
+  const [resolved, setResolved] = useState<AgentType | null>(override)
+  useEffect(() => {
+    if (override != null) return
+    let cancelled = false
+    getFolderConversation(conversationId)
+      .then((detail) => {
+        if (cancelled) return
+        setResolved(detail.summary.agent_type ?? folderDefault ?? "claude_code")
+      })
+      .catch(() => {
+        // Transcript unreadable (agent gone, file pruned) — best-effort.
+        if (!cancelled) setResolved(folderDefault ?? "claude_code")
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [override, conversationId, folderDefault])
+
+  if (resolved == null) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Loader2
+          className="size-5 animate-spin text-muted-foreground"
+          aria-hidden="true"
+        />
+      </div>
+    )
+  }
+  return <TaskTranscriptBody task={task} agentType={resolved} />
 }
 
 function TaskTranscriptBody({
@@ -88,7 +133,7 @@ function TaskTranscriptBody({
   agentType,
 }: {
   task: WorkTask
-  agentType: AgentType | null
+  agentType: AgentType
 }) {
   const t = useTranslations("Tasks")
   const { attachDelegationChild, detachDelegationChild } = useAcpActions()
@@ -135,9 +180,9 @@ function TaskTranscriptBody({
   // a per-connection stream for a connection the backend no longer has).
   const [attach] = useState(() => ({
     id: isLive(task) ? task.connection_id : null,
-    // Agent as known at open; a late refinement (conversation summary landing
-    // after mount) must not re-attach — it would drop buffered events.
-    agentType: agentType ?? ("claude_code" as AgentType),
+    // Agent as resolved at open; a late refinement must not re-attach — it
+    // would drop buffered events.
+    agentType,
   }))
   const attachId = attach.id
   const taskId = task.id
@@ -149,6 +194,11 @@ function TaskTranscriptBody({
       parentConnectionId: id,
       parentToolUseId: `work-task-${taskId}`,
       agentType: attach.agentType,
+      // Unlike a real delegation child (attached the moment it spawns), this
+      // viewer opens onto a turn already in progress — hydrate its state
+      // before routing or the desktop firehose would only show whatever the
+      // agent happens to emit next.
+      hydrate: true,
     })
     return () => detachDelegationChild(id)
   }, [attachId, attach, taskId, attachDelegationChild, detachDelegationChild])
@@ -157,11 +207,7 @@ function TaskTranscriptBody({
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 border-b border-border px-5 py-2.5 pr-12">
         <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-background text-foreground">
-          {agentType ? (
-            <AgentIcon agentType={agentType} className="h-4 w-4" />
-          ) : (
-            <span className="h-2 w-2 rounded-sm bg-muted-foreground/60" />
-          )}
+          <AgentIcon agentType={agentType} className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
           {task.title}

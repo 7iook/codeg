@@ -374,22 +374,34 @@ function TaskSettingsBody({
               />
             </div>
 
-            <div className="flex items-center justify-between gap-3">
-              <Label className="text-sm">{t("settingsMergeStrategy")}</Label>
-              <Select
-                value={mergeStrategy}
-                onValueChange={(v) =>
-                  setMergeStrategy(v === "merge" ? "merge" : "squash")
-                }
-              >
-                <SelectTrigger size="sm" className="w-40">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="squash">{t("strategySquash")}</SelectItem>
-                  <SelectItem value="merge">{t("strategyMerge")}</SelectItem>
-                </SelectContent>
-              </Select>
+            {/* Plain-language options (no git jargon); the hint under the
+                row explains whichever one is selected — same pattern as the
+                settings-source switcher above. */}
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-3">
+                <Label className="text-sm">{t("settingsMergeStrategy")}</Label>
+                <Select
+                  value={mergeStrategy}
+                  onValueChange={(v) =>
+                    setMergeStrategy(v === "merge" ? "merge" : "squash")
+                  }
+                >
+                  <SelectTrigger size="sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="squash">
+                      {t("strategySquash")}
+                    </SelectItem>
+                    <SelectItem value="merge">{t("strategyMerge")}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {mergeStrategy === "squash"
+                  ? t("strategySquashHint")
+                  : t("strategyMergeHint")}
+              </span>
             </div>
 
             <div className="flex flex-col gap-1.5">
