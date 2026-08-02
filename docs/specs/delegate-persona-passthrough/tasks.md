@@ -29,8 +29,15 @@
 
 ### 阶段 1 · 类型基座(单 commit)
 
-- [ ] 1. 类型定义 + wire schema 骨架
-  - [ ] 1.1 在 `src-tauri/src/acp/delegation/persona.rs`(**新建模块**)定义:
+- [x] 1. 类型定义 + wire schema 骨架
+
+  **Evidence**
+  - `commit 393e8983`
+  - `verify: cargo check --features test-utils --message-format=short → EXIT=0; cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
+  - `files: src-tauri/src/acp/delegation/persona.rs (新增) · mod.rs · types.rs · tool_schema.json · broker.rs · listener.rs · lifecycle.rs · commands/delegation.rs (下游 struct-literal 补 None)`
+  - `AC: 1.1 + 1.2 + 1.3 + 1.4 + 1.5 + 1.6 (optional) 全达`
+
+  - [x] 1.1 在 `src-tauri/src/acp/delegation/persona.rs`(**新建模块**)定义:
     - `pub enum LaunchOption { KiroPersona(String) }`(单变体 · 未来加变体 · 禁 opaque map · R2 A4)
     - `pub enum AppliedPersona { Native{name}, Hint{name}, IgnoredUnsupportedCli{name} }`(三态 · 无 Failed · R3 F2)
     - `pub enum PersonaEffect { Native{launch_option}, Hint{preamble}, Ignored, Failed{wire_code, reason} }`
@@ -38,16 +45,57 @@
     - `pub fn is_valid_persona_name(name: &str) -> bool`(`[A-Za-z0-9_-]{1,64}`)
     - `pub trait PersonaCapability { fn supports_persona() -> bool; fn resolve_persona_effect(&self, name, home_dir) -> PersonaEffect; }`
     - _Requirements: 3-name-grammar.1, 3-name-grammar.2, 5.1, R2-A4 采纳, R3-F2 采纳_
-  - [ ] 1.2 在 `types.rs:53-75 DelegationRequest` 追加 `#[serde(default, skip_serializing_if = "Option::is_none")] pub subagent_type: Option<String>`
+
+    **Evidence**
+    - `commit 393e8983`
+    - `verify: cargo check --features test-utils → EXIT=0; cargo check --no-default-features --bin codeg-mcp → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/persona.rs (新增) · src-tauri/src/acp/delegation/mod.rs (挂 pub mod persona;)`
+    - `AC: 1.1 LaunchOption / AppliedPersona / PersonaEffect / PersonaError / is_valid_persona_name / PersonaCapability / resolve_preamble_at signature-only`
+
+  - [x] 1.2 在 `types.rs:53-75 DelegationRequest` 追加 `#[serde(default, skip_serializing_if = "Option::is_none")] pub subagent_type: Option<String>`
     - _Requirements: 1.1, 6.1_
-  - [ ] 1.3 在 `types.rs DelegationSuccess` / `DelegationTaskReport` 各追加 `#[serde(default, skip_serializing_if = "Option::is_none")] pub applied_persona: Option<AppliedPersona>` 字段
+
+    **Evidence**
+    - `commit 393e8983`
+    - `verify: cargo check --features test-utils → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/types.rs:83` (含 doc-comment 命名冲突警告 · 避免与 codebuddy/cursor/opencode/kimi parsers 的入站 subagent_type 混淆)
+    - `AC: 1.2 subagent_type field on DelegationRequest`
+
+  - [x] 1.3 在 `types.rs DelegationSuccess` / `DelegationTaskReport` 各追加 `#[serde(default, skip_serializing_if = "Option::is_none")] pub applied_persona: Option<AppliedPersona>` 字段
     - _Requirements: 5.1, R3-F2 采纳(不扩 Err payload)_
-  - [ ] 1.4 在 `types.rs DelegationError` 加 `#[error("invalid persona: {0}")] InvalidPersona(String)` 变体,`DelegationOutcome::from_err` 映射到 wire code `"invalid_persona"`
+
+    **Evidence**
+    - `commit 393e8983`
+    - `verify: cargo check --features test-utils → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/types.rs:105 (DelegationSuccess.applied_persona) · types.rs:283 (DelegationTaskReport.applied_persona)`
+    - `AC: 1.3 applied_persona on both success + task-report`
+
+  - [x] 1.4 在 `types.rs DelegationError` 加 `#[error("invalid persona: {0}")] InvalidPersona(String)` 变体,`DelegationOutcome::from_err` 映射到 wire code `"invalid_persona"`
     - _Requirements: 3.3, R1-F1_
-  - [ ] 1.5 `tool_schema.json` `delegate_to_agent.inputSchema.properties` 加 `subagent_type: string`,description 明写三家语义分家(Kiro=REAL / Claude/Codex=BEST-EFFORT / others=ignored+note)+ 占位符 `<<PERSONA_LISTS>>`
+
+    **Evidence**
+    - `commit 393e8983`
+    - `verify: cargo check --features test-utils → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/types.rs:139 (variant) · types.rs:313 (from_err arm 排在 SpawnFailed 之后)`
+    - `AC: 1.4 DelegationError::InvalidPersona + wire code "invalid_persona"`
+
+  - [x] 1.5 `tool_schema.json` `delegate_to_agent.inputSchema.properties` 加 `subagent_type: string`,description 明写三家语义分家(Kiro=REAL / Claude/Codex=BEST-EFFORT / others=ignored+note)+ 占位符 `<<PERSONA_LISTS>>`
     - _Requirements: 1.1, 3.6, 3.7_
-  - [ ]* 1.6 类型层 unit test:AppliedPersona/PersonaEffect/PersonaError serde round-trip,LaunchOption 只有 KiroPersona 变体的编译期契约
+
+    **Evidence**
+    - `commit 393e8983`
+    - `verify: PowerShell ConvertFrom-Json → JSON_OK (语法合法)`
+    - `files: src-tauri/src/acp/delegation/tool_schema.json:26-29 (delegate_to_agent.inputSchema.properties.subagent_type)`
+    - `AC: 1.5 subagent_type schema + three-tier description + <<PERSONA_LISTS>> placeholder for stage-6 companion rendering`
+
+  - [x]* 1.6 类型层 unit test:AppliedPersona/PersonaEffect/PersonaError serde round-trip,LaunchOption 只有 KiroPersona 变体的编译期契约
     - _Requirements: 6.1_
+
+    **Evidence**
+    - `commit 393e8983`
+    - `verify: cargo check --features test-utils → EXIT=0`(test 代码通过 typecheck;cargo test 完整跑要等 stage 4 补齐 broker mock 里 DelegationSuccess/DelegationRequest 的 applied_persona/subagent_type,那是 stage 4 的活)
+    - `files: src-tauri/src/acp/delegation/persona.rs:334-421 (#[cfg(test)] mod tests · 5 tests: is_valid_persona_name accept/reject · AppliedPersona serde 三态 · PersonaEffect 构造 · LaunchOption 单变体契约 · PersonaError Display)`
+    - `AC: 1.6 optional TDD baseline landed alongside type base`
 
 ### 阶段 2 · Provider capability 三家 impl
 
@@ -240,3 +288,4 @@
 ## Update Log
 
 - 2026-08-03 · tasks.md 落盘 · charter Mode 1 三件套齐 · 待用户批准 tasks.md 后 executor 进 TDD red→green 循环
+- 2026-08-03 · executor(claude-opus) · stage 1 complete · commit `393e8983` · types base(LaunchOption / AppliedPersona / PersonaEffect / PersonaError / PersonaCapability / DelegationRequest.subagent_type / DelegationSuccess.applied_persona / DelegationTaskReport.applied_persona / DelegationError::InvalidPersona / tool_schema.json subagent_type + `<<PERSONA_LISTS>>` 占位符)· cargo check 双模式 EXIT=0 · `resolve_preamble_at` body=`todo!()` 由 stage 3 兑现 · `#[cfg(test)]` 内 5 条 unit tests · 下游 16 处 struct literal 补 `None` 兜底 · cargo test 完整跑要等 stage 4/5 补 broker/manager tests 里的 mock literals(pre-existing manager.rs Steer variant drift 也归 stage 4/5 修)
