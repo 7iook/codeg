@@ -3310,7 +3310,7 @@ fn authorized_links_in(root: &Path) -> Vec<(String, PathBuf)> {
         }
         links.push((entry.file_name().to_string_lossy().to_string(), resolved));
     }
-    links.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    links.sort_by_key(|a| a.0.to_lowercase());
     links
 }
 
