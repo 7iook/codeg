@@ -33,9 +33,9 @@
 
   **Evidence**
   - `commit 393e8983`
-  - `verify: cargo check --features test-utils --message-format=short → EXIT=0; cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
-  - `files: src-tauri/src/acp/delegation/persona.rs:69-270 (类型基座) · mod.rs (pub mod persona) · types.rs:83 (subagent_type) / :105 (DelegationSuccess.applied_persona) / :283 (DelegationTaskReport.applied_persona) / :139 (InvalidPersona) / :313 (from_err arm) · tool_schema.json:26-40 · broker.rs / listener.rs / lifecycle.rs / commands/delegation.rs (下游 struct-literal 补 None)`
-  - `AC: 1.1 + 1.2 + 1.3 + 1.4 + 1.5 + 1.6 (optional) 全达`
+  - `verify: cargo check --tests → EXIT=0; cargo check --no-default-features --bin codeg-mcp → EXIT=0`
+  - `files: persona.rs LaunchOption..PersonaCapability @ :76-277 · types.rs subagent_type @ :83 / applied_persona @ :105,:283 / InvalidPersona @ :139 · tool_schema.json:26-40 (逐项见 1.1-1.6)`
+  - `AC: 1.1 1.2 1.3 1.4 1.5 1.6 全达`
 
   - [x] 1.1 在 `src-tauri/src/acp/delegation/persona.rs`(**新建模块**)定义:
     - `pub enum LaunchOption { KiroPersona(String) }`(单变体 · 未来加变体 · 禁 opaque map · R2 A4)
@@ -49,7 +49,7 @@
     **Evidence**
     - `commit 393e8983`
     - `verify: cargo check --features test-utils → EXIT=0; cargo check --no-default-features --bin codeg-mcp → EXIT=0`
-    - `files: src-tauri/src/acp/delegation/persona.rs:69 (LaunchOption) / :98 (AppliedPersona) / :121 (PersonaEffect) / :164 (PersonaError) / :241 (is_valid_persona_name) / :270 (PersonaCapability) · src-tauri/src/acp/delegation/mod.rs (pub mod persona)`
+    - `files: src-tauri/src/acp/delegation/persona.rs LaunchOption @ :76 / AppliedPersona @ :105 / PersonaEffect @ :128 / PersonaError @ :171 / is_valid_persona_name @ :248 / PersonaCapability @ :277 · src-tauri/src/acp/delegation/mod.rs (pub mod persona)`
     - `AC: 1.1 LaunchOption / AppliedPersona / PersonaEffect / PersonaError / is_valid_persona_name / PersonaCapability / resolve_preamble_at signature-only`
 
   - [x] 1.2 在 `types.rs:53-75 DelegationRequest` 追加 `#[serde(default, skip_serializing_if = "Option::is_none")] pub subagent_type: Option<String>`
@@ -104,7 +104,7 @@
   **Evidence**
   - `commit 10ed4f00`
   - `verify: cargo check --features test-utils --message-format=short → EXIT=0; cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
-  - `files: src-tauri/src/acp/delegation/persona.rs:514 (KiroProvider) / :552 (ClaudeCodeProvider) / :581 (CodexProvider) / :614 (UnsupportedProvider) / :649 (provider_for) · +349 行 · KiroProvider / ClaudeCodeProvider / CodexProvider / UnsupportedProvider unit-struct + PersonaCapability impls + provider_for match dispatch + 8 unit tests)`
+  - `files: src-tauri/src/acp/delegation/persona.rs KiroProvider @ :521 / ClaudeCodeProvider @ :559 / CodexProvider @ :588 / UnsupportedProvider @ :621 / provider_for @ :656 · +349 行 · KiroProvider / ClaudeCodeProvider / CodexProvider / UnsupportedProvider unit-struct + PersonaCapability impls + provider_for match dispatch + 8 unit tests)`
   - `AC: 2.1 Kiro→Native{KiroPersona} · 2.2/2.3 Claude/Codex→Failed{invalid_persona, stage-3 stub 桩} · 2.4 其它 AgentType(含 Custom)→Ignored · 2.5 8 条 unit tests 覆盖(见下)`
 
   - [x] 2.1 Kiro provider — `KiroProvider` unit struct + `impl PersonaCapability`:`supports_persona()=true` · `resolve_persona_effect(name, _)` 名称校后返 `PersonaEffect::Native{launch_option: LaunchOption::KiroPersona(name)}` · home_dir 不需(KIRO_HOME 由 kiro-cli 侧解)
@@ -113,7 +113,7 @@
     **Evidence**
     - `commit 10ed4f00`
     - `verify: cargo check --features test-utils / --no-default-features → EXIT=0`
-    - `files: src-tauri/src/acp/delegation/persona.rs:514 (KiroProvider 定义) · :649 (provider_for 分派)`
+    - `files: src-tauri/src/acp/delegation/persona.rs KiroProvider @ :521 · provider_for @ :656`
     - `AC: 2.1 Native{KiroPersona} 分支返回 · 名称非法防御 Failed{invalid_persona}`
 
   - [x] 2.2 ClaudeCode provider — `ClaudeCodeProvider` unit struct + `impl PersonaCapability`:`supports_persona()=true` · `resolve_persona_effect(name, _)` 名称校后**返 stage-3 stub `PersonaEffect::Failed{wire_code:"invalid_persona", reason:"persona resolver not yet implemented (stage 3)"}`**;`TODO(stage-3)` inline comment 记录将替换为 `resolve_preamble_at(name, &resolve_claude_config_dir().join("agents"))`
@@ -123,7 +123,7 @@
     **Evidence**
     - `commit 10ed4f00`
     - `verify: cargo check → EXIT=0`
-    - `files: src-tauri/src/acp/delegation/persona.rs:552 (ClaudeCodeProvider 定义) · :649 (provider_for 分派)`
+    - `files: src-tauri/src/acp/delegation/persona.rs ClaudeCodeProvider @ :559 · provider_for @ :656`
     - `AC: 2.2 stub 返 Failed{invalid_persona, stage-3 marker} 让 broker Err 路径可联调不 panic`
 
   - [x] 2.3 Codex provider — `CodexProvider` 同 2.2,`TODO(stage-3)` 指向 `resolve_codex_home_dir().join("agents")`
@@ -132,7 +132,7 @@
     **Evidence**
     - `commit 10ed4f00`
     - `verify: cargo check → EXIT=0`
-    - `files: src-tauri/src/acp/delegation/persona.rs:581 (CodexProvider 定义) · :649 (provider_for 分派)`
+    - `files: src-tauri/src/acp/delegation/persona.rs CodexProvider @ :588 · provider_for @ :656`
     - `AC: 2.3 同 2.2 shape`
 
   - [x] 2.4 default catch-all — `UnsupportedProvider` unit struct:`supports_persona()=false` · `resolve_persona_effect(_,_)=PersonaEffect::Ignored` · match 列尽所有非支持 built-in(OpenCode/Gemini/OpenClaw/Cline/Hermes/CodeBuddy/KimiCode/Pi/Grok/Cursor)+ `Custom(_)` · 未来加 AgentType 变体会因 non-exhaustive match 编译失败,强制作者显式路由(fail-safe 而非 wildcard)
@@ -141,7 +141,7 @@
     **Evidence**
     - `commit 10ed4f00`
     - `verify: cargo check → EXIT=0`
-    - `files: src-tauri/src/acp/delegation/persona.rs:614 (UnsupportedProvider 定义) · :649 (provider_for match 列尽 unsupported variants + Custom(_))`
+    - `files: src-tauri/src/acp/delegation/persona.rs UnsupportedProvider @ :621 · provider_for @ :656 (match 列尽 unsupported variants + Custom(_))`
     - `AC: 4.1 supports_persona=false · 4.2 resolve_persona_effect=Ignored · 未列举变体会编译失败(non-exhaustive 保护)`
 
   - [x]* 2.5 Provider unit tests(8 条 · 见 `#[cfg(test)] mod tests` §Stage-2 段):
@@ -158,7 +158,7 @@
     **Evidence**
     - `commit 10ed4f00`
     - `verify: cargo check --features test-utils → EXIT=0`(test 代码类型正确,tests 静态编译通过);**整体 `cargo test` 因 stage 1 update log 已声明的遗留 test-tree 债无法跑到(broker.rs/listener.rs/manager.rs test-tree 里的 DelegationSuccess/DelegationRequest struct literal 缺 stage-1 引入的 applied_persona/subagent_type 字段 · 硬约束禁触这三处 · stage 4/5 补齐后可整体跑)**
-    - `files: src-tauri/src/acp/delegation/persona.rs:514-649 (四 provider 定义 + provider_for) · #[cfg(test)] mod tests §Stage-2 段 (+8 tests)`
+    - `files: src-tauri/src/acp/delegation/persona.rs KiroProvider..provider_for @ :521-656 (四 provider 定义 + provider_for) · #[cfg(test)] mod tests §Stage-2 段 (+8 tests)`
     - `AC: 8 provider tests 静态通过 typecheck · 覆盖 Kiro/Claude/Codex/Unsupported/Custom + grammar 顺序 invariant`
 
 
@@ -169,7 +169,7 @@
   **Evidence**
   - `commit 7950ed51`
   - `verify: cargo check (test-utils / mcp) → EXIT=0; cargo test --test persona_stage3 → 12/12 passed`
-  - `files: src-tauri/src/acp/delegation/persona.rs:329 (resolve_preamble_at) / :428 (strip_frontmatter) · src-tauri/tests/persona_stage3.rs (new)`
+  - `files: src-tauri/src/acp/delegation/persona.rs resolve_preamble_at @ :336 / strip_frontmatter @ :435 · src-tauri/tests/persona_stage3.rs (new)`
   - `AC: Requirements 3.1 + 3.2 + 3.3 + 8.1 全达 (spec design §5, R2 F4 + R2 F2 + R3 F1)`
 
   See sub-tasks 3.1-3.3 for detailed narrative, verification breakdown, and file line references.
@@ -187,7 +187,7 @@
     **Evidence**
     - `commit 7950ed51`
     - `verify: cargo test --test persona_stage3 → 12/12 passed(含 read_cap_boundary + rejects_symlink_escape_via_direct_child_check_unix cfg(unix))`
-    - `files: src-tauri/src/acp/delegation/persona.rs:329 (resolve_preamble_at body) / :428 (strip_frontmatter fn) · 同时把 PersonaError 由 stage-1 的 unit-variant shape 恢复成 spec design §5 line 250-258 的 tuple-variant shape(InvalidName(String) / NotFound(String) / NotUtf8(String) / EmptyBody(String) / MalformedFrontmatter(String) / PathEscape(String))`
+    - `files: src-tauri/src/acp/delegation/persona.rs resolve_preamble_at @ :336 (body) / strip_frontmatter @ :435 · 同时把 PersonaError 由 stage-1 的 unit-variant shape 恢复成 spec design §5 line 250-258 的 tuple-variant shape(InvalidName(String) / NotFound(String) / NotUtf8(String) / EmptyBody(String) / MalformedFrontmatter(String) / PathEscape(String))`
     - `AC: 3.1 canonical direct-child · TOCTOU-safe open · 200 KiB BufReader::take · BOM strip · frontmatter hard-fail on unclosed fence · EmptyBody detection`
 
   - [x] 3.2 `resolve_preamble_at` 用 `std::env::var("HOME").or_else("USERPROFILE")` 构 home 只在 impl 2.2/2.3 内部调用(R3 F1 只 Hint provider 才解 HOME,unsupported/Kiro 不碰)
