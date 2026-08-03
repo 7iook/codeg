@@ -1336,7 +1336,7 @@
   "ImportSessions": {
     "title": "Lokale Sitzungen importieren",
     "scanningTitle": "Lokale Agentensitzungen werden gescannt…",
-    "scanningHint": "Die lokalen Sitzungsspeicher der Agenten werden durchsucht. Bei großen Verläufen kann das etwas dauern.",
+    "scanningHint": "Die lokalen Sitzungsspeicher der Agenten werden durchsucht. Bei großen Verläufen kann das etwas dauern. Bereits importierte Sitzungen werden dabei aktualisiert.",
     "scanFailed": "Scan fehlgeschlagen",
     "retry": "Erneut versuchen",
     "rescan": "Neu scannen",
@@ -1366,7 +1366,7 @@
     "close": "Schließen",
     "doneTitle": "Import abgeschlossen",
     "doneImported": "Importiert",
-    "doneUpdated": "Titel aktualisiert",
+    "doneUpdated": "Aktualisiert",
     "doneSkipped": "Übersprungen",
     "doneCreatedFolders": "Ordner erstellt",
     "doneNotFound": "Nicht gefunden",

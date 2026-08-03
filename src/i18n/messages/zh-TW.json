@@ -1336,7 +1336,7 @@
   "ImportSessions": {
     "title": "匯入本機工作階段",
     "scanningTitle": "正在掃描本機智慧代理工作階段…",
-    "scanningHint": "正在遍歷各智慧代理的本機工作階段儲存，歷史較多時可能需要一些時間。",
+    "scanningHint": "正在遍歷各智慧代理的本機工作階段儲存，歷史較多時可能需要一些時間。已匯入的工作階段會順帶重新整理。",
     "scanFailed": "掃描失敗",
     "retry": "重試",
     "rescan": "重新掃描",
@@ -1366,7 +1366,7 @@
     "close": "關閉",
     "doneTitle": "匯入完成",
     "doneImported": "新匯入",
-    "doneUpdated": "標題已重新整理",
+    "doneUpdated": "已重新整理",
     "doneSkipped": "已略過",
     "doneCreatedFolders": "新建資料夾",
     "doneNotFound": "未找到",

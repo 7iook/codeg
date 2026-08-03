@@ -1336,7 +1336,7 @@
   "ImportSessions": {
     "title": "Importar sesiones locales",
     "scanningTitle": "Escaneando sesiones locales de los agentes…",
-    "scanningHint": "Recorriendo el almacén local de sesiones de cada agente. Con historiales grandes puede tardar un momento.",
+    "scanningHint": "Recorriendo el almacén local de sesiones de cada agente. Con historiales grandes puede tardar un momento. Las sesiones ya importadas se actualizan por el camino.",
     "scanFailed": "Error al escanear",
     "retry": "Reintentar",
     "rescan": "Reescanear",
@@ -1366,7 +1366,7 @@
     "close": "Cerrar",
     "doneTitle": "Importación finalizada",
     "doneImported": "Importadas",
-    "doneUpdated": "Títulos actualizados",
+    "doneUpdated": "Actualizadas",
     "doneSkipped": "Omitidas",
     "doneCreatedFolders": "Carpetas creadas",
     "doneNotFound": "No encontradas",

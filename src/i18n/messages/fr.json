@@ -1336,7 +1336,7 @@
   "ImportSessions": {
     "title": "Importer les sessions locales",
     "scanningTitle": "Analyse des sessions locales des agents…",
-    "scanningHint": "Parcours du stockage local des sessions de chaque agent. Cela peut prendre un moment avec de gros historiques.",
+    "scanningHint": "Parcours du stockage local des sessions de chaque agent. Cela peut prendre un moment avec de gros historiques. Les sessions déjà importées sont actualisées au passage.",
     "scanFailed": "Échec de l'analyse",
     "retry": "Réessayer",
     "rescan": "Réanalyser",
@@ -1366,7 +1366,7 @@
     "close": "Fermer",
     "doneTitle": "Importation terminée",
     "doneImported": "Importées",
-    "doneUpdated": "Titres mis à jour",
+    "doneUpdated": "Actualisées",
     "doneSkipped": "Ignorées",
     "doneCreatedFolders": "Dossiers créés",
     "doneNotFound": "Introuvables",

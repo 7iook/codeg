@@ -1336,7 +1336,7 @@
   "ImportSessions": {
     "title": "导入本地会话",
     "scanningTitle": "正在扫描本地智能体会话…",
-    "scanningHint": "正在遍历各智能体的本地会话存储，历史较多时可能需要一些时间。",
+    "scanningHint": "正在遍历各智能体的本地会话存储，历史较多时可能需要一些时间。已导入的会话会顺带刷新。",
     "scanFailed": "扫描失败",
     "retry": "重试",
     "rescan": "重新扫描",
@@ -1366,7 +1366,7 @@
     "close": "关闭",
     "doneTitle": "导入完成",
     "doneImported": "新导入",
-    "doneUpdated": "标题已刷新",
+    "doneUpdated": "已刷新",
     "doneSkipped": "已跳过",
     "doneCreatedFolders": "新建文件夹",
     "doneNotFound": "未找到",

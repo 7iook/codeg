@@ -1336,7 +1336,7 @@
   "ImportSessions": {
     "title": "ローカルセッションをインポート",
     "scanningTitle": "ローカルエージェントのセッションをスキャン中…",
-    "scanningHint": "各エージェントのローカルセッションストアを走査しています。履歴が多い場合は時間がかかることがあります。",
+    "scanningHint": "各エージェントのローカルセッションストアを走査しています。履歴が多い場合は時間がかかることがあります。インポート済みのセッションはあわせて更新されます。",
     "scanFailed": "スキャンに失敗しました",
     "retry": "再試行",
     "rescan": "再スキャン",
@@ -1366,7 +1366,7 @@
     "close": "閉じる",
     "doneTitle": "インポート完了",
     "doneImported": "インポート",
-    "doneUpdated": "タイトル更新",
+    "doneUpdated": "更新済み",
     "doneSkipped": "スキップ",
     "doneCreatedFolders": "作成フォルダー",
     "doneNotFound": "見つからず",

@@ -1336,7 +1336,7 @@
   "ImportSessions": {
     "title": "Importar sessões locais",
     "scanningTitle": "Verificando sessões locais dos agentes…",
-    "scanningHint": "Percorrendo o armazenamento local de sessões de cada agente. Históricos grandes podem levar um momento.",
+    "scanningHint": "Percorrendo o armazenamento local de sessões de cada agente. Históricos grandes podem levar um momento. As sessões já importadas são atualizadas no processo.",
     "scanFailed": "Falha na verificação",
     "retry": "Tentar novamente",
     "rescan": "Verificar novamente",
@@ -1366,7 +1366,7 @@
     "close": "Fechar",
     "doneTitle": "Importação concluída",
     "doneImported": "Importadas",
-    "doneUpdated": "Títulos atualizados",
+    "doneUpdated": "Atualizadas",
     "doneSkipped": "Ignoradas",
     "doneCreatedFolders": "Pastas criadas",
     "doneNotFound": "Não encontradas",

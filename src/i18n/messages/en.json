@@ -1336,7 +1336,7 @@
   "ImportSessions": {
     "title": "Import Local Sessions",
     "scanningTitle": "Scanning local agent sessions…",
-    "scanningHint": "Walking each agent's local session store. Large histories can take a moment.",
+    "scanningHint": "Walking each agent's local session store. Large histories can take a moment. Sessions you already imported are refreshed along the way.",
     "scanFailed": "Scan failed",
     "retry": "Retry",
     "rescan": "Rescan",
@@ -1366,7 +1366,7 @@
     "close": "Close",
     "doneTitle": "Import finished",
     "doneImported": "Imported",
-    "doneUpdated": "Titles updated",
+    "doneUpdated": "Refreshed",
     "doneSkipped": "Skipped",
     "doneCreatedFolders": "Folders created",
     "doneNotFound": "Not found",
