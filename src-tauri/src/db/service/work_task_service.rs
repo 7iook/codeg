@@ -2110,13 +2110,20 @@ mod tests {
         assert_eq!(s.max_concurrent, 2);
         assert!(s.delete_worktree_default);
         assert!(!s.auto_process);
+        assert!(s.stage_prompts.is_empty());
         let mut s2 = s;
         s2.max_concurrent = 0;
         s2.merge_strategy = "merge".into();
+        s2.stage_prompts
+            .insert("merge".into(), "Write the message in Chinese.".into());
         settings_set(&db.conn, folder_id, &s2).await.unwrap();
         let s3 = settings_get(&db.conn, folder_id).await.unwrap();
         assert_eq!(s3.max_concurrent, 0);
         assert_eq!(s3.merge_strategy, "merge");
+        assert_eq!(
+            s3.stage_prompts.get("merge").map(String::as_str),
+            Some("Write the message in Chinese.")
+        );
     }
 
     #[tokio::test]

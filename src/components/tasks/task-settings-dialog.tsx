@@ -40,11 +40,37 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Textarea } from "@/components/ui/textarea"
 import type { AgentType, WorkTaskFolderSettings } from "@/lib/types"
 
 /** Sentinel folder id of the global-defaults settings row (backend contract). */
 const GLOBAL_SCOPE = 0
+
+/**
+ * The launch stages a task flows through, in the order they can happen. The
+ * keys are the engine's own stage ids (the `round` event's `kind`), so the
+ * labels here are literally the ones the transcript shows above each round —
+ * `all` is the extra bucket appended to every stage.
+ */
+const PROMPT_STAGES = [
+  {
+    key: "all",
+    labelKey: "settingsPromptStageAll",
+    hintKey: "settingsPromptHintAll",
+  },
+  { key: "work", labelKey: "phaseWork", hintKey: "settingsPromptHintWork" },
+  { key: "retry", labelKey: "phaseRetry", hintKey: "settingsPromptHintRetry" },
+  {
+    key: "return",
+    labelKey: "phaseReturn",
+    hintKey: "settingsPromptHintReturn",
+  },
+  { key: "merge", labelKey: "phaseMerge", hintKey: "settingsPromptHintMerge" },
+] as const
+
+/** Shared tab body: a floor height so switching tabs barely moves the dialog. */
+const TAB_BODY_CLASS = "mt-1 flex min-h-[16rem] flex-col gap-3.5"
 
 interface TaskSettingsDialogProps {
   open: boolean
@@ -54,11 +80,13 @@ interface TaskSettingsDialogProps {
 }
 
 /**
- * Task defaults, per folder or global: the default processing agent + its
- * ACP-probed mode/model options, auto-process, max concurrency, merge/cleanup
- * defaults, worktree init command and the preflight command. The scope
- * selector at the top switches which settings row is being edited; the global
- * row (folder id 0) applies wholesale to folders that never saved their own.
+ * Task defaults, per folder or global, grouped into three tabs: General (the
+ * processing agent + its ACP-probed mode/model options, auto-process, max
+ * concurrency), Workflow (merge/cleanup defaults, worktree init and preflight
+ * commands) and Prompts (per-stage instructions appended to what the engine
+ * sends the agent). The scope selector above the tabs switches which settings
+ * row is being edited; the global row (folder id 0) applies wholesale to
+ * folders that never saved their own.
  */
 export function TaskSettingsDialog({
   open,
@@ -137,7 +165,12 @@ function TaskSettingsBody({
   const [deleteWorktreeDefault, setDeleteWorktreeDefault] = useState(true)
   const [initCommand, setInitCommand] = useState("")
   const [preflightCommand, setPreflightCommand] = useState("")
+  const [stagePrompts, setStagePrompts] = useState<Record<string, string>>({})
+  const [stage, setStage] = useState<string>(PROMPT_STAGES[0].key)
+  const [tab, setTab] = useState("general")
   const [saving, setSaving] = useState(false)
+  const activeStage =
+    PROMPT_STAGES.find((s) => s.key === stage) ?? PROMPT_STAGES[0]
 
   useEffect(() => {
     let cancelled = false
@@ -170,6 +203,7 @@ function TaskSettingsBody({
         setMergeStrategy(s.merge_strategy === "merge" ? "merge" : "squash")
         setDeleteWorktreeDefault(s.delete_worktree_default)
         setInitCommand(s.init_command ?? "")
+        setStagePrompts(s.stage_prompts ?? {})
         const legacy =
           s.preflight_command_id != null
             ? (commands.find((c) => c.id === s.preflight_command_id)?.command ??
@@ -229,6 +263,13 @@ function TaskSettingsBody({
         preflight_command_id: null,
         preflight_command: preflightCommand.trim() || null,
         init_command: initCommand.trim() || null,
+        // Blank stages are dropped rather than stored as "" — the engine
+        // trims anyway, and an empty entry would only add noise to the blob.
+        stage_prompts: Object.fromEntries(
+          Object.entries(stagePrompts)
+            .map(([key, text]) => [key, text.trim()] as const)
+            .filter(([, text]) => text.length > 0)
+        ),
       }
       await workTaskSettingsSet(folderId, settings)
       onClose()
@@ -304,146 +345,212 @@ function TaskSettingsBody({
         ) : null}
 
         {editing ? (
-          <>
-            <div className="flex flex-col gap-2">
-              <Label className="text-sm">{t("settingsAgent")}</Label>
-              <div className="flex">
-                <AgentSelector
-                  defaultAgentType={agentType}
-                  onSelect={(a) => {
-                    setAgentType(a)
-                    setModeId(null)
-                    setConfigValues({})
-                  }}
-                  onFallback={setAgentType}
+          <Tabs value={tab} onValueChange={setTab}>
+            <TabsList className="w-full">
+              <TabsTrigger value="general" className="flex-1">
+                {t("settingsTabGeneral")}
+              </TabsTrigger>
+              <TabsTrigger value="workflow" className="flex-1">
+                {t("settingsTabWorkflow")}
+              </TabsTrigger>
+              <TabsTrigger value="prompts" className="flex-1">
+                {t("settingsTabPrompts")}
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="general" className={TAB_BODY_CLASS}>
+              <div className="flex flex-col gap-2">
+                <Label className="text-sm">{t("settingsAgent")}</Label>
+                <div className="flex">
+                  <AgentSelector
+                    defaultAgentType={agentType}
+                    onSelect={(a) => {
+                      setAgentType(a)
+                      setModeId(null)
+                      setConfigValues({})
+                    }}
+                    onFallback={setAgentType}
+                  />
+                </div>
+                <AgentConfigSection
+                  snapshot={agentOptions.snapshot}
+                  loading={agentOptions.loading}
+                  error={agentOptions.error}
+                  onReload={agentOptions.reload}
+                  modeId={modeId}
+                  configValues={configValues}
+                  layout="inline"
+                  onModeChange={setModeId}
+                  onConfigChange={(optionId, valueId) =>
+                    setConfigValues((prev) => {
+                      const next = { ...prev }
+                      if (valueId === null) delete next[optionId]
+                      else next[optionId] = valueId
+                      return next
+                    })
+                  }
                 />
               </div>
-              <AgentConfigSection
-                snapshot={agentOptions.snapshot}
-                loading={agentOptions.loading}
-                error={agentOptions.error}
-                onReload={agentOptions.reload}
-                modeId={modeId}
-                configValues={configValues}
-                layout="inline"
-                onModeChange={setModeId}
-                onConfigChange={(optionId, valueId) =>
-                  setConfigValues((prev) => {
-                    const next = { ...prev }
-                    if (valueId === null) delete next[optionId]
-                    else next[optionId] = valueId
-                    return next
-                  })
-                }
-              />
-            </div>
 
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex min-w-0 flex-col">
-                <Label htmlFor="task-auto-process" className="text-sm">
-                  {t("settingsAutoProcess")}
-                </Label>
-                <span className="text-xs text-muted-foreground">
-                  {t("settingsAutoProcessHint")}
-                </span>
-              </div>
-              <Switch
-                id="task-auto-process"
-                checked={autoProcess}
-                onCheckedChange={setAutoProcess}
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex min-w-0 flex-col">
-                <Label htmlFor="task-max-concurrent" className="text-sm">
-                  {t("settingsMaxConcurrent")}
-                </Label>
-                <span className="text-xs text-muted-foreground">
-                  {t("settingsMaxConcurrentHint")}
-                </span>
-              </div>
-              <Input
-                id="task-max-concurrent"
-                inputMode="numeric"
-                value={maxConcurrent}
-                onChange={(e) =>
-                  setMaxConcurrent(e.target.value.replace(/[^0-9]/g, ""))
-                }
-                className="w-20 text-right"
-              />
-            </div>
-
-            {/* Plain-language options (no git jargon); the hint under the
-                row explains whichever one is selected — same pattern as the
-                settings-source switcher above. */}
-            <div className="flex flex-col gap-1">
               <div className="flex items-center justify-between gap-3">
-                <Label className="text-sm">{t("settingsMergeStrategy")}</Label>
-                <Select
-                  value={mergeStrategy}
-                  onValueChange={(v) =>
-                    setMergeStrategy(v === "merge" ? "merge" : "squash")
-                  }
-                >
-                  <SelectTrigger size="sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="squash">
-                      {t("strategySquash")}
-                    </SelectItem>
-                    <SelectItem value="merge">{t("strategyMerge")}</SelectItem>
-                  </SelectContent>
-                </Select>
+                <div className="flex min-w-0 flex-col">
+                  <Label htmlFor="task-auto-process" className="text-sm">
+                    {t("settingsAutoProcess")}
+                  </Label>
+                  <span className="text-xs text-muted-foreground">
+                    {t("settingsAutoProcessHint")}
+                  </span>
+                </div>
+                <Switch
+                  id="task-auto-process"
+                  checked={autoProcess}
+                  onCheckedChange={setAutoProcess}
+                />
               </div>
-              <span className="text-xs text-muted-foreground">
-                {mergeStrategy === "squash"
-                  ? t("strategySquashHint")
-                  : t("strategyMergeHint")}
-              </span>
-            </div>
 
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="task-init-command" className="text-sm">
-                {t("settingsInitCommand")}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-col">
+                  <Label htmlFor="task-max-concurrent" className="text-sm">
+                    {t("settingsMaxConcurrent")}
+                  </Label>
+                  <span className="text-xs text-muted-foreground">
+                    {t("settingsMaxConcurrentHint")}
+                  </span>
+                </div>
+                <Input
+                  id="task-max-concurrent"
+                  inputMode="numeric"
+                  value={maxConcurrent}
+                  onChange={(e) =>
+                    setMaxConcurrent(e.target.value.replace(/[^0-9]/g, ""))
+                  }
+                  className="w-20 text-right"
+                />
+              </div>
+            </TabsContent>
+
+            <TabsContent value="workflow" className={TAB_BODY_CLASS}>
+              {/* Plain-language options (no git jargon); the hint under the
+                  row explains whichever one is selected — same pattern as the
+                  settings-source switcher above. */}
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-3">
+                  <Label className="text-sm">
+                    {t("settingsMergeStrategy")}
+                  </Label>
+                  <Select
+                    value={mergeStrategy}
+                    onValueChange={(v) =>
+                      setMergeStrategy(v === "merge" ? "merge" : "squash")
+                    }
+                  >
+                    <SelectTrigger size="sm">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="squash">
+                        {t("strategySquash")}
+                      </SelectItem>
+                      <SelectItem value="merge">
+                        {t("strategyMerge")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  {mergeStrategy === "squash"
+                    ? t("strategySquashHint")
+                    : t("strategyMergeHint")}
+                </span>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="task-init-command" className="text-sm">
+                  {t("settingsInitCommand")}
+                </Label>
+                <span className="text-xs text-muted-foreground">
+                  {t("settingsInitCommandHint")}
+                </span>
+                <Input
+                  id="task-init-command"
+                  value={initCommand}
+                  onChange={(e) => setInitCommand(e.target.value)}
+                  placeholder={t("settingsInitCommandPlaceholder")}
+                  className="font-mono text-xs"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="task-preflight-command" className="text-sm">
+                  {t("settingsPreflight")}
+                </Label>
+                <span className="text-xs text-muted-foreground">
+                  {t("settingsPreflightHint")}
+                </span>
+                <Input
+                  id="task-preflight-command"
+                  value={preflightCommand}
+                  onChange={(e) => setPreflightCommand(e.target.value)}
+                  placeholder={t("settingsPreflightCustomPlaceholder")}
+                  className="font-mono text-xs"
+                />
+              </div>
+
+              <Label className="text-sm font-normal">
+                <Checkbox
+                  checked={deleteWorktreeDefault}
+                  onCheckedChange={(v) => setDeleteWorktreeDefault(v === true)}
+                />
+                {t("settingsDeleteWorktree")}
               </Label>
-              <span className="text-xs text-muted-foreground">
-                {t("settingsInitCommandHint")}
-              </span>
-              <Input
-                id="task-init-command"
-                value={initCommand}
-                onChange={(e) => setInitCommand(e.target.value)}
-                placeholder={t("settingsInitCommandPlaceholder")}
-                className="font-mono text-xs"
-              />
-            </div>
+            </TabsContent>
 
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="task-preflight-command" className="text-sm">
-                {t("settingsPreflight")}
-              </Label>
+            {/* Free-form text appended after the built-in instructions of one
+                launch stage. The stage strip doubles as the field's label —
+                a dot marks the stages that already carry text, so nothing
+                stays hidden behind an unselected segment. */}
+            <TabsContent value="prompts" className={TAB_BODY_CLASS}>
               <span className="text-xs text-muted-foreground">
-                {t("settingsPreflightHint")}
+                {t("settingsPromptsHint")}
               </span>
-              <Input
-                id="task-preflight-command"
-                value={preflightCommand}
-                onChange={(e) => setPreflightCommand(e.target.value)}
-                placeholder={t("settingsPreflightCustomPlaceholder")}
-                className="font-mono text-xs"
-              />
-            </div>
-
-            <Label className="text-sm font-normal">
-              <Checkbox
-                checked={deleteWorktreeDefault}
-                onCheckedChange={(v) => setDeleteWorktreeDefault(v === true)}
-              />
-              {t("settingsDeleteWorktree")}
-            </Label>
-          </>
+              <Tabs value={stage} onValueChange={setStage}>
+                <TabsList className="w-full flex-wrap group-data-horizontal/tabs:h-auto">
+                  {PROMPT_STAGES.map((s) => (
+                    <TabsTrigger
+                      key={s.key}
+                      value={s.key}
+                      className="h-7 px-2 text-xs"
+                    >
+                      {t(s.labelKey)}
+                      {stagePrompts[s.key]?.trim() ? (
+                        <span
+                          aria-hidden
+                          className="size-1.5 rounded-full bg-primary"
+                        />
+                      ) : null}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
+              <div className="flex flex-col gap-1.5">
+                <Textarea
+                  aria-label={t(activeStage.labelKey)}
+                  value={stagePrompts[stage] ?? ""}
+                  onChange={(e) =>
+                    setStagePrompts((prev) => ({
+                      ...prev,
+                      [stage]: e.target.value,
+                    }))
+                  }
+                  placeholder={t("settingsPromptPlaceholder")}
+                  className="max-h-48 min-h-24 overflow-y-auto text-sm"
+                />
+                <span className="text-xs text-muted-foreground">
+                  {t(activeStage.hintKey)}
+                </span>
+              </div>
+            </TabsContent>
+          </Tabs>
         ) : null}
       </div>
 

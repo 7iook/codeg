@@ -44,7 +44,7 @@ use crate::db::AppDatabase;
 use crate::logging::throttle::{LagLogThrottle, LAG_LOG_WINDOW};
 use crate::models::{
     AgentType, WorkTaskConfig, WorkTaskFolderSettings, WorkTaskMergeState,
-    WorkTaskPreflight,
+    WorkTaskPreflight, STAGE_PROMPT_ALL,
 };
 use crate::web::event_bridge::{
     emit_event, EventEmitter, WorkTaskChange, WORK_TASK_CHANGED_EVENT,
@@ -863,7 +863,7 @@ impl TaskEngine {
         };
         emit_conversation_upsert(&self.emitter, &self.db.conn, conversation_id).await;
 
-        let blocks = compose_prompt(&cfg, &task, &mode, resumed, &self.db.conn).await?;
+        let blocks = compose_prompt(&cfg, &task, &mode, &settings, resumed, &self.db.conn).await?;
 
         // Register for completion correlation BEFORE prompting so a fast
         // TurnComplete can't race ahead of the index entry.
@@ -2251,11 +2251,13 @@ fn effective_agent_config(
 /// Compose the prompt for a launch mode. Fresh runs replay the task's blocks.
 /// Retry/return compose against the session we actually got: a resumed session
 /// already carries the task context, while a fresh fallback session needs the
-/// full original description again. Every prompt ends with the worktree guard.
+/// full original description again. Every prompt ends with the worktree guard,
+/// then with whatever the folder's settings add for this stage.
 async fn compose_prompt(
     cfg: &WorkTaskConfig,
     task: &crate::db::entities::work_task::Model,
     mode: &LaunchMode,
+    settings: &WorkTaskFolderSettings,
     resumed: bool,
     conn: &sea_orm::DatabaseConnection,
 ) -> Result<Vec<PromptInputBlock>, String> {
@@ -2387,7 +2389,32 @@ async fn compose_prompt(
             ),
         });
     }
+
+    // Whatever the user added in task settings, always last: it refines the
+    // built-in wording above it, and staying at the end keeps `prompt_head`
+    // (the transcript's round marker) on the prompt's own opening text.
+    blocks.extend(stage_prompt_block(settings, mode.round_kind()));
     Ok(blocks)
+}
+
+/// The user's own instructions for a stage: the `all` text (every stage) then
+/// the stage's own, as one trailing block. Empty when neither is configured.
+fn stage_prompt_block(
+    settings: &WorkTaskFolderSettings,
+    stage: &str,
+) -> Option<PromptInputBlock> {
+    let extras: Vec<&str> = [STAGE_PROMPT_ALL, stage]
+        .into_iter()
+        .filter_map(|key| settings.stage_prompts.get(key))
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .collect();
+    if extras.is_empty() {
+        return None;
+    }
+    Some(PromptInputBlock::Text {
+        text: format!("—— Additional instructions ——\n{}", extras.join("\n\n")),
+    })
 }
 
 /// The feedback text of the most recent "return" user action, if any.
@@ -2636,6 +2663,204 @@ mod tests {
         }];
         assert_eq!(prompt_head(&blocks), "Fix the login flow and add tests.");
         assert_eq!(prompt_head(&[]), "");
+    }
+
+    /// Minimal task row for prompt composition (nothing here touches the DB).
+    fn task_row() -> crate::db::entities::work_task::Model {
+        let now = chrono::Utc::now();
+        crate::db::entities::work_task::Model {
+            id: 7,
+            folder_id: 1,
+            title: "Fix the login flow".to_string(),
+            config: "{}".to_string(),
+            status: WorkTaskStatus::Queued,
+            failure_reason: None,
+            last_error: None,
+            run_seq: 1,
+            sort_order: 0,
+            worktree_folder_id: None,
+            conversation_id: None,
+            connection_id: None,
+            base_branch: Some("main".to_string()),
+            base_sha: None,
+            work_branch: Some("task/7".to_string()),
+            merge_state: None,
+            pending_merge: None,
+            cleanup_state: None,
+            verdict: None,
+            result_summary: None,
+            files_changed: None,
+            additions: None,
+            deletions: None,
+            merge_commit: None,
+            preflight: None,
+            archived_at: None,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            settled_at: None,
+            finished_at: None,
+            deleted_at: None,
+        }
+    }
+
+    fn task_config() -> WorkTaskConfig {
+        WorkTaskConfig {
+            prompt_blocks: vec![serde_json::json!({
+                "type": "text",
+                "text": "Fix the login flow and add tests."
+            })],
+            ..Default::default()
+        }
+    }
+
+    fn settings_with(pairs: &[(&str, &str)]) -> WorkTaskFolderSettings {
+        WorkTaskFolderSettings {
+            stage_prompts: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn texts(blocks: &[PromptInputBlock]) -> Vec<String> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                PromptInputBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn merge_mode() -> LaunchMode {
+        LaunchMode::Merge {
+            root_path: "/repo".to_string(),
+            base_branch: "main".to_string(),
+            work_branch: "task/7".to_string(),
+            strategy: "squash".to_string(),
+            message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_prompts_land_after_the_built_in_guard() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let settings = settings_with(&[("all", "Reply in Chinese."), ("work", "Run pnpm test.")]);
+        let blocks = compose_prompt(
+            &task_config(),
+            &task_row(),
+            &LaunchMode::Fresh,
+            &settings,
+            false,
+            &db.conn,
+        )
+        .await
+        .expect("compose");
+
+        let texts = texts(&blocks);
+        // …task blocks…, worktree guard, then the user's own instructions.
+        assert!(texts[texts.len() - 2].starts_with("—— Work task context ——"));
+        let last = texts.last().expect("trailing block");
+        assert!(last.starts_with("—— Additional instructions ——"));
+        // "all" first, then the stage's own text.
+        let all_at = last.find("Reply in Chinese.").expect("all text");
+        let work_at = last.find("Run pnpm test.").expect("stage text");
+        assert!(all_at < work_at);
+        // The round marker still keys off the task's own opening line, so the
+        // transcript's phase dividers are unaffected.
+        assert_eq!(prompt_head(&blocks), "Fix the login flow and add tests.");
+    }
+
+    #[tokio::test]
+    async fn stage_prompts_select_only_their_own_stage() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let settings = settings_with(&[
+            ("all", "EVERY-STAGE"),
+            ("work", "WORK-ONLY"),
+            ("retry", "RETRY-ONLY"),
+            ("return", "RETURN-ONLY"),
+            ("merge", "MERGE-ONLY"),
+        ]);
+        let modes = [
+            (LaunchMode::Fresh, "WORK-ONLY"),
+            (LaunchMode::Retry, "RETRY-ONLY"),
+            (LaunchMode::Return("please fix the copy".to_string()), "RETURN-ONLY"),
+            (merge_mode(), "MERGE-ONLY"),
+        ];
+        for (mode, expected) in modes {
+            let blocks = compose_prompt(
+                &task_config(),
+                &task_row(),
+                &mode,
+                &settings,
+                false,
+                &db.conn,
+            )
+            .await
+            .expect("compose");
+            let joined = texts(&blocks).join("\n");
+            assert!(joined.contains("EVERY-STAGE"), "{expected}: missing all-stage text");
+            assert!(joined.contains(expected), "{expected}: missing own text");
+            for other in ["WORK-ONLY", "RETRY-ONLY", "RETURN-ONLY", "MERGE-ONLY"] {
+                if other != expected {
+                    assert!(!joined.contains(other), "{expected}: leaked {other}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_stage_keeps_its_extra_without_the_guard() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let settings = settings_with(&[("merge", "Write the commit message in Chinese.")]);
+        let blocks = compose_prompt(
+            &task_config(),
+            &task_row(),
+            &merge_mode(),
+            &settings,
+            true,
+            &db.conn,
+        )
+        .await
+        .expect("compose");
+
+        let texts = texts(&blocks);
+        // The merge generation replaces the guard (it forbids exactly what a
+        // merge must do) — the user's extra still trails it.
+        assert!(texts.iter().all(|t| !t.starts_with("—— Work task context ——")));
+        assert!(texts[0].contains("land it onto the base branch"));
+        assert!(texts
+            .last()
+            .expect("trailing block")
+            .contains("Write the commit message in Chinese."));
+    }
+
+    #[tokio::test]
+    async fn blank_stage_prompts_add_nothing() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let bare = compose_prompt(
+            &task_config(),
+            &task_row(),
+            &LaunchMode::Fresh,
+            &WorkTaskFolderSettings::default(),
+            false,
+            &db.conn,
+        )
+        .await
+        .expect("compose");
+        let blank = compose_prompt(
+            &task_config(),
+            &task_row(),
+            &LaunchMode::Fresh,
+            &settings_with(&[("all", "  \n "), ("work", "")]),
+            false,
+            &db.conn,
+        )
+        .await
+        .expect("compose");
+        assert_eq!(texts(&bare), texts(&blank));
     }
 
     #[test]

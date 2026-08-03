@@ -1380,6 +1380,10 @@ export interface WorkTaskFolderSettings {
   /** Shell line run inside a freshly created worktree before the agent
    *  starts (deps install, env seeding). */
   init_command?: string | null
+  /** Extra instructions appended after the built-in prompt of a launch stage.
+   *  Keys are the engine's stage ids (`work` | `retry` | `return` | `merge`)
+   *  plus the reserved `all`, which applies to every stage. */
+  stage_prompts?: Record<string, string> | null
 }
 
 /** Changed file of a task worktree vs its recorded base. */
