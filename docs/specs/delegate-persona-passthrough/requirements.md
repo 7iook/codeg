@@ -163,7 +163,7 @@ Verified once by(**六条**真实链路验收矩阵,任一失败视为未达成 
 1. Start Kiro via `delegate_to_agent({agent_type:"kiro", subagent_type:"plan-reality-recon"})`, complete one turn.
 2. Force-kill the kiro-cli process (`taskkill /PID <pid> /F`).
 3. From codeg, `continue_with_session` on the same task_id (triggers `spawn_for_resume` with `session_id`).
-4. **Observe & record in design.md `## Update Log`**: (a) does the resumed kiro-cli reload `plan-reality-recon.json`? (b) does the resumed session's first response reflect persona behaviour (e.g. a `@plan-reality-recon`-flavoured intro)? (c) if it drops, does codeg's `applied_persona` on the resumed session correctly report `Failed { reason: "resume_dropped_persona" }` or does it silently claim `Native`?
+4. **Observe & record in design.md `## Update Log`**: (a) does the resumed kiro-cli reload `plan-reality-recon.json`? (b) does the resumed session's first response reflect persona behaviour (e.g. a `@plan-reality-recon`-flavoured intro)? (c) **per R3 A1 downgrade + R3 F2 (no `Failed` variant)**: `applied_persona` describes ONLY the first-launch state and is NOT recomputed on resume. If the persona drops after cold resume, that is a Kiro-side limitation to record in `## Known Limitations` — codeg does not synthesize a resume-time `applied_persona`; the resumed card either carries the first-launch `Native` label with a "resume state unknown" UI hint, or no persona label at all. codeg NEVER fabricates a resume-time persona outcome.
 5. IF (a)+(b) both hold, THE spec is safe to close on this leg. IF either drops, THE spec SHALL append a `## Known Limitations` section listing what resume actually does and how `applied_persona` reflects it.
 
 #### Requirement 7.2 (Claude/Codex process-death e2e — MUST run before spec closes)
@@ -173,7 +173,7 @@ Verified once by(**六条**真实链路验收矩阵,任一失败视为未达成 
 3. From codeg, `continue_with_session` on the same task_id.
 4. **Observe & record**: (a) does the resumed Claude session's context still contain `SPEC_MARKER_R2_RESUME_CLAUDE` (i.e. the wrapper replayed the first turn from `conversation`)? (b) does the second turn's assistant response reflect the persona's intended behaviour?
 5. Repeat AC7.2.1-4 for Codex.
-6. IF either wrapper does NOT replay first turn, THE spec SHALL append a `## Known Limitations` entry AND the `applied_persona` on the resumed session SHALL be reported as `Failed { reason: "wrapper_dropped_first_turn_on_resume" }` — do NOT silently claim `Hint` when the hint no longer exists in the running context.
+6. IF either wrapper does NOT replay first turn, THE spec SHALL append a `## Known Limitations` entry documenting the observed behaviour. **Per R3 A1 downgrade + R3 F2 (no `Failed` variant)**: `applied_persona` is captured ONLY at first launch and is NOT recomputed on resume — the resumed session carries either the first-launch `Hint` label with a "resume state unknown" UI marker, or no label. codeg SHALL NOT synthesize a resume-time persona outcome (no `Failed`, since that variant does not exist), and SHALL NOT silently upgrade a lost hint to a live `Hint` claim.
 
 
 ## Update Log
