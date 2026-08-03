@@ -24,11 +24,15 @@ const api = vi.hoisted(() => ({
 }))
 vi.mock("@/lib/api", () => api)
 
-// Always exercise the in-app browser path: the native picker is a shortcut, not
-// a separate flow, and jsdom has no Tauri.
-vi.mock("@/lib/platform", () => ({
-  isDesktop: () => false,
+// Default to the in-app browser path: the native picker is a shortcut, not a
+// separate flow, and jsdom has no Tauri. Individual tests opt into desktop.
+const platform = vi.hoisted(() => ({
+  desktop: false,
   openFileDialog: vi.fn(),
+}))
+vi.mock("@/lib/platform", () => ({
+  isDesktop: () => platform.desktop,
+  openFileDialog: platform.openFileDialog,
 }))
 vi.mock("@/lib/transport", () => ({
   getActiveRemoteConnectionId: () => null,
@@ -103,6 +107,7 @@ function Harness({ manage }: { manage?: FolderDetail }) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  platform.desktop = false
   api.getHomeDirectory.mockResolvedValue("/home/me")
   api.listDirectoryEntries.mockResolvedValue([])
   api.listFolderLinks.mockResolvedValue([])
@@ -498,6 +503,71 @@ describe("WorkspaceFolderDialog — adding link targets", () => {
       expect.anything(),
       false
     )
+  })
+})
+
+describe("WorkspaceFolderDialog — native picker", () => {
+  it("only fills the path box — opening still waits for the confirm", async () => {
+    platform.desktop = true
+    platform.openFileDialog.mockResolvedValue("/home/me/picked")
+    render(<Harness />)
+    await screen.findByDisplayValue("/home/me")
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "System picker" }))
+    })
+
+    expect(platform.openFileDialog).toHaveBeenCalledWith({
+      directory: true,
+      multiple: false,
+    })
+    // The box moved, but nothing has landed in the sidebar yet.
+    expect(screen.getByDisplayValue("/home/me/picked")).toBeInTheDocument()
+    expect(openFolder).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    })
+    expect(openFolder).toHaveBeenCalledWith("/home/me/picked")
+  })
+
+  it("stages a multi-select pick instead of linking it outright", async () => {
+    platform.desktop = true
+    platform.openFileDialog.mockResolvedValue([
+      "/home/me/work/api",
+      "/home/me/work/web",
+    ])
+    api.previewFolderLinks.mockResolvedValue([plan()])
+    render(<Harness manage={folder()} />)
+    await screen.findByText("No linked folders yet.")
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Add folders/ }))
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "System picker" }))
+    })
+
+    expect(platform.openFileDialog).toHaveBeenCalledWith({
+      directory: true,
+      multiple: true,
+    })
+    expect(api.previewFolderLinks).not.toHaveBeenCalled()
+
+    // Both picks are queued as ticks, so the confirm reads them, not the box.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add 2" }))
+    })
+    expect(api.previewFolderLinks).toHaveBeenCalledWith(7, [
+      "/home/me/work/api",
+      "/home/me/work/web",
+    ])
+  })
+
+  it("stays out of the way when there is no native picker", async () => {
+    render(<Harness />)
+    await screen.findByDisplayValue("/home/me")
+    expect(screen.queryByRole("button", { name: "System picker" })).toBeNull()
   })
 })
 

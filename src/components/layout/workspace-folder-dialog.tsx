@@ -10,7 +10,7 @@ import {
   Link2,
   Link2Off,
   Loader2,
-  MonitorCog,
+  MonitorDot,
   Pencil,
   Plus,
   RefreshCw,
@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { InputGroupButton } from "@/components/ui/input-group"
 import { Checkbox } from "@/components/ui/checkbox"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
@@ -197,12 +198,15 @@ export function WorkspaceFolderDialog({
     if (selected) await commitRoot(selected)
   }, [openingRoot, browserBusy, commitRoot])
 
+  // The picker fills the path box and stops there. It sits inside that box, so
+  // it has to behave like typing into it — opening the folder outright would
+  // skip the confirm step and land it in the sidebar before the user asked.
   const handleNativeRootPick = useCallback(async () => {
     const selected = await openFileDialog({ directory: true, multiple: false })
     if (!selected) return
     const path = Array.isArray(selected) ? selected[0] : selected
-    if (path) await commitRoot(path)
-  }, [commitRoot])
+    if (path) setRootPath(path)
+  }, [])
 
   // ── Step 2: link targets ──────────────────────────────────────────────────
 
@@ -259,13 +263,22 @@ export function WorkspaceFolderDialog({
     await runPreview(all)
   }, [targetPath, pickedTargets, runPreview])
 
+  // Same rule as the root picker: stage, don't commit. A multi-select lands in
+  // the tick list (which is what "Add" reads) with the box tracking the last
+  // one, exactly as if the rows had been clicked in the tree.
   const handleNativeTargetPick = useCallback(async () => {
     const selected = await openFileDialog({ directory: true, multiple: true })
     if (!selected) return
-    const paths = Array.isArray(selected) ? selected : [selected]
-    setPickedTargets([])
-    await runPreview(paths.filter(Boolean))
-  }, [runPreview])
+    const paths = (Array.isArray(selected) ? selected : [selected]).filter(
+      Boolean
+    )
+    if (paths.length === 0) return
+    setPickedTargets((prev) => {
+      const seen = new Set(prev.map(normalizeFsPath))
+      return [...prev, ...paths.filter((p) => !seen.has(normalizeFsPath(p)))]
+    })
+    setTargetPath(paths[paths.length - 1])
+  }, [])
 
   // Names already spoken for, so an inline edit can be validated before saving.
   const takenNames = useMemo(
@@ -393,40 +406,33 @@ export function WorkspaceFolderDialog({
               onValueChange={setRootPath}
               onQuickSelect={commitRoot}
               onBusyChange={setBrowserBusy}
+              pathInputAction={
+                nativePickerAvailable ? (
+                  <NativePickerButton
+                    onPick={handleNativeRootPick}
+                    disabled={openingRoot}
+                  />
+                ) : null
+              }
             />
-            <DialogFooter className="sm:justify-between">
-              {nativePickerAvailable ? (
-                <Button
-                  variant="ghost"
-                  type="button"
-                  onClick={handleNativeRootPick}
-                  disabled={openingRoot}
-                >
-                  <MonitorCog className="size-4" />
-                  {t("useSystemPicker")}
-                </Button>
-              ) : (
-                <span />
-              )}
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  type="button"
-                  onClick={() => onOpenChange(false)}
-                >
-                  {tBrowser("cancel")}
-                </Button>
-                <Button
-                  type="button"
-                  onClick={handleConfirmRoot}
-                  disabled={!rootPath.trim() || openingRoot || browserBusy}
-                >
-                  {openingRoot ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : null}
-                  {t("next")}
-                </Button>
-              </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => onOpenChange(false)}
+              >
+                {tBrowser("cancel")}
+              </Button>
+              <Button
+                type="button"
+                onClick={handleConfirmRoot}
+                disabled={!rootPath.trim() || openingRoot || browserBusy}
+              >
+                {openingRoot ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : null}
+                {t("next")}
+              </Button>
             </DialogFooter>
           </>
         ) : null}
@@ -444,49 +450,42 @@ export function WorkspaceFolderDialog({
               multiple
               selectedPaths={pickedTargets}
               onToggleSelected={toggleTarget}
+              pathInputAction={
+                nativePickerAvailable ? (
+                  <NativePickerButton
+                    onPick={handleNativeTargetPick}
+                    disabled={previewing}
+                  />
+                ) : null
+              }
             />
-            <DialogFooter className="sm:justify-between">
-              {nativePickerAvailable ? (
-                <Button
-                  variant="ghost"
-                  type="button"
-                  onClick={handleNativeTargetPick}
-                  disabled={previewing}
-                >
-                  <MonitorCog className="size-4" />
-                  {t("useSystemPicker")}
-                </Button>
-              ) : (
-                <span />
-              )}
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  type="button"
-                  onClick={() => {
-                    setPickedTargets([])
-                    setView("links")
-                  }}
-                >
-                  <ArrowLeft className="size-4" />
-                  {t("back")}
-                </Button>
-                <Button
-                  type="button"
-                  onClick={handleAddPicked}
-                  disabled={
-                    previewing ||
-                    (pickedTargets.length === 0 && !targetPath.trim())
-                  }
-                >
-                  {previewing ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : null}
-                  {pickedTargets.length > 1
-                    ? t("addSelectedCount", { count: pickedTargets.length })
-                    : t("addSelected")}
-                </Button>
-              </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => {
+                  setPickedTargets([])
+                  setView("links")
+                }}
+              >
+                <ArrowLeft className="size-4" />
+                {t("back")}
+              </Button>
+              <Button
+                type="button"
+                onClick={handleAddPicked}
+                disabled={
+                  previewing ||
+                  (pickedTargets.length === 0 && !targetPath.trim())
+                }
+              >
+                {previewing ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : null}
+                {pickedTargets.length > 1
+                  ? t("addSelectedCount", { count: pickedTargets.length })
+                  : t("addSelected")}
+              </Button>
             </DialogFooter>
           </>
         ) : null}
@@ -655,6 +654,43 @@ export function WorkspaceFolderDialog({
         ) : null}
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * Native-picker shortcut that lives at the trailing edge of the path box.
+ * Icon-only — the label moves into a tooltip, so the affordance sits next to
+ * the thing it fills in instead of competing with the footer's real actions.
+ */
+function NativePickerButton({
+  onPick,
+  disabled,
+}: {
+  onPick: () => void
+  disabled: boolean
+}) {
+  const t = useTranslations("Folder.workspaceDialog")
+
+  return (
+    // The app mounts no global tooltip provider — each surface brings its own,
+    // and Radix throws without one.
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <InputGroupButton
+            size="icon-xs"
+            variant="ghost"
+            type="button"
+            onClick={onPick}
+            disabled={disabled}
+            aria-label={t("useSystemPicker")}
+          >
+            <MonitorDot className="size-3.5" />
+          </InputGroupButton>
+        </TooltipTrigger>
+        <TooltipContent>{t("useSystemPicker")}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 

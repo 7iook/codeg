@@ -8,19 +8,31 @@ import {
   useRef,
   useImperativeHandle,
   forwardRef,
+  type ReactNode,
 } from "react"
 import { useTranslations } from "next-intl"
 import {
   Check,
   ChevronRight,
-  ChevronUp,
   FolderIcon,
   FolderOpenIcon,
   Home,
   Loader2,
+  UndoDot,
+  type LucideIcon,
 } from "lucide-react"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { getHomeDirectory, listDirectoryEntries } from "@/lib/api"
@@ -76,6 +88,12 @@ interface DirectoryBrowserProps {
   multiple?: boolean
   selectedPaths?: string[]
   onToggleSelected?: (path: string) => void
+  /**
+   * Rendered inside the path box, at its trailing edge. Hosts use it for
+   * shortcuts that belong to the path itself (the native picker, say) instead
+   * of parking them in a far-away footer.
+   */
+  pathInputAction?: ReactNode
   /** Tailwind height for the scroll area. */
   heightClassName?: string
 }
@@ -99,6 +117,7 @@ export const DirectoryBrowser = forwardRef<
     multiple = false,
     selectedPaths,
     onToggleSelected,
+    pathInputAction,
     heightClassName = "h-[300px]",
   },
   ref
@@ -431,35 +450,32 @@ export const DirectoryBrowser = forwardRef<
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8 shrink-0"
-          onClick={handleGoHome}
-          title={t("goHome")}
-          type="button"
-        >
-          <Home className="size-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8 shrink-0"
-          onClick={handleNavigateUp}
-          title={t("navigateUp")}
-          type="button"
-        >
-          <ChevronUp className="size-4" />
-        </Button>
-        <Input
-          value={value}
-          onChange={(e) => onValueChange(e.target.value)}
-          onKeyDown={handlePathInputKeyDown}
-          placeholder={t("pathPlaceholder")}
-          className="flex-1 h-8 text-sm font-mono"
-        />
-      </div>
+      {/* The app mounts no global tooltip provider — each surface brings its
+          own, and Radix throws without one. */}
+      <TooltipProvider delayDuration={200}>
+        <InputGroup className="h-8">
+          <InputGroupAddon align="inline-start" className="gap-0.5 py-0">
+            <NavButton icon={Home} label={t("goHome")} onClick={handleGoHome} />
+            <NavButton
+              icon={UndoDot}
+              label={t("navigateUp")}
+              onClick={handleNavigateUp}
+            />
+          </InputGroupAddon>
+          <InputGroupInput
+            value={value}
+            onChange={(e) => onValueChange(e.target.value)}
+            onKeyDown={handlePathInputKeyDown}
+            placeholder={t("pathPlaceholder")}
+            className="h-8 text-sm font-mono"
+          />
+          {pathInputAction ? (
+            <InputGroupAddon align="inline-end" className="py-0">
+              {pathInputAction}
+            </InputGroupAddon>
+          ) : null}
+        </InputGroup>
+      </TooltipProvider>
 
       <ScrollArea className={cn(heightClassName, "rounded-md border")}>
         <div className="p-1">
@@ -474,3 +490,35 @@ export const DirectoryBrowser = forwardRef<
     </div>
   )
 })
+
+/**
+ * Icon-only navigation shortcut for the leading edge of the path box. The label
+ * lives in a tooltip so the whole row reads as one control, and is mirrored onto
+ * `aria-label` so the button still has an accessible name.
+ */
+function NavButton({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: LucideIcon
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <InputGroupButton
+          size="icon-xs"
+          variant="ghost"
+          type="button"
+          onClick={onClick}
+          aria-label={label}
+        >
+          <Icon className="size-3.5" />
+        </InputGroupButton>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  )
+}
