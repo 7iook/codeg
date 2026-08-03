@@ -211,7 +211,13 @@ const KIRO_EFFORT_VALUES: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// contributes nothing, letting Kiro apply its own default.
 ///
 /// Pure so the full combination matrix is unit-testable without spawning.
-fn kiro_launch_args(runtime_env: &BTreeMap<String, String>) -> Vec<String> {
+///
+/// `pub` so an integration test crate can assert the persona merge → argv hop
+/// end-to-end: `cargo test --lib` cannot launch on every host (a Tauri native
+/// dependency aborts the lib test binary at startup with
+/// `STATUS_ENTRYPOINT_NOT_FOUND` on this Windows host), and an integration crate
+/// links only the library's public API.
+pub fn kiro_launch_args(runtime_env: &BTreeMap<String, String>) -> Vec<String> {
     let value = |key: &str| -> Option<&str> {
         runtime_env
             .get(key)

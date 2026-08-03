@@ -13719,15 +13719,18 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Stage-4 · Broker persona translation layer (T4.7)
+    // Broker persona translation layer
     //
     // These exercise `start_delegation`'s persona dispatch + the terminal
-    // `applied_persona` / unsupported-`[note]` it produces. MockSpawner does
-    // NOT accept a `launch_option` yet (stage 5 extends `SpawnCallArgs`), so
-    // the Native `launch_option` is asserted at the broker's observable output
-    // (`applied_persona`), not at the spawn-args layer — the stage-4 scope
-    // boundary. Where an assertion genuinely needs the stage-5 spawn-arg wiring
-    // it is marked `#[ignore]` with a pointer.
+    // `applied_persona` / unsupported-`[note]` it produces, asserted at the
+    // broker's observable output.
+    //
+    // The complementary spawn-args assertion — that a Kiro nomination actually
+    // reaches `ConnectionSpawner::spawn` as `Some(LaunchOption::KiroPersona)`
+    // rather than being derived and dropped — lives in the integration crate
+    // `tests/broker_persona.rs`, which can reach `MockSpawner::spawn_args`
+    // through the public test-utils surface. Keep both: this module proves the
+    // translation decisions, that crate proves the handoff.
     // ─────────────────────────────────────────────────────────────────────
 
     /// Build a delegation request for `agent_type` with an optional persona

@@ -3042,6 +3042,64 @@ impl ConnectionManager {
     }
 }
 
+/// Merge a per-call [`LaunchOption`] into the runtime env a child is about to
+/// be spawned with, returning the env unchanged when there is no launch option.
+///
+/// # Why this is a standalone pure function
+///
+/// Extracted from [`ConnectionManagerSpawner::spawn_child_inner`] purely for
+/// testability (review round-2 gap 1): the merge used to be inline, so the only
+/// way to observe it was to spawn a real agent process. Behaviour is unchanged —
+/// `spawn_child_inner` calls this and forwards the result to `spawn_agent`.
+///
+/// # Contract locked by `launch_option_merge_*` tests
+///
+/// A Kiro persona lands as `KIRO_AGENT=<name>` because that is the key
+/// `connection::kiro_launch_args` reads to emit `--agent <name>` argv. A
+/// per-call nomination intentionally OVERRIDES any panel-stored `KIRO_AGENT`
+/// (`env_json`) that `build_session_runtime_env` seeded — the LLM's explicit
+/// `subagent_type` wins over the persisted default.
+///
+/// # Ordering
+///
+/// The returned map is what `spawn_agent` → `spawn_agent_connection` consumes.
+/// Inside that call, `connection::build_agent` reads `runtime_env` TWICE for
+/// Kiro, in this order:
+///
+/// 1. `kiro_launch_args(runtime_env)` — translates `KIRO_AGENT` into
+///    `--agent <name>` argv, and `verify_kiro_selected_agent_exists` rejects a
+///    nomination with no matching `<KIRO_HOME>/agents/<name>.json`.
+/// 2. `apply_kiro_env_policy(&mut merged_env, runtime_env)` — strips every
+///    `KIRO_*` knob out of the CHILD PROCESS env (a separate `Vec`), so codeg's
+///    own launch inputs don't leak in as environment variables.
+///
+/// Step 2 takes `runtime_env` by shared reference and mutates only the child
+/// env vector, so it cannot unset what step 1 reads: the argv translation is
+/// safe regardless of the two steps' relative order. What is NOT safe is
+/// merging the launch option AFTER `spawn_agent` has already been handed the
+/// env — hence this function's result must flow into that call, which is what
+/// the `spawn_child_inner` call site does and what the merge tests pin.
+///
+/// `pub` so an integration test crate can pin the merge contract directly:
+/// `cargo test --lib` cannot launch on every host (a Tauri native dependency
+/// aborts the lib test binary at startup with `STATUS_ENTRYPOINT_NOT_FOUND` on
+/// this Windows host), and an integration crate links only the public API.
+pub fn merge_launch_option_into_runtime_env(
+    mut runtime_env: BTreeMap<String, String>,
+    launch_option: Option<&crate::acp::delegation::persona::LaunchOption>,
+) -> BTreeMap<String, String> {
+    match launch_option {
+        Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(name)) => {
+            runtime_env.insert(
+                crate::acp::connection::KIRO_AGENT_ENV.to_string(),
+                name.clone(),
+            );
+        }
+        None => {}
+    }
+    runtime_env
+}
+
 /// Production impl of `ConnectionSpawner` used by `DelegationBroker`.
 ///
 /// Bundles `Arc<ConnectionManager>` with `Arc<AppDatabase>` because
@@ -3118,31 +3176,19 @@ impl ConnectionManagerSpawner {
         .map_err(|e| SpawnerError::Spawn(e.to_string()))?;
 
         // Per-call persona nomination (stage 5, closes P0-1): a Kiro persona
-        // resolved by the broker arrives as `LaunchOption::KiroPersona(name)`.
-        // Insert it as `KIRO_AGENT=<name>` so `connection::kiro_launch_args`
-        // later emits `--agent <name>` argv.
+        // resolved by the broker arrives as `LaunchOption::KiroPersona(name)`
+        // and is merged into the runtime env as `KIRO_AGENT=<name>` so
+        // `connection::kiro_launch_args` later emits `--agent <name>` argv.
         //
-        // MERGE-ORDER INVARIANT (spec design §Risks · the argv translation it
-        // depends on is locked by `connection::kiro_launch_args_*` unit tests):
-        // this insert MUST happen BEFORE `spawn_agent` → `spawn_agent_connection`
-        // → `apply_kiro_env_policy`. That policy STRIPS every `KIRO_*` launch
-        // knob out of the child's *inherited* environment after translating it
-        // to argv; the translation reads `runtime_env`, so KIRO_AGENT must
-        // already be present in `runtime_env` here. Inserting it after
-        // `spawn_agent` (or letting the policy run first) would drop the
-        // persona silently. A per-call nomination also intentionally OVERRIDES
-        // any panel-stored `KIRO_AGENT` (`env_json`) that
-        // `build_session_runtime_env` may have seeded — the LLM's explicit
-        // `subagent_type` wins over the persisted default.
-        let mut runtime_env = runtime_env;
-        if let Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(name)) =
-            &launch_option
-        {
-            runtime_env.insert(
-                crate::acp::connection::KIRO_AGENT_ENV.to_string(),
-                name.clone(),
-            );
-        }
+        // MERGE-ORDER INVARIANT: the merge MUST happen HERE, before the env is
+        // handed to `spawn_agent` — that call consumes `runtime_env` BY VALUE,
+        // so a nomination applied afterwards could not reach the child at all.
+        // The merge semantics (including that a per-call nomination overrides a
+        // panel-stored `KIRO_AGENT`) are pinned by the
+        // `launch_option_merge_*` tests against
+        // `merge_launch_option_into_runtime_env`; the argv translation it feeds
+        // is pinned by `connection::kiro_launch_args_*`.
+        let runtime_env = merge_launch_option_into_runtime_env(runtime_env, launch_option.as_ref());
 
         self.manager
             .spawn_agent(
