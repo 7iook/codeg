@@ -329,6 +329,7 @@ export function TaskDetailSheet({
           })
           break
         case "queued":
+        case "preparing":
         case "running":
         case "awaiting_input":
           zoneActions.push({
@@ -1114,6 +1115,7 @@ const EVENT_KIND_KEYS = {
 const STATUS_KEYS = new Set([
   "todo",
   "queued",
+  "preparing",
   "running",
   "awaiting_input",
   "review",
@@ -1128,6 +1130,7 @@ function statusDotClass(status: string): string {
   switch (status) {
     case "running":
     case "queued":
+    case "preparing":
       return "bg-primary"
     case "awaiting_input":
     case "review":

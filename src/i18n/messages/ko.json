@@ -4180,6 +4180,7 @@
     "colDone": "완료",
     "statusTodo": "할 일",
     "statusQueued": "대기 중",
+    "statusPreparing": "준비 중",
     "statusRunning": "실행 중",
     "statusAwaitingInput": "입력 대기",
     "statusReview": "검토 대기",

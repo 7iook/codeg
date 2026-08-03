@@ -4180,6 +4180,7 @@
     "colDone": "Terminées",
     "statusTodo": "À faire",
     "statusQueued": "En file",
+    "statusPreparing": "Préparation",
     "statusRunning": "En cours",
     "statusAwaitingInput": "En attente de saisie",
     "statusReview": "À valider",

@@ -4180,6 +4180,7 @@
     "colDone": "Fertig",
     "statusTodo": "To-do",
     "statusQueued": "In Warteschlange",
+    "statusPreparing": "Wird vorbereitet",
     "statusRunning": "Läuft",
     "statusAwaitingInput": "Wartet auf Eingabe",
     "statusReview": "Zur Prüfung",

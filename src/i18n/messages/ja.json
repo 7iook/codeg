@@ -4180,6 +4180,7 @@
     "colDone": "完了",
     "statusTodo": "ToDo",
     "statusQueued": "待機中",
+    "statusPreparing": "準備中",
     "statusRunning": "実行中",
     "statusAwaitingInput": "入力待ち",
     "statusReview": "レビュー待ち",

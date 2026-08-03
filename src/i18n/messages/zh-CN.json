@@ -4180,6 +4180,7 @@
     "colDone": "已完成",
     "statusTodo": "待办",
     "statusQueued": "排队中",
+    "statusPreparing": "初始化中",
     "statusRunning": "进行中",
     "statusAwaitingInput": "等待输入",
     "statusReview": "待验收",

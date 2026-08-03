@@ -1260,6 +1260,8 @@ export interface AutomationDraft {
 export type WorkTaskStatus =
   | "todo"
   | "queued"
+  /** Out of the queue, setting up: worktree, init command, agent spawn. */
+  | "preparing"
   | "running"
   | "awaiting_input"
   | "review"
