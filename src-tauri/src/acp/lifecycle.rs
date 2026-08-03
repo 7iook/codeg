@@ -2713,6 +2713,8 @@ mod tests {
             working_dir: None,
             requested_working_dir: None,
             external_handle: None,
+
+            subagent_type: None,
         }
     }
 

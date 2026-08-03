@@ -6462,6 +6462,8 @@ mod tests {
                 working_dir: None,
                 requested_working_dir: None,
                 external_handle: None,
+
+                subagent_type: None,
             })
             .await;
         ack.task_id.expect("running ack carries a task id")
@@ -6723,6 +6725,8 @@ mod tests {
                         working_dir: None,
                         requested_working_dir: None,
                         external_handle: None,
+
+                        subagent_type: None,
                     })
                     .await
             })
@@ -6878,9 +6882,19 @@ mod tests {
     ) -> tokio::task::JoinHandle<String> {
         tokio::spawn(async move {
             match rx.recv().await {
-                Some(ConnectionCommand::Steer { text, reply }) => {
+                Some(ConnectionCommand::Steer { blocks, reply, .. }) => {
                     let _ = reply.send(outcome);
-                    text
+                    // The variant carries structured blocks after the v0.23 merge;
+                    // the old test-only `text` shortcut is reconstructed here from
+                    // the first `Text` block (all steer sends in these tests use
+                    // exactly one `PromptInputBlock::Text`).
+                    blocks
+                        .into_iter()
+                        .find_map(|b| match b {
+                            PromptInputBlock::Text { text } => Some(text),
+                            _ => None,
+                        })
+                        .unwrap_or_default()
                 }
                 _ => panic!("expected a Steer command"),
             }

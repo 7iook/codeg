@@ -1241,6 +1241,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -1293,6 +1295,8 @@ mod tests {
                 working_dir: None,
                 requested_working_dir: None,
                 external_handle: None,
+
+                subagent_type: None,
             })
             .await;
         let task_id = ack.task_id.clone().expect("running task carries an id");
@@ -1363,6 +1367,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -1446,6 +1452,8 @@ mod tests {
                         working_dir: None,
                         requested_working_dir: None,
                         external_handle: None,
+
+                        subagent_type: None,
                     })
                     .await
                     .task_id
@@ -1464,6 +1472,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 3,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -1548,6 +1558,8 @@ mod tests {
                 working_dir: None,
                 requested_working_dir: None,
                 external_handle: None,
+
+                subagent_type: None,
             })
             .await;
         let task_id = ack.task_id.clone().unwrap();
@@ -1599,6 +1611,8 @@ mod tests {
                     working_dir: None,
                     requested_working_dir: None,
                     external_handle: Some("h-1".into()),
+
+                    subagent_type: None,
                 };
                 broker.handle_request(req).await
             })

@@ -232,6 +232,8 @@ async fn end_to_end_named_pipe_happy_path() {
                 turn_count: 1,
                 duration_ms: 12,
                 token_usage: None,
+
+                applied_persona: None,
             }),
         )
         .await;
@@ -319,6 +321,8 @@ async fn end_to_end_named_pipe_back_to_back_requests() {
                             turn_count: 1,
                             duration_ms: 5,
                             token_usage: None,
+
+                            applied_persona: None,
                         }),
                     )
                     .await;

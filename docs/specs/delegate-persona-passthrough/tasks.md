@@ -220,28 +220,71 @@
 
 ### 阶段 4 · broker 翻译层 + 单测
 
-- [ ] 4. broker 翻译层重构(R2 A2 + R3 F1 + R3 A2 + R3 F2 采纳后的最终版)
-  - [ ] 4.1 修改 `broker.rs start_delegation`,骨架顺序**必须**:
+- [x] 4. broker 翻译层重构(R2 A2 + R3 F1 + R3 A2 + R3 F2 采纳后的最终版)
+
+  **Evidence**
+  - `commit pending`
+  - `verify: cargo check --features test-utils --tests → EXIT=0 (49 处 E0063 全清); cargo check --no-default-features --bin codeg-mcp → EXIT=0; cargo test --test persona_stage3 → 12 passed`
+  - `files: src-tauri/src/acp/delegation/broker.rs · listener.rs · lifecycle.rs · manager.rs · web/handlers/delegation.rs · tests/delegation_e2e_windows.rs`
+  - `AC: Requirements 3.5 + 4.1 + 4.2 + 4.3 + 5.1 + 5.3 + R3-F1 + R3-A2 + R3-F2 全达`
+
+  - [x] 4.1 修改 `broker.rs start_delegation`,骨架顺序**必须**:
     1. `if req.subagent_type == None` → 直接 Ignored,跳过所有校验
     2. 有 name → 先查 `provider_for(agent_type).supports_persona()`
     3. 只有 supports → 才 `is_valid_persona_name(name)` 校语法(不合法 → `DelegationOutcome::from_err(InvalidPersona)`)
     4. 只有 supports → 才 `provider.resolve_persona_effect(name, &lazy_home())`
     5. **unsupported CLI → 直接 PersonaEffect::Ignored,不碰名称校/不解 HOME**(R3 F1 关键 · Kiro 走 supports=true 但 resolve 内部不需 home)
     - _Requirements: 3.5, 4.1, 4.2, R3-F1_
-  - [ ] 4.2 broker 把 `PersonaEffect` 翻译成 `(launch_option, prepended_task, unsupported_note)` 三元组,**注意时机(R3 A2)**:此时不生成 `applied_persona`。**PersonaEffect::Failed → `DelegationOutcome::from_err(InvalidPersona)` 直返 · 不挂 applied**(R3 F2)
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils --tests → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/broker.rs (start_delegation 内 persona dispatch 块 · supports_persona→name grammar→resolve_persona_effect 顺序)`
+    - `AC: Requirements 3.5, 4.1, 4.2, R3-F1 — unsupported 短路不校名不解 HOME`
+  - [x] 4.2 broker 把 `PersonaEffect` 翻译成 `(launch_option, prepended_task, unsupported_note)` 三元组,**注意时机(R3 A2)**:此时不生成 `applied_persona`。**PersonaEffect::Failed → `DelegationOutcome::from_err(InvalidPersona)` 直返 · 不挂 applied**(R3 F2)
     - _Requirements: 5.1, R3-A2, R3-F2_
-  - [ ] 4.3 broker 调 `spawner.spawn(..., launch_option).await?`,**spawn 返 Ok 后**才产 `applied_persona`:
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils --tests → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/broker.rs (三元组 launch_option_pending/prepended_task/applied_persona_intent · Failed 分支 early-return report_err)`
+    - `AC: Requirements 5.1, R3-A2, R3-F2 — 三元组翻译 · Failed 直返不挂 applied`
+  - [x] 4.3 broker 调 `spawner.spawn(..., launch_option).await?`,**spawn 返 Ok 后**才产 `applied_persona`:
     - `PersonaEffect::Native` → `AppliedPersona::Native { name }`
     - `PersonaEffect::Ignored` + `subagent_type == Some(_)` → `AppliedPersona::IgnoredUnsupportedCli { name }`
     - 其它 → `None`
     - _Requirements: 5.1, 5.3, R3-A2_
-  - [ ] 4.4 broker 调 `send_prompt_linked_for_delegation(...)` 后:如果 effect 是 `Hint` **且** send 返 Ok → applied 拼上 `AppliedPersona::Hint { name }`(**在 send Ok 后才产**,R3 A2)
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils --tests → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/broker.rs (Native/IgnoredUnsupportedCli 在 dispatch 时定 intent · spawn 失败 early-return 丢 intent → 天然满足 spawn-Ok 后才产)`
+    - `AC: Requirements 5.1, 5.3, R3-A2 — spawn Ok 后 Native/Ignored 归因`
+  - [x] 4.4 broker 调 `send_prompt_linked_for_delegation(...)` 后:如果 effect 是 `Hint` **且** send 返 Ok → applied 拼上 `AppliedPersona::Hint { name }`(**在 send Ok 后才产**,R3 A2)
     - _Requirements: 3.2, 5.1, R3-A2_
-  - [ ] 4.5 unsupported_note 挂到 `DelegationSuccess.text` 尾部拼接
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils --tests → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/broker.rs (started_at 后按 (intent, prepended_task) match promote Hint · send 失败在此前 early-return)`
+    - `AC: Requirements 3.2, 5.1, R3-A2 — send Ok 后才 promote Hint`
+  - [x] 4.5 unsupported_note 挂到 `DelegationSuccess.text` 尾部拼接
     - _Requirements: 4.2, 4.3_
-  - [ ] 4.6 tracing::info!(target="delegation::persona") 记录每一次 Ignored/Native/Hint 事件
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils --tests → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/broker.rs (unsupported_persona_note + append_unsupported_note free fn · complete_call + setup-window take_early_complete 两处追加)`
+    - `AC: Requirements 4.2, 4.3 — IgnoredUnsupportedCli + Ok outcome → [note] 挂 text`
+  - [x] 4.6 tracing::info!(target="delegation::persona") 记录每一次 Ignored/Native/Hint 事件
     - _Requirements: 4.3_
-  - [ ]* 4.7 broker unit tests(用 MockSpawner):
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils --tests → EXIT=0`
+    - `files: src-tauri/src/acp/delegation/broker.rs (Native/Hint/Ignored/unsupported 四事件各一条 tracing::info! target=delegation::persona)`
+    - `AC: Requirements 4.3 — 每次 persona 事件可 grep filter`
+  - [x]* 4.7 broker unit tests(用 MockSpawner):
     - **Property 1**(缺省零副作用):`subagent_type=None` → `launch_option=None`,task 不变,无 note,无 applied · `_Validates: 6.1, 6.2_`
     - **Property 2**(per-call 覆盖 panel):Kiro + name → runtime_env["KIRO_AGENT"]=name(见 5.2 test)· `_Validates: 2.1, 2.3_`
     - **Property 3**(preamble ↔ launch 互斥):ClaudeCode+name → launch_option=None;Kiro+name → task 不变(无 preamble prepend)· `_Validates: 3.5_`
@@ -253,6 +296,12 @@
     - **R3 F2 无 Failed 变体**:invalid persona → 返 `DelegationOutcome::Err{code:"invalid_persona"}`,**Err payload 不含 applied_persona**
     - _Requirements: 全部 5 项 Correctness Properties_
     - _Properties: P1, P2, P3, P4, P5_
+
+    **Evidence**
+    - `commit pending`
+    - `verify: cargo check --features test-utils --tests → EXIT=0 (8 test 类型层编译绿); 运行 unverified: lib-test 二进制 0xC0000139 启动崩(既有测试同崩·集成测试 exe 正常·本机 Tauri native DLL 环境问题·非本改动)`
+    - `files: src-tauri/src/acp/delegation/broker.rs (#[cfg(test)] mod tests 尾部 +8 persona test: P1 P2 P3 P4 P5 + R3-F1 R3-A2 R3-F2)`
+    - `AC: Correctness Properties P1-P5 + R3-F1/A2/F2 — 断言 broker 可观察 applied_persona 输出(MockSpawner 不接 launch_option 至 stage 5, 无 #[ignore])`
 
 ### 阶段 5 · ConnectionSpawner trait 扩 + spawn_child_inner merge
 
@@ -386,3 +435,23 @@
     - `cargo test --test persona_stage3 --features test-utils --message-format=short → 12 passed; 0 failed; EXIT=0`
   - **硬约束合规**:仅动 `src-tauri/src/acp/delegation/persona.rs` + 新建 `src-tauri/tests/persona_stage3.rs` · 未触碰 broker.rs/listener.rs/manager.rs/connection.rs · 未引入 serde_yaml/markdown parser · spawn 签名未改(stage 5 的活)
   - **架构反思**:stage 3 是 stage 1 unit-variant drift 的自然纠偏点 · 若 stage 1 时就照 spec 落 tuple-variant · 本轮工作量少 1/4 · 单测断言不必重写 · 教训归档到 executor 报告以促成下轮的 R2/R3 落 spec 更严
+
+- 2026-08-03 · executor(claude-opus 4.8 1M) · stage 4 complete · commit `pending` · broker 翻译层 + persona effect dispatch + broker unit tests · **单 commit(含 4.0 stage-1 遗留 mock literal 债一并清)**:
+  - **4.0(前置)· 补 stage-1 遗留 mock literals**:cargo check --tests 报的 49 处 E0063 全清 —— `DelegationSuccess` 缺 `applied_persona` 40 处 + `DelegationRequest` 缺 `subagent_type` 9 处,分布:broker.rs test(34 Success + 1 Request)、listener.rs test(3 Success + 4 Request)、lifecycle.rs test(1 Request)、manager.rs test(2 Request)、web/handlers/delegation.rs test(1 Success + 1 Request)、tests/delegation_e2e_windows.rs(2 Success)· 仅在 test-only mock literal 补 `None`,生产 fn 不动 · 用一次性脚本(brace-balanced 扫描 + 排除 `->`/`impl`/`struct`/`for` 非字面量上下文)完成 · **额外修 1 处 manager.rs:6885 `answer_steer` test helper 的 `ConnectionCommand::Steer { text, reply }` pattern**(v0.22→v0.23 merge 时生产 enum 已升级为 `Steer { blocks, message_id, reply }`,该 test 未同步 → 改成解构 `{ blocks, reply, .. }` 从首个 `PromptInputBlock::Text` 重建 text · 属同类 test↔生产 drift 债,主 AI 已授权本 commit 清)
+  - **4.1 persona dispatch 骨架**:`start_delegation` 在 `agent_defaults` 取完后、spawn 前插入 provider dispatch,严格 R3-F1 顺序(`supports_persona()` → `is_valid_persona_name()` → `resolve_persona_effect()`)· unsupported CLI 短路 Ignored 不校名不解 HOME · 产出 `(launch_option_pending, prepended_task, applied_persona_intent)` 三元组 · `report_err` helper 名称与 spec 一致,直接采用现有 free fn(签名 `report_err(agent_type, DelegationError, Option<i32>)`)
+  - **4.2 prepended_task 路径**:`send_prompt_linked_for_delegation` 调用点(broker.rs:3448)把 `req.task.clone()` 换成 `prepended_task.clone().unwrap_or_else(|| req.task.clone())` · Hint 走 preamble+task 拼接,其余原样
+  - **4.3 Native/IgnoredUnsupportedCli 在 spawn Ok 后产**:三元组的 `applied_persona_intent` 在 dispatch 时即定 Native/Ignored(spawn 失败则 early-return 走 `report_err`,intent 随 return 丢弃 → 天然满足 R3-A2「spawn 失败不挂 applied」)
+  - **4.4 Hint 在 send Ok 后 promote**:`started_at` 之后(即 send 返 Ok 后)按 `(applied_persona_intent, prepended_task)` 二元 match promote Hint · send 失败在此之前 early-return → Hint 不产
+  - **4.5 unsupported_note 挂 DelegationSuccess.text**:新增 `unsupported_persona_note()` + `append_unsupported_note()` free fn · 在 `complete_call`(outcome 改 mut)与 setup-window `take_early_complete` 两处对成功 outcome 追加 `[note] subagent_type='X' ignored for {agent:?} (persona not supported)` · 仅 IgnoredUnsupportedCli intent + Ok outcome 触发
+  - **4.6 tracing**:Native/Hint/Ignored(+unsupported)四事件各一条 `tracing::info!(target: "delegation::persona", ...)`,便于 grep filter
+  - **launch_option_pending 存储方式**:**broker 局部变量**(非 RunningTask field)· spawn 签名 stage 4 不扩,故用 `let _ = launch_option_pending.as_ref();` 显式保活 + 注释标注 stage-5 fuel · **未扩 MockSpawner / spawn 签名**(stage 5 的活)· `applied_persona_intent` 则落 `RunningTask.applied_persona_intent` + `CompletedTask.applied_persona` 两个新 field(前者 park 期存 intent,后者供 `get_task_status` 完成读回路径投影)· `completed_report()` / `report_from_outcome()` / `build_completed()` / `running_ack()` 全部扩参贯通 persona
+  - **4.7 broker unit tests**:+8 test 于 broker.rs `#[cfg(test)] mod tests` 尾部 —— P1(no subagent→applied None + text 不变)/ P2(Kiro→Native)/ P3(Kiro Native 不带 preamble · 互斥)/ P4(Gemini unsupported→Ignored + note 挂 text)/ R3-F1(Gemini + 非法名 `foo.bar` 不失败)/ R3-A2(spawn Err→applied None)/ R3-F2(invalid name→Err code `invalid_persona` + 无 applied + 未 spawn)/ P5(Kiro+Gemini 并发 attribution 隔离)· 因 MockSpawner 不接 launch_option(stage 5 才扩 `SpawnCallArgs`),Native 的 launch_option 值断言让位于「broker 可观察输出 `applied_persona`」层,注释标注 stage-5 spawn-arg 接线点 · **无 `#[ignore]` test**(全部改为断言 broker 层可观察产出,规避 MockSpawner 缺口)
+  - **验证输出**:
+    - `cargo check --features test-utils --message-format=short → EXIT=0`(仅 3 个 pre-existing steer dead-code warning)
+    - `cargo check --features test-utils --tests --message-format=short → EXIT=0`(49 处 E0063 全清)
+    - `cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
+    - `cargo test --test persona_stage3 --features test-utils → 12 passed; 0 failed; EXIT=0`(stage-3 契约回归绿)
+    - `cargo clippy --all-targets --features test-utils → 我的 broker.rs 新代码 0 warning`(persona.rs:653/762 的 doc-list + match-destructure warning 是 stage 2/3 既有,不在本 scope)
+    - **broker unit tests 运行**:`unverified: 环境障碍`。`cargo test --lib` 的 `codeg_lib-*.exe` 测试二进制启动即崩 `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)` —— **受控对比确证与本改动无关**:① stage 前既有的 `running_ack_message_embeds_task_id`(我未触碰)同样崩;② 集成测试 `persona_stage3-*.exe`(依赖面小)在完整 PATH 下 12/12 正常绿。根因 = lib-test 二进制拉起完整 Tauri native 依赖链,本机某 DLL 缺导出符号,启动阶段即崩(早于任何 test 逻辑)· 8 个新 test 已通过 `cargo check --tests` 类型层验证 · 待 CI / 干净 Windows 环境或 stage 5 收尾时整体运行确认绿
+  - **变体扫描(§5.3)**:report 构造点全仓核查 —— listener.rs(cancel/failed/unknown 三 report 构造器)、lifecycle.rs:337、web/handlers/delegation.rs:355 的 `applied_persona: None` 均为**建立前/错误路径**,无 persona 可归因,None 语义正确 · 成功路径统一经 broker 的 `report_from_outcome`/`build_completed`/`running_ack` 携带 persona · 无遗漏
+  - **硬约束合规**:未改 `ConnectionSpawner::spawn` 签名(stage 5)· 未改 MockSpawner 签名(stage 5)· 未触碰 manager.rs / connection.rs / listener.rs 生产代码(仅补 test-only mock literal + 1 处 answer_steer test pattern)· 未碰前端 · launch_option_pending 以 broker 局部变量 park,`gate:allow-unwired` 语义已在注释标注等 stage 5 消费

@@ -316,6 +316,12 @@ struct RunningTask {
     /// BEFORE it existed — the P0 guarantee: whatever N the confirmation dialog
     /// showed, the N+1th is not silently killed.
     registered_epoch: u64,
+    /// What the broker actually applied for this delegation's persona. Written
+    /// on the SPAWN-Ok / SEND-Ok side (R3 A2) so a spawn failure leaves this
+    /// `None`. `Native` / `IgnoredUnsupportedCli` are committed at spawn-Ok;
+    /// `Hint` is promoted at send-Ok (task 4.4). Drained by `complete_call`
+    /// into the terminal report / completed cache.
+    applied_persona_intent: Option<crate::acp::delegation::persona::AppliedPersona>,
 }
 
 /// The set of delegations a parent-turn cancel on one connection would
@@ -430,6 +436,11 @@ struct CompletedTask {
     error_code: Option<String>,
     message: Option<String>,
     duration_ms: u64,
+    /// What persona translation the broker committed for this delegation, if
+    /// any. Snapshot of the terminal `RunningTask::applied_persona_intent`
+    /// value; drained into the terminal `DelegationTaskReport` on the
+    /// completed-cache read path (`get_task_status`).
+    applied_persona: Option<crate::acp::delegation::persona::AppliedPersona>,
 }
 
 /// Who dispatched a turn (Requirement 8.2 origin): the MCP companion tool
@@ -1492,6 +1503,7 @@ fn build_completed(
     agent_type: AgentType,
     duration_ms: u64,
     outcome: &DelegationOutcome,
+    applied_persona: Option<crate::acp::delegation::persona::AppliedPersona>,
 ) -> CompletedTask {
     let (status, text, error_code, message) = terminal_fields(outcome);
     CompletedTask {
@@ -1503,6 +1515,7 @@ fn build_completed(
         error_code,
         message,
         duration_ms,
+        applied_persona,
     }
 }
 
@@ -1597,6 +1610,7 @@ fn drain_and_record_canceled(
                 task.agent_type,
                 duration_ms,
                 &outcome,
+                task.applied_persona_intent.clone(),
             ),
         );
         // Cancel tears the child process down — clear the session's connection
@@ -1632,6 +1646,7 @@ fn report_from_outcome(
     agent_type: Option<AgentType>,
     outcome: &DelegationOutcome,
     duration_ms: Option<u64>,
+    applied_persona: Option<crate::acp::delegation::persona::AppliedPersona>,
 ) -> DelegationTaskReport {
     let (status, text, error_code, message) = terminal_fields(outcome);
     let child_conversation_id = match outcome {
@@ -1650,7 +1665,7 @@ fn report_from_outcome(
         error_code,
         message,
         duration_ms,
-        applied_persona: None,
+        applied_persona,
     }
 }
 
@@ -1666,7 +1681,7 @@ fn continuation_err_report(
     agent_type: Option<AgentType>,
 ) -> DelegationTaskReport {
     let outcome = DelegationOutcome::from_err(err, child_conversation_id);
-    report_from_outcome(Some(task_id.to_string()), agent_type, &outcome, None)
+    report_from_outcome(Some(task_id.to_string()), agent_type, &outcome, None, None)
 }
 
 /// Build a `Failed`/`Canceled` report for a setup error (no task id — setup
@@ -1677,14 +1692,23 @@ fn report_err(
     child_conversation_id: Option<i32>,
 ) -> DelegationTaskReport {
     let outcome = DelegationOutcome::from_err(err, child_conversation_id);
-    report_from_outcome(None, Some(agent_type), &outcome, None)
+    report_from_outcome(None, Some(agent_type), &outcome, None, None)
 }
 
 /// The `Running` ack returned by `start_delegation` for a backgrounded task.
+///
+/// `applied_persona` is populated when the caller nominated a `subagent_type`
+/// AND the broker committed a translation this round (`Native` /
+/// `IgnoredUnsupportedCli` — both known after `spawn` returned Ok, per R3 A2).
+/// `Hint` variants are NOT populated here: they wait for the first-turn send
+/// to succeed and are then promoted onto the RunningTask (`applied_persona_intent`)
+/// so the terminal report picks them up. Legacy calls with no persona keep
+/// passing `None`.
 fn running_ack(
     call_id: String,
     child_conversation_id: i32,
     agent_type: AgentType,
+    applied_persona: Option<crate::acp::delegation::persona::AppliedPersona>,
 ) -> DelegationTaskReport {
     // Embed the literal task_id in the message so it survives clients that only
     // surface the MCP `content` text (not `structuredContent`) — without it the
@@ -1703,7 +1727,7 @@ fn running_ack(
         error_code: None,
         message: Some(message),
         duration_ms: None,
-        applied_persona: None,
+        applied_persona,
     }
 }
 
@@ -1747,6 +1771,45 @@ fn running_report(task_id: &str, task: &RunningTask) -> DelegationTaskReport {
     }
 }
 
+/// [stage-4 T4.5] Build the `[note]` line appended to a successful
+/// delegation's result text when the caller nominated a `subagent_type` for a
+/// CLI that has no persona concept. The LLM reading the tool result then sees
+/// its request was silently downgraded rather than honored. `None` unless the
+/// terminal persona intent is `IgnoredUnsupportedCli`.
+fn unsupported_persona_note(
+    applied_persona: Option<&crate::acp::delegation::persona::AppliedPersona>,
+    agent_type: AgentType,
+) -> Option<String> {
+    match applied_persona {
+        Some(crate::acp::delegation::persona::AppliedPersona::IgnoredUnsupportedCli { name }) => {
+            Some(format!(
+                "[note] subagent_type='{name}' ignored for {agent_type:?} (persona not supported)"
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Append the unsupported-persona `[note]` to a successful outcome's text,
+/// in place. No-op for failures / cancels (they carry no `text`) and for any
+/// non-`IgnoredUnsupportedCli` intent.
+fn append_unsupported_note(
+    outcome: &mut DelegationOutcome,
+    applied_persona: Option<&crate::acp::delegation::persona::AppliedPersona>,
+    agent_type: AgentType,
+) {
+    if let DelegationOutcome::Ok(ok) = outcome {
+        if let Some(note) = unsupported_persona_note(applied_persona, agent_type) {
+            if ok.text.is_empty() {
+                ok.text = note;
+            } else {
+                ok.text.push_str("\n\n");
+                ok.text.push_str(&note);
+            }
+        }
+    }
+}
+
 /// Status report from a cached completed result.
 fn completed_report(task_id: &str, c: &CompletedTask) -> DelegationTaskReport {
     DelegationTaskReport {
@@ -1758,7 +1821,10 @@ fn completed_report(task_id: &str, c: &CompletedTask) -> DelegationTaskReport {
         error_code: c.error_code.clone(),
         message: c.message.clone(),
         duration_ms: Some(c.duration_ms),
-        applied_persona: None,
+        // [stage-4 T4.3/4.4] Surface the persona translation the broker
+        // committed for this delegation on the completed-cache read path, so a
+        // `get_delegation_status` after the task went terminal still carries it.
+        applied_persona: c.applied_persona.clone(),
     }
 }
 
@@ -3199,6 +3265,138 @@ impl DelegationBroker {
             .get(&req.agent_type)
             .map(|d: &AgentDelegationDefaults| (d.mode_id.clone(), d.config_values.clone()))
             .unwrap_or((None, BTreeMap::new()));
+
+        // --- [stage-4 T4.1] Persona translation --------------------------------
+        // Dispatch to the per-agent PersonaCapability provider and compute the
+        // three broker-visible outputs of a persona nomination:
+        //   • `launch_option_pending` — Native effect's `LaunchOption`; the
+        //     spawner does NOT consume it yet (stage-5 will extend
+        //     `ConnectionSpawner::spawn`); kept as a broker-local variable so
+        //     the parked task's translation still exists at settle time.
+        //     `gate:allow-unwired` from `LaunchOption` covers the parked value.
+        //   • `prepended_task` — Hint effect's task-string prepend, applied to
+        //     the FIRST turn's `send_prompt_linked_for_delegation`.
+        //   • `applied_persona_intent` — what will land in the terminal
+        //     `DelegationTaskReport.applied_persona`. R3-A2 timing:
+        //       - Native / IgnoredUnsupportedCli → committed here (spawn Ok
+        //         side); Native flips to `None` if spawn later fails.
+        //       - Hint → left `None` here; the send-Ok path promotes it into
+        //         the parked `RunningTask` (task 4.4).
+        // Order (R3-F1): supports_persona() BEFORE name-grammar. An unsupported
+        // CLI with a grammar-illegal name still yields IgnoredUnsupportedCli,
+        // not InvalidPersona.
+        let (launch_option_pending, prepended_task, applied_persona_intent) = match req
+            .subagent_type
+            .as_deref()
+        {
+            None => (None, None, None),
+            Some(name) => {
+                let provider = crate::acp::delegation::persona::provider_for(req.agent_type);
+                if !provider.supports_persona() {
+                    tracing::info!(
+                        target: "delegation::persona",
+                        agent_type = ?req.agent_type,
+                        persona = %name,
+                        "subagent_type ignored (CLI has no persona concept)"
+                    );
+                    (
+                        None,
+                        None,
+                        Some(
+                            crate::acp::delegation::persona::AppliedPersona::IgnoredUnsupportedCli {
+                                name: name.to_string(),
+                            },
+                        ),
+                    )
+                } else if !crate::acp::delegation::persona::is_valid_persona_name(name) {
+                    self.drop_inflight(inflight_id).await;
+                    return report_err(
+                        req.agent_type,
+                        DelegationError::InvalidPersona(format!(
+                            "persona name '{name}' violates grammar"
+                        )),
+                        None,
+                    );
+                } else {
+                    // Provider owns HOME resolution — every real impl ignores
+                    // this arg (see `_home_dir` in ClaudeCodeProvider /
+                    // CodexProvider / KiroProvider / UnsupportedProvider). Pass
+                    // an empty path so we don't leak a placeholder into logs.
+                    let dummy_home = std::path::PathBuf::new();
+                    match provider.resolve_persona_effect(name, &dummy_home) {
+                        crate::acp::delegation::persona::PersonaEffect::Native {
+                            launch_option,
+                        } => {
+                            tracing::info!(
+                                target: "delegation::persona",
+                                agent_type = ?req.agent_type,
+                                persona = %name,
+                                launch_option = ?launch_option,
+                                "persona resolved to native launch option"
+                            );
+                            (
+                                Some(launch_option),
+                                None,
+                                Some(crate::acp::delegation::persona::AppliedPersona::Native {
+                                    name: name.to_string(),
+                                }),
+                            )
+                        }
+                        crate::acp::delegation::persona::PersonaEffect::Hint { preamble } => {
+                            let preview_len = preamble.len();
+                            tracing::info!(
+                                target: "delegation::persona",
+                                agent_type = ?req.agent_type,
+                                persona = %name,
+                                preamble_bytes = preview_len,
+                                "persona resolved to first-turn hint preamble"
+                            );
+                            // Requirement 5.1 / R3-A2: send-Ok promotes the
+                            // intent to `Hint`; here we only carry the prepend.
+                            let prepended = format!("{}\n\n---\n\n{}", preamble, req.task);
+                            (None, Some(prepended), None)
+                        }
+                        crate::acp::delegation::persona::PersonaEffect::Ignored => {
+                            // Reachable only if a supported provider decided
+                            // to downgrade at runtime; today no provider does,
+                            // but the enum permits it. Handled symmetrically
+                            // to the `!supports_persona()` branch above.
+                            tracing::info!(
+                                target: "delegation::persona",
+                                agent_type = ?req.agent_type,
+                                persona = %name,
+                                "persona resolver returned Ignored"
+                            );
+                            (
+                                None,
+                                None,
+                                Some(
+                                    crate::acp::delegation::persona::AppliedPersona::IgnoredUnsupportedCli {
+                                        name: name.to_string(),
+                                    },
+                                ),
+                            )
+                        }
+                        crate::acp::delegation::persona::PersonaEffect::Failed {
+                            wire_code: _,
+                            reason,
+                        } => {
+                            self.drop_inflight(inflight_id).await;
+                            return report_err(
+                                req.agent_type,
+                                DelegationError::InvalidPersona(reason),
+                                None,
+                            );
+                        }
+                    }
+                }
+            }
+        };
+        // `launch_option_pending` is stage-5 fuel: kept alive as a broker-local
+        // Option so stage 5 can wire it into `ConnectionSpawner::spawn` without
+        // re-plumbing the caller side. Deliberately unused this round.
+        let _ = launch_option_pending.as_ref();
+
         // Checkpoint #1 (opportunistic): if a parent cancel already landed
         // during the claim/depth phase, bail before spawning a child the parent
         // has abandoned. No child exists yet, so there's nothing to tear down.
@@ -3288,7 +3486,15 @@ impl DelegationBroker {
 
         let child_conversation_id = match self
             .spawner
-            .send_prompt_linked_for_delegation(&child_connection_id, req.task.clone(), link)
+            .send_prompt_linked_for_delegation(
+                &child_connection_id,
+                // [stage-4 T4.2] Requirement 3.2 / 5.1 / R3-A2: for a Hint
+                // persona, ship the preamble+task composite on the FIRST turn.
+                // For every other case (no persona / Native / Ignored) pass
+                // the original task text unchanged.
+                prepended_task.clone().unwrap_or_else(|| req.task.clone()),
+                link,
+            )
             .await
         {
             Ok(cid) => cid,
@@ -3314,6 +3520,23 @@ impl DelegationBroker {
         // The child is now running. Stamp the start so terminal paths can
         // report a real `duration_ms`.
         let started_at = Instant::now();
+
+        // [stage-4 T4.4] Requirement 3.2 / 5.1 / R3-A2: promote a Hint intent
+        // now that the first-turn send returned Ok. Native / IgnoredUnsupportedCli
+        // were already committed at spawn-Ok time (T4.3); Hint waits until this
+        // moment so a send failure above leaves `applied_persona` = `None`.
+        let applied_persona_intent = match (applied_persona_intent, prepended_task.as_ref()) {
+            (Some(x), _) => Some(x),
+            (None, Some(_)) => {
+                let name = req
+                    .subagent_type
+                    .as_deref()
+                    .expect("prepended_task implies subagent_type")
+                    .to_string();
+                Some(crate::acp::delegation::persona::AppliedPersona::Hint { name })
+            }
+            (None, None) => None,
+        };
 
         // --- Mark the parent's tool call as in-flight -------------------------
         // The frontend's DelegationContext seeds its `parent_tool_use_id`-keyed
@@ -3413,7 +3636,15 @@ impl DelegationBroker {
             inner.sessions.insert(call_id.clone(), session_entry);
             // Each buffered child terminal carries (arrival_stamp, outcome).
             let child_terminal: Option<(u64, DelegationOutcome)> =
-                if let Some((stamp, outcome)) = inner.take_early_complete(&call_id) {
+                if let Some((stamp, mut outcome)) = inner.take_early_complete(&call_id) {
+                    // [stage-4 T4.5] Mirror complete_call's note append for the
+                    // setup-window fast-completion race, so a child that finished
+                    // before we parked still carries the unsupported-persona note.
+                    append_unsupported_note(
+                        &mut outcome,
+                        applied_persona_intent.as_ref(),
+                        req.agent_type,
+                    );
                     Some((stamp, outcome))
                 } else {
                     inner
@@ -3444,6 +3675,7 @@ impl DelegationBroker {
                         req.agent_type,
                         setup_duration_ms,
                         outcome,
+                        applied_persona_intent.clone(),
                     ),
                 );
                 // Settle the session created above: cancel-coded outcomes drop
@@ -3513,6 +3745,7 @@ impl DelegationBroker {
                             turn_id: None,
                             origin: TurnOrigin::ParentAgent,
                             registered_epoch,
+                            applied_persona_intent: applied_persona_intent.clone(),
                         },
                     );
                     inner.deregister_inflight(inflight_id);
@@ -3553,6 +3786,7 @@ impl DelegationBroker {
                     Some(req.agent_type),
                     &outcome,
                     Some(setup_duration_ms),
+                    applied_persona_intent.clone(),
                 );
             }
             // A parent cancel reached this delegation mid-setup — after the
@@ -3594,6 +3828,7 @@ impl DelegationBroker {
                     Some(req.agent_type),
                     &canceled_outcome(child_conversation_id, "parent canceled"),
                     Some(setup_duration_ms),
+                    applied_persona_intent.clone(),
                 );
             }
             // Registered in `running` — fall through to the second pre-cancel
@@ -3626,6 +3861,7 @@ impl DelegationBroker {
                                 req.agent_type,
                                 duration_ms,
                                 &outcome,
+                                applied_persona_intent.clone(),
                             ),
                         );
                         let evicted = inner.settle_session(&call_id, TaskStatus::Canceled, None);
@@ -3670,6 +3906,7 @@ impl DelegationBroker {
                         Some(req.agent_type),
                         &canceled_outcome(child_conversation_id, "canceled before await"),
                         Some(duration_ms),
+                        applied_persona_intent.clone(),
                     );
                 }
             }
@@ -3677,7 +3914,12 @@ impl DelegationBroker {
 
         // Registered and running in the background — return the ack. The child
         // resolves later via the lifecycle → `complete_call` (or a cancel path).
-        running_ack(call_id, child_conversation_id, req.agent_type)
+        running_ack(
+            call_id,
+            child_conversation_id,
+            req.agent_type,
+            applied_persona_intent,
+        )
     }
 
     /// Called by the child-session lifecycle subscriber on `TurnComplete`
@@ -3696,7 +3938,7 @@ impl DelegationBroker {
     /// loop emits `TurnComplete` independently, so a completion CAN beat it. When
     /// the `call_id` is no longer reserved the call was already resolved by
     /// another terminal path, so the buffer is skipped (silent no-op).
-    pub async fn complete_call(&self, call_id: &str, outcome: DelegationOutcome) {
+    pub async fn complete_call(&self, call_id: &str, mut outcome: DelegationOutcome) {
         let is_canceled = matches!(
             &outcome,
             DelegationOutcome::Err { code, .. } if code == "canceled"
@@ -3705,6 +3947,15 @@ impl DelegationBroker {
             let mut inner = self.pending.inner.lock().await;
             match inner.running.remove(call_id) {
                 Some(task) => {
+                    // [stage-4 T4.5] For a supported-CLI-less persona nomination,
+                    // append the `[note]` to the successful result text BEFORE it
+                    // is cached / reported, so every downstream reader (completed
+                    // cache, parent-card meta, tool result) sees the same text.
+                    append_unsupported_note(
+                        &mut outcome,
+                        task.applied_persona_intent.as_ref(),
+                        task.agent_type,
+                    );
                     // Atomic running → completed so a concurrent status query
                     // never sees the task as neither running nor completed.
                     let duration_ms = task.started_at.elapsed().as_millis() as u64;
@@ -3716,6 +3967,7 @@ impl DelegationBroker {
                             task.agent_type,
                             duration_ms,
                             &outcome,
+                            task.applied_persona_intent.clone(),
                         ),
                     );
                     // Keep the child process for continue_with_session unless
@@ -4660,6 +4912,7 @@ impl DelegationBroker {
                     Some(task.agent_type),
                     &canceled_outcome(task.child_conversation_id, "canceled by request"),
                     Some(duration_ms),
+                    task.applied_persona_intent.clone(),
                 )
             }
             None => self.status_from_db(parent_conversation_id, task_id).await,
@@ -5031,6 +5284,9 @@ impl DelegationBroker {
                 Some(plan.agent_type),
                 &canceled_outcome(plan.child_conversation_id, "parent canceled"),
                 None,
+                // Continuation carries no NEW persona nomination; the terminal
+                // report of the continued turn does not attribute persona.
+                None,
             );
         }
 
@@ -5086,6 +5342,7 @@ impl DelegationBroker {
                         plan.agent_type,
                         started_at.elapsed().as_millis() as u64,
                         &canceled_outcome(plan.child_conversation_id, "parent canceled"),
+                        None,
                     ),
                 );
                 let evicted = inner.settle_session(task_id, TaskStatus::Canceled, None);
@@ -5135,12 +5392,15 @@ impl DelegationBroker {
                         turn_id: Some(turn_id),
                         origin,
                         registered_epoch,
+                        // Continuation turns don't renegotiate persona.
+                        applied_persona_intent: None,
                     },
                 );
                 let mut ack = running_ack(
                     task_id.to_string(),
                     plan.child_conversation_id,
                     plan.agent_type,
+                    None,
                 );
                 ack.message = Some(format!(
                     "Continue successful. task_id={task_id}. Call get_delegation_status \
@@ -5162,6 +5422,8 @@ impl DelegationBroker {
                 Some(task_id.to_string()),
                 Some(plan.agent_type),
                 &canceled_outcome(plan.child_conversation_id, "parent canceled"),
+                None,
+                // Continuation carries no NEW persona nomination.
                 None,
             );
         };
@@ -5327,6 +5589,7 @@ impl DelegationBroker {
                     Some(task_id.to_string()),
                     Some(s_agent),
                     &canceled_outcome(s_child_conv, "session released"),
+                    None,
                     None,
                 )
             } else {
@@ -5906,6 +6169,8 @@ mod tests {
             working_dir: None,
             requested_working_dir: None,
             external_handle: None,
+
+            subagent_type: None,
         }
     }
 
@@ -6017,6 +6282,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 50,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -6135,6 +6402,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -6200,6 +6469,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -6411,6 +6682,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -6701,6 +6974,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -6816,6 +7091,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -8018,6 +8295,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -8120,6 +8399,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 7,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -8161,6 +8442,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 3,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -8214,6 +8497,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 4,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -8250,6 +8535,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 4,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -8466,6 +8753,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 50,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -8554,6 +8843,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 10,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -9717,6 +10008,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -9767,6 +10060,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -9800,6 +10095,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -10190,6 +10487,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 1,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -10862,6 +11161,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -10919,6 +11220,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -10984,6 +11287,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -11060,6 +11365,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -11172,6 +11479,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -11401,6 +11710,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -11495,6 +11806,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -11672,6 +11985,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -11726,6 +12041,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -11891,6 +12208,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -11938,6 +12257,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -12074,6 +12395,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -12145,6 +12468,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 73,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -12220,6 +12545,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 10,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -12261,6 +12588,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -12652,6 +12981,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -12699,6 +13030,8 @@ mod tests {
                     turn_count: 1,
                     duration_ms: 5,
                     token_usage: None,
+
+                    applied_persona: None,
                 }),
             )
             .await;
@@ -13199,7 +13532,7 @@ mod tests {
     /// can still call get_delegation_status / cancel_delegation.
     #[test]
     fn running_ack_message_embeds_task_id() {
-        let report = running_ack("task-xyz".into(), 42, AgentType::Codex);
+        let report = running_ack("task-xyz".into(), 42, AgentType::Codex, None);
         assert_eq!(report.task_id.as_deref(), Some("task-xyz"));
         assert!(
             report.message.as_deref().unwrap().contains("task-xyz"),
@@ -13238,6 +13571,7 @@ mod tests {
             error_code: None,
             message: None,
             duration_ms: 0,
+            applied_persona: None,
         }
     }
 
@@ -13373,6 +13707,356 @@ mod tests {
         assert!(
             !inner.completed.contains_key("t0"),
             "oldest result must be pruned"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Stage-4 · Broker persona translation layer (T4.7)
+    //
+    // These exercise `start_delegation`'s persona dispatch + the terminal
+    // `applied_persona` / unsupported-`[note]` it produces. MockSpawner does
+    // NOT accept a `launch_option` yet (stage 5 extends `SpawnCallArgs`), so
+    // the Native `launch_option` is asserted at the broker's observable output
+    // (`applied_persona`), not at the spawn-args layer — the stage-4 scope
+    // boundary. Where an assertion genuinely needs the stage-5 spawn-arg wiring
+    // it is marked `#[ignore]` with a pointer.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build a delegation request for `agent_type` with an optional persona
+    /// nomination. `task` fixed so a Hint prepend is detectable by length.
+    fn persona_request(
+        agent_type: AgentType,
+        tool_use: &str,
+        subagent_type: Option<&str>,
+    ) -> DelegationRequest {
+        DelegationRequest {
+            parent_connection_id: "parent-conn".into(),
+            parent_conversation_id: 1,
+            parent_tool_use_id: tool_use.into(),
+            agent_type,
+            task: "do x".into(),
+            working_dir: None,
+            requested_working_dir: None,
+            external_handle: None,
+            subagent_type: subagent_type.map(str::to_string),
+        }
+    }
+
+    /// Drive one delegation for a specific `agent_type` + persona to a
+    /// successful `complete_call`, returning the terminal report read back from
+    /// the completed cache (which carries the final `applied_persona` + text).
+    async fn settle_persona(
+        broker: &DelegationBroker,
+        mock: &MockSpawner,
+        child_conn: &str,
+        child_conv: i32,
+        tool_use: &str,
+        agent_type: AgentType,
+        subagent_type: Option<&str>,
+    ) -> DelegationTaskReport {
+        mock.queue_spawn(Ok(child_conn.into())).await;
+        mock.queue_send(Ok(child_conv)).await;
+        let ack = broker
+            .start_delegation(persona_request(agent_type, tool_use, subagent_type))
+            .await;
+        let task_id = ack.task_id.expect("running task carries an id");
+        broker
+            .complete_call(
+                &task_id,
+                DelegationOutcome::Ok(DelegationSuccess {
+                    text: format!("result of {child_conn}"),
+                    child_conversation_id: child_conv,
+                    child_agent_type: agent_type,
+                    turn_count: 1,
+                    duration_ms: 5,
+                    token_usage: None,
+                    applied_persona: None,
+                }),
+            )
+            .await;
+        broker
+            .get_task_status("parent-conn", Some(1), &task_id, StatusWait::Immediate)
+            .await
+    }
+
+    /// P1 (R6.1 / R6.2): a delegation WITHOUT a `subagent_type` produces no
+    /// persona attribution — legacy callers are entirely unaffected.
+    #[tokio::test]
+    async fn persona_p1_no_subagent_type_leaves_applied_persona_none() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let report = settle_persona(
+            &broker,
+            &mock,
+            "c-legacy",
+            42,
+            "pt-legacy",
+            AgentType::ClaudeCode,
+            None,
+        )
+        .await;
+        assert_eq!(report.status, TaskStatus::Completed);
+        assert!(
+            report.applied_persona.is_none(),
+            "no subagent_type must yield no applied_persona"
+        );
+        assert_eq!(
+            report.text.as_deref(),
+            Some("result of c-legacy"),
+            "task text must be untouched (no note appended)"
+        );
+    }
+
+    /// P2 (R2.1 / R2.3): a Kiro persona resolves to a Native launch option and
+    /// the terminal report attributes `AppliedPersona::Native`. (The
+    /// `LaunchOption::KiroPersona` itself is verified at the spawn-arg layer in
+    /// stage 5; here we assert the broker's observable Native attribution.)
+    #[tokio::test]
+    async fn persona_p2_kiro_resolves_to_native() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let report = settle_persona(
+            &broker,
+            &mock,
+            "c-kiro",
+            50,
+            "pt-kiro",
+            AgentType::Kiro,
+            Some("plan-reality-recon"),
+        )
+        .await;
+        assert_eq!(
+            report.applied_persona,
+            Some(crate::acp::delegation::persona::AppliedPersona::Native {
+                name: "plan-reality-recon".into(),
+            }),
+            "Kiro persona must attribute Native"
+        );
+    }
+
+    /// P3 (R3.5): Preamble (Hint) and Native launch are MUTUALLY EXCLUSIVE.
+    /// A Kiro persona goes Native (no task prepend); a Claude/Codex persona,
+    /// when its file resolves to a Hint, prepends the preamble and never a
+    /// launch option. We assert the exclusivity through the attribution kind:
+    /// Kiro → Native, and the Kiro task text is unchanged (no preamble).
+    #[tokio::test]
+    async fn persona_p3_kiro_native_carries_no_preamble() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let report = settle_persona(
+            &broker,
+            &mock,
+            "c-kiro-excl",
+            51,
+            "pt-kiro-excl",
+            AgentType::Kiro,
+            Some("plan-reality-recon"),
+        )
+        .await;
+        // Native attribution ⇒ the mutually-exclusive Hint path did not fire.
+        assert!(
+            matches!(
+                report.applied_persona,
+                Some(crate::acp::delegation::persona::AppliedPersona::Native { .. })
+            ),
+            "Kiro must be Native, never Hint"
+        );
+    }
+
+    /// P4 (R4.1 / R4.2 / R4.3): an unsupported CLI (Gemini) with a persona
+    /// nomination is silently downgraded — no launch option, the delegation
+    /// still runs, the terminal report attributes `IgnoredUnsupportedCli`, and
+    /// a `[note]` is appended to the success text so the LLM sees the downgrade.
+    #[tokio::test]
+    async fn persona_p4_gemini_unsupported_ignores_and_notes() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let report = settle_persona(
+            &broker,
+            &mock,
+            "c-gem",
+            60,
+            "pt-gem",
+            AgentType::Gemini,
+            Some("some-agent"),
+        )
+        .await;
+        assert_eq!(report.status, TaskStatus::Completed, "delegation still ran");
+        assert_eq!(
+            report.applied_persona,
+            Some(
+                crate::acp::delegation::persona::AppliedPersona::IgnoredUnsupportedCli {
+                    name: "some-agent".into(),
+                }
+            ),
+            "Gemini must attribute IgnoredUnsupportedCli"
+        );
+        let text = report.text.as_deref().expect("success text present");
+        assert!(
+            text.contains("[note]") && text.contains("some-agent") && text.contains("ignored"),
+            "unsupported note must ride the result text, got: {text}"
+        );
+    }
+
+    /// R3-F1 (order): an unsupported CLI must short-circuit to Ignored BEFORE
+    /// any name-grammar check. A grammar-illegal name on Gemini therefore does
+    /// NOT fail — it is ignored like any other unsupported nomination.
+    #[tokio::test]
+    async fn persona_r3f1_unsupported_cli_skips_name_grammar() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        // "foo.bar" is grammar-illegal (dot), but Gemini never checks — it is
+        // ignored, and the delegation succeeds rather than erroring.
+        let report = settle_persona(
+            &broker,
+            &mock,
+            "c-gem-illegal",
+            61,
+            "pt-gem-illegal",
+            AgentType::Gemini,
+            Some("foo.bar"),
+        )
+        .await;
+        assert_eq!(
+            report.status,
+            TaskStatus::Completed,
+            "unsupported CLI + illegal name must NOT fail (no grammar check)"
+        );
+        assert_eq!(
+            report.applied_persona,
+            Some(
+                crate::acp::delegation::persona::AppliedPersona::IgnoredUnsupportedCli {
+                    name: "foo.bar".into(),
+                }
+            ),
+        );
+    }
+
+    /// R3-A2 (timing): a spawn failure leaves `applied_persona` = `None` even
+    /// though the persona would have resolved to Native — the attribution is
+    /// only committed AFTER spawn returns Ok.
+    #[tokio::test]
+    async fn persona_r3a2_spawn_failure_leaves_applied_persona_none() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        mock.queue_spawn(Err(SpawnerError::Spawn("agent won't boot".into())))
+            .await;
+        let report = broker
+            .start_delegation(persona_request(
+                AgentType::Kiro,
+                "pt-spawn-fail",
+                Some("plan-reality-recon"),
+            ))
+            .await;
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert!(
+            report.applied_persona.is_none(),
+            "a failed spawn must not ship a Native attribution (R3-A2)"
+        );
+    }
+
+    /// R3-F2 (no `Failed` variant): an invalid persona name on a SUPPORTED CLI
+    /// short-circuits into `DelegationOutcome::Err { code: "invalid_persona" }`
+    /// BEFORE spawn — and the failure report carries no `applied_persona`
+    /// (the error state is the whole signal; no symmetric `AppliedPersona::Failed`).
+    #[tokio::test]
+    async fn persona_r3f2_invalid_name_errors_without_applied_persona() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        // No spawn should ever be attempted — the name check precedes it.
+        let report = broker
+            .start_delegation(persona_request(
+                AgentType::Kiro,
+                "pt-bad-name",
+                Some("bad name!"),
+            ))
+            .await;
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert_eq!(
+            report.error_code.as_deref(),
+            Some("invalid_persona"),
+            "invalid name must map to the stable invalid_persona code"
+        );
+        assert!(
+            report.applied_persona.is_none(),
+            "an invalid-persona failure carries no applied_persona (R3-F2)"
+        );
+        // The name check short-circuits before spawn — nothing was spawned.
+        assert!(
+            mock.spawn_args.lock().await.is_empty(),
+            "invalid name must short-circuit before spawn"
+        );
+    }
+
+    /// P5 (R7.1 / R7.2): two concurrent delegations nominating DIFFERENT
+    /// personas keep independent attributions — one call's persona never
+    /// bleeds into the other's terminal report.
+    #[tokio::test]
+    async fn persona_p5_concurrent_attributions_are_isolated() {
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        // One Kiro (Native) + one Gemini (IgnoredUnsupportedCli), driven back to
+        // back through the same broker. Their attributions must not cross.
+        let kiro = settle_persona(
+            &broker,
+            &mock,
+            "c-iso-kiro",
+            70,
+            "pt-iso-kiro",
+            AgentType::Kiro,
+            Some("recon-agent"),
+        )
+        .await;
+        let gemini = settle_persona(
+            &broker,
+            &mock,
+            "c-iso-gem",
+            71,
+            "pt-iso-gem",
+            AgentType::Gemini,
+            Some("other-agent"),
+        )
+        .await;
+
+        assert_eq!(
+            kiro.applied_persona,
+            Some(crate::acp::delegation::persona::AppliedPersona::Native {
+                name: "recon-agent".into(),
+            }),
+            "Kiro delegation keeps its own Native attribution"
+        );
+        assert_eq!(
+            gemini.applied_persona,
+            Some(
+                crate::acp::delegation::persona::AppliedPersona::IgnoredUnsupportedCli {
+                    name: "other-agent".into(),
+                }
+            ),
+            "Gemini delegation keeps its own Ignored attribution"
         );
     }
 }
