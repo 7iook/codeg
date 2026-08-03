@@ -61,10 +61,17 @@ use crate::models::agent::AgentType;
 /// override — that widens infra control surface without a business driver
 /// (R2 A4 rejected).
 ///
-/// Consumed downstream by `manager::spawn_child_inner`, which inserts
-/// `KIRO_AGENT=<name>` into `runtime_env` BEFORE
-/// `apply_kiro_env_policy` runs; `connection::kiro_launch_args` then
-/// translates the env var into `--agent <name>` argv (stage 5).
+/// Consumed downstream by `manager::spawn_child_inner`, which merges
+/// `KIRO_AGENT=<name>` into `runtime_env` before handing it to
+/// `spawn_agent` — that call takes the map BY VALUE, so a merge after it
+/// would never reach the child. `connection::kiro_launch_args` then reads
+/// the entry back out and translates it into `--agent <name>` argv.
+///
+/// `apply_kiro_env_policy` is unrelated to this ordering: it strips `KIRO_*`
+/// from the CHILD PROCESS env (a separate `Vec`) and borrows `runtime_env`
+/// immutably, so it cannot unset what `kiro_launch_args` reads. Stripping
+/// `KIRO_AGENT` from the child env is correct — it is a codeg-side knob
+/// translated to argv, not an environment variable kiro-cli reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchOption {
     /// Nominates a Kiro persona whose definition lives at
