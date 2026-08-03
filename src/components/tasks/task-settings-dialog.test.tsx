@@ -157,6 +157,29 @@ describe("TaskSettingsDialog stage prompts", () => {
     )
   })
 
+  it("gives each stage its own example placeholder", async () => {
+    const user = userEvent.setup()
+    renderDialog(1)
+    await saveButton()
+    await openPromptsTab(user)
+
+    const placeholders: string[] = []
+    for (const stage of [
+      "All stages",
+      "Task run",
+      "Retry run",
+      "Rework",
+      "Merge",
+    ]) {
+      await user.click(screen.getByRole("tab", { name: stage }))
+      const box = screen.getByRole("textbox", { name: stage })
+      placeholders.push(box.getAttribute("placeholder") ?? "")
+    }
+
+    expect(placeholders.every((p) => p.length > 0)).toBe(true)
+    expect(new Set(placeholders).size).toBe(placeholders.length)
+  })
+
   it("drops stages whose text is only whitespace", async () => {
     const user = userEvent.setup()
     renderDialog(1)
