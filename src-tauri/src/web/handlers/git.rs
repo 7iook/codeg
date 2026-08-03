@@ -590,6 +590,32 @@ pub async fn git_fetch(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitUpdateBranchParams {
+    pub path: String,
+    pub branch: String,
+    pub is_remote: bool,
+    pub credentials: Option<GitCredentials>,
+}
+
+pub async fn git_update_branch(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<GitUpdateBranchParams>,
+) -> Result<Json<folder_commands::GitPullResult>, AppCommandError> {
+    let db = &state.db;
+    let result = folder_commands::git_update_branch_core(
+        &params.path,
+        &params.branch,
+        params.is_remote,
+        params.credentials.as_ref(),
+        db,
+        &state.data_dir,
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitPushParams {
     pub folder_id: Option<i32>,
     pub path: String,

@@ -90,17 +90,20 @@ const ACTION_ICONS: Record<BranchLeafAction, LucideIcon> = {
   switch: GitBranch,
   merge: GitMerge,
   rebase: GitPullRequestArrow,
+  pull: CloudDownload,
   delete: Trash2,
   deleteRemote: Trash2,
 }
 
-// The per-branch actions shown in the right-side bubble. Delete is hidden for the
-// remote branch the current local branch tracks (deleting it is nonsensical).
+// The per-branch actions shown in the right-side bubble. "pull" updates the
+// branch in place (no checkout), so it sits right above the destructive delete.
+// Delete is hidden for the remote branch the current local branch tracks
+// (deleting it is nonsensical).
 function leafActions(
   isRemote: boolean,
   isTracking: boolean
 ): BranchLeafAction[] {
-  const actions: BranchLeafAction[] = ["switch", "merge", "rebase"]
+  const actions: BranchLeafAction[] = ["switch", "merge", "rebase", "pull"]
   if (!isTracking) actions.push(isRemote ? "deleteRemote" : "delete")
   return actions
 }
@@ -359,6 +362,10 @@ export function BranchSelectorList({
             currentBranch: branch ?? "-",
             branchName: fullName,
           })
+        // Same wording as the top-of-list operation — this just scopes it to
+        // the branch under the cursor instead of the checked-out one.
+        case "pull":
+          return t("pullCode")
         case "delete":
         case "deleteRemote":
           return t("deleteBranch")

@@ -36,6 +36,8 @@ export type BranchLeafAction =
   | "switch"
   | "merge"
   | "rebase"
+  /** Update the branch in place, without checking it out. */
+  | "pull"
   | "delete"
   | "deleteRemote"
 

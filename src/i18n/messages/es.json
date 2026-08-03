@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "No hay commits para enviar",
         "pushedCommits": "Se enviaron {count, plural, one {# commit} other {# commits}}",
         "switchedToFolder": "Cambiado a {name}",
-        "switchFailed": "No se pudo cambiar de rama"
+        "switchFailed": "No se pudo cambiar de rama",
+        "openStashWindowFailed": "No se pudo abrir la ventana de stash"
       },
       "tasks": {
         "newBranch": "Crear rama {name}",
@@ -1798,7 +1799,8 @@
         "pushCode": "Enviar código",
         "stashChanges": "Guardar cambios en stash",
         "stashPop": "Aplicar stash",
-        "deleteBranch": "Eliminar rama {branchName}"
+        "deleteBranch": "Eliminar rama {branchName}",
+        "updateBranch": "Actualizar la rama {branchName}"
       },
       "confirm": {
         "mergeTitle": "Fusionar rama",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "Más acciones de Git"
     },
     "gitChangesTab": {
       "workspace": "espacio de trabajo",
@@ -2077,7 +2080,11 @@
         "commitCode": "Hacer commit del código",
         "rollback": "Revertir",
         "addToVcs": "Añadir a VCS",
-        "delete": "Eliminar"
+        "delete": "Eliminar",
+        "moreActions": "Más acciones de Git",
+        "addAllToVcs": "Añadir todo al VCS",
+        "rollbackAll": "Revertir todo",
+        "refresh": "Actualizar"
       },
       "toasts": {
         "noAddableFilesInDir": "No hay archivos cambiados en este directorio para añadir a VCS",
@@ -2092,7 +2099,8 @@
         "deleted": "Se eliminó {name}",
         "deleteFailed": "Error al eliminar",
         "deletedFiles": "Se eliminaron {count} archivos",
-        "noDeletableFilesInDir": "No hay archivos modificados en este directorio que se puedan eliminar"
+        "noDeletableFilesInDir": "No hay archivos modificados en este directorio que se puedan eliminar",
+        "commitFailed": "Error al confirmar"
       },
       "directoryDialog": {
         "descriptionAdd": "Selecciona archivos bajo el directorio {path} para añadir a VCS.",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "Esta acción no se puede deshacer.",
         "kindDirectory": "directorio",
         "kindFile": "archivo"
+      },
+      "quickCommit": {
+        "placeholder": "Mensaje del commit (Intro para confirmar)",
+        "commit": "Confirmar",
+        "openWindow": "Abrir ventana de commit"
       }
     },
     "tabContext": {

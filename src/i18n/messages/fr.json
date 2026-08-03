@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "Aucun commit à pousser",
         "pushedCommits": "{count, plural, one {# commit poussé} other {# commits poussés}}",
         "switchedToFolder": "Basculé vers {name}",
-        "switchFailed": "Échec du changement de branche"
+        "switchFailed": "Échec du changement de branche",
+        "openStashWindowFailed": "Échec de l'ouverture de la fenêtre de remisage"
       },
       "tasks": {
         "newBranch": "Créer la branche {name}",
@@ -1798,7 +1799,8 @@
         "pushCode": "Push du code",
         "stashChanges": "Stash des changements",
         "stashPop": "Appliquer le stash",
-        "deleteBranch": "Supprimer la branche {branchName}"
+        "deleteBranch": "Supprimer la branche {branchName}",
+        "updateBranch": "Mettre à jour la branche {branchName}"
       },
       "confirm": {
         "mergeTitle": "Fusionner la branche",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "Autres actions Git"
     },
     "gitChangesTab": {
       "workspace": "espace de travail",
@@ -2077,7 +2080,11 @@
         "commitCode": "Commit du code",
         "rollback": "Annuler",
         "addToVcs": "Ajouter à VCS",
-        "delete": "Supprimer"
+        "delete": "Supprimer",
+        "moreActions": "Autres actions Git",
+        "addAllToVcs": "Tout ajouter au VCS",
+        "rollbackAll": "Tout annuler",
+        "refresh": "Actualiser"
       },
       "toasts": {
         "noAddableFilesInDir": "Aucun fichier modifié de ce répertoire ne peut être ajouté à VCS",
@@ -2092,7 +2099,8 @@
         "deleted": "{name} supprimé",
         "deleteFailed": "Échec de la suppression",
         "deletedFiles": "{count} fichiers supprimés",
-        "noDeletableFilesInDir": "Aucun fichier modifié dans ce répertoire ne peut être supprimé"
+        "noDeletableFilesInDir": "Aucun fichier modifié dans ce répertoire ne peut être supprimé",
+        "commitFailed": "Échec du commit"
       },
       "directoryDialog": {
         "descriptionAdd": "Sélectionnez les fichiers du répertoire {path} à ajouter à VCS.",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "Cette action est irréversible.",
         "kindDirectory": "répertoire",
         "kindFile": "fichier"
+      },
+      "quickCommit": {
+        "placeholder": "Message du commit (Entrée pour valider)",
+        "commit": "Valider",
+        "openWindow": "Ouvrir la fenêtre de commit"
       }
     },
     "tabContext": {

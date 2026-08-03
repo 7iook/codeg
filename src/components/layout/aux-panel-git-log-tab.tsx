@@ -13,6 +13,8 @@ import {
 import { useTranslations } from "next-intl"
 import { Virtualizer, type VirtualizerHandle } from "virtua"
 import {
+  Archive,
+  ArchiveRestore,
   Check,
   ChevronDown,
   ChevronRight,
@@ -20,12 +22,17 @@ import {
   ChevronsUpDown,
   CircleHelp,
   CloudCheck,
+  CloudDownload,
   CloudOff,
+  CloudSync,
+  CloudUpload,
   GitBranch,
   GitBranchPlus,
+  GitCommitHorizontal,
   GitCompare,
   Hash,
   LocateFixed,
+  MoreHorizontal,
   RefreshCw,
   RotateCcw,
   Upload,
@@ -68,6 +75,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import {
@@ -92,6 +106,10 @@ import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useWorkspaceActions } from "@/contexts/workspace-context"
 import { useWorkspaceStateStore } from "@/hooks/use-workspace-state-store"
 import { useIsMobile } from "@/hooks/use-mobile"
+import {
+  useGitQuickActions,
+  type GitQuickActions,
+} from "@/hooks/use-git-quick-actions"
 import {
   getGitBranch,
   gitCommitBranches,
@@ -1037,6 +1055,73 @@ function RefreshButton({
   )
 }
 
+// The header's git operations. Same set — and the same wording — as the branch
+// selector's operation block, so seeing a commit you're behind on is one click
+// from updating, and a commit you haven't shared is one click from pushing.
+function GitActionsMenu({
+  actions,
+  disabled,
+  className,
+}: {
+  actions: GitQuickActions
+  /** Whole menu is inert — see the `folderStale` call site. */
+  disabled: boolean
+  className?: string
+}) {
+  const t = useTranslations("Folder.gitLogTab")
+  const tBranch = useTranslations("Folder.branchDropdown")
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        {/* Same round hover circle as RefreshButton — one control system. */}
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={disabled}
+          className={cn(
+            "size-8 shrink-0 rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground dark:hover:bg-foreground/10",
+            className
+          )}
+          title={t("moreActions")}
+          aria-label={t("moreActions")}
+        >
+          <MoreHorizontal className="size-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuItem disabled={actions.running} onSelect={actions.pull}>
+          <CloudDownload />
+          {tBranch("pullCode")}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={actions.running}
+          onSelect={actions.fetchAll}
+        >
+          <CloudSync />
+          {tBranch("fetchRemoteBranches")}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={actions.openPushWindow}>
+          <CloudUpload />
+          {tBranch("pushCode")}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={actions.openCommitWindow}>
+          <GitCommitHorizontal />
+          {tBranch("openCommitWindow")}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={actions.openStashDialog}>
+          <Archive />
+          {tBranch("stashChanges")}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={actions.openUnstashWindow}>
+          <ArchiveRestore />
+          {tBranch("stashPop")}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 function AuthorFilter({
   meName,
   recentAuthors,
@@ -1322,6 +1407,8 @@ function LogHeader({
   onAuthorChange,
   onRemoveRecent,
   isMobile,
+  gitActions,
+  gitActionsStale,
 }: {
   branchList: GitBranchList
   currentBranch: string | null
@@ -1336,6 +1423,9 @@ function LogHeader({
   onAuthorChange: (author: string | null) => void
   onRemoveRecent: (name: string) => void
   isMobile: boolean
+  gitActions: GitQuickActions
+  /** Deferred render still on the PREVIOUS folder — see the call sites. */
+  gitActionsStale: boolean
 }) {
   const hasBranches =
     branchList.local.length > 0 || branchList.remote.length > 0
@@ -1351,7 +1441,8 @@ function LogHeader({
       )}
     >
       {/* Branch selector + author filter sit together at the leading edge; the
-          refresh button is pushed to the trailing edge with ml-auto. */}
+          git actions menu and refresh button are pushed to the trailing edge
+          with ml-auto on the first of them. */}
       <BranchSelector
         branchList={branchList}
         currentBranch={currentBranch}
@@ -1366,11 +1457,12 @@ function LogHeader({
         onAuthorChange={onAuthorChange}
         onRemoveRecent={onRemoveRecent}
       />
-      <RefreshButton
-        onRefresh={onRefresh}
-        refreshing={refreshing}
+      <GitActionsMenu
+        actions={gitActions}
+        disabled={gitActionsStale}
         className="ml-auto"
       />
+      <RefreshButton onRefresh={onRefresh} refreshing={refreshing} />
     </div>
   )
 }
@@ -2102,6 +2194,20 @@ export function GitLogTab() {
   // leaking a zombie whose unlisten fn would land in an array the cleanup already
   // walked (that zombie would keep firing stale-filter refetches on later events).
   const folderId = folder?.id ?? null
+
+  // Header actions (pull / fetch / push / commit / stash) share the branch
+  // selector's machinery. `onCompleted` runs the same handler as the git event
+  // subscription below — branches AND log, since "fetch remote branches" exists
+  // precisely to surface refs the branch selector doesn't know yet. It can't
+  // rely on that subscription: `folder://git-branch-changed` is emitted through
+  // the Tauri bridge, so it never arrives in server/web mode. On desktop both
+  // fire; `fetchLog` supersedes by generation, so the extra pass is harmless.
+  const gitActions = useGitQuickActions({
+    folderId,
+    folderPath: folder?.path ?? null,
+    onCompleted: () => onGitEventRef.current(),
+  })
+
   useEffect(() => {
     if (folderId == null) return
     let cancelled = false
@@ -2159,6 +2265,8 @@ export function GitLogTab() {
           onAuthorChange={handleAuthorChange}
           onRemoveRecent={handleRemoveRecent}
           isMobile={isMobile}
+          gitActions={gitActions}
+          gitActionsStale={folderStale}
         />
         <ScrollArea className="min-h-0 flex-1 px-3 py-3">
           <div className="space-y-4">
@@ -2174,6 +2282,9 @@ export function GitLogTab() {
             ))}
           </div>
         </ScrollArea>
+        {/* The header (and its actions menu) is live while the log loads, so
+            its dialogs have to mount here too. */}
+        {gitActions.dialogs}
       </div>
     )
   }
@@ -2220,6 +2331,8 @@ export function GitLogTab() {
         onAuthorChange={handleAuthorChange}
         onRemoveRecent={handleRemoveRecent}
         isMobile={isMobile}
+        gitActions={gitActions}
+        gitActionsStale={folderStale}
       />
       {error ? (
         <ScrollArea className="min-h-0 flex-1 px-3 py-3">
@@ -2773,6 +2886,8 @@ export function GitLogTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {gitActions.dialogs}
     </div>
   )
 }

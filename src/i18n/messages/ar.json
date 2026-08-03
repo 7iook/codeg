@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "لا توجد التزامات للدفع",
         "pushedCommits": "تم دفع {count, plural, one {# التزام} other {# التزامات}}",
         "switchedToFolder": "تم التبديل إلى {name}",
-        "switchFailed": "فشل تبديل الفرع"
+        "switchFailed": "فشل تبديل الفرع",
+        "openStashWindowFailed": "فشل فتح نافذة الـ stash"
       },
       "tasks": {
         "newBranch": "إنشاء الفرع {name}",
@@ -1798,7 +1799,8 @@
         "pushCode": "دفع الكود",
         "stashChanges": "تخزين التغييرات في stash",
         "stashPop": "استرجاع stash",
-        "deleteBranch": "حذف الفرع {branchName}"
+        "deleteBranch": "حذف الفرع {branchName}",
+        "updateBranch": "تحديث الفرع {branchName}"
       },
       "confirm": {
         "mergeTitle": "دمج الفرع",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "إجراءات Git إضافية"
     },
     "gitChangesTab": {
       "workspace": "مساحة العمل",
@@ -2077,7 +2080,11 @@
         "commitCode": "التزام الكود",
         "rollback": "تراجع",
         "addToVcs": "إضافة إلى VCS",
-        "delete": "حذف"
+        "delete": "حذف",
+        "moreActions": "إجراءات Git إضافية",
+        "addAllToVcs": "إضافة الكل إلى VCS",
+        "rollbackAll": "تراجع عن الكل",
+        "refresh": "تحديث"
       },
       "toasts": {
         "noAddableFilesInDir": "لا توجد ملفات متغيرة في هذا الدليل يمكن إضافتها إلى VCS",
@@ -2092,7 +2099,8 @@
         "deleted": "تم حذف {name}",
         "deleteFailed": "فشل الحذف",
         "deletedFiles": "تم حذف {count} ملفات",
-        "noDeletableFilesInDir": "لا توجد ملفات معدّلة في هذا الدليل يمكن حذفها"
+        "noDeletableFilesInDir": "لا توجد ملفات معدّلة في هذا الدليل يمكن حذفها",
+        "commitFailed": "فشل الالتزام"
       },
       "directoryDialog": {
         "descriptionAdd": "اختر ملفات داخل الدليل {path} لإضافتها إلى VCS.",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "لا يمكن التراجع عن هذا الإجراء.",
         "kindDirectory": "الدليل",
         "kindFile": "الملف"
+      },
+      "quickCommit": {
+        "placeholder": "رسالة الالتزام (اضغط Enter للالتزام)",
+        "commit": "التزام",
+        "openWindow": "فتح نافذة الالتزام"
       }
     },
     "tabContext": {

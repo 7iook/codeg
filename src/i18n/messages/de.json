@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "Keine Commits zum Pushen",
         "pushedCommits": "{count, plural, one {# Commit gepusht} other {# Commits gepusht}}",
         "switchedToFolder": "Zu {name} gewechselt",
-        "switchFailed": "Branch konnte nicht gewechselt werden"
+        "switchFailed": "Branch konnte nicht gewechselt werden",
+        "openStashWindowFailed": "Stash-Fenster konnte nicht geöffnet werden"
       },
       "tasks": {
         "newBranch": "Branch {name} erstellen",
@@ -1798,7 +1799,8 @@
         "pushCode": "Code pushen",
         "stashChanges": "Änderungen stashen",
         "stashPop": "Stash anwenden",
-        "deleteBranch": "Branch {branchName} löschen"
+        "deleteBranch": "Branch {branchName} löschen",
+        "updateBranch": "Branch {branchName} aktualisieren"
       },
       "confirm": {
         "mergeTitle": "Branch mergen",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "Weitere Git-Aktionen"
     },
     "gitChangesTab": {
       "workspace": "Arbeitsbereich",
@@ -2077,7 +2080,11 @@
         "commitCode": "Code committen",
         "rollback": "Zurücksetzen",
         "addToVcs": "Zu VCS hinzufügen",
-        "delete": "Löschen"
+        "delete": "Löschen",
+        "moreActions": "Weitere Git-Aktionen",
+        "addAllToVcs": "Alle zur VCS hinzufügen",
+        "rollbackAll": "Alle zurücksetzen",
+        "refresh": "Aktualisieren"
       },
       "toasts": {
         "noAddableFilesInDir": "Keine geänderten Dateien in diesem Verzeichnis können zu VCS hinzugefügt werden",
@@ -2092,7 +2099,8 @@
         "deleted": "{name} gelöscht",
         "deleteFailed": "Löschen fehlgeschlagen",
         "deletedFiles": "{count} Dateien gelöscht",
-        "noDeletableFilesInDir": "In diesem Verzeichnis gibt es keine löschbaren geänderten Dateien"
+        "noDeletableFilesInDir": "In diesem Verzeichnis gibt es keine löschbaren geänderten Dateien",
+        "commitFailed": "Commit fehlgeschlagen"
       },
       "directoryDialog": {
         "descriptionAdd": "Dateien unter Verzeichnis {path} auswählen, um sie zu VCS hinzuzufügen.",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "Diese Aktion kann nicht rückgängig gemacht werden.",
         "kindDirectory": "Verzeichnis",
         "kindFile": "Datei"
+      },
+      "quickCommit": {
+        "placeholder": "Commit-Nachricht (Enter zum Committen)",
+        "commit": "Committen",
+        "openWindow": "Commit-Fenster öffnen"
       }
     },
     "tabContext": {

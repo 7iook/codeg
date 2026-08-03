@@ -1303,6 +1303,201 @@ pub async fn git_fetch(
     git_fetch_core(&path, credentials.as_ref(), &db, &data_dir).await
 }
 
+/// Read a single git config value, or `None` when unset/empty.
+async fn git_config_value(path: &str, key: &str) -> Option<String> {
+    let output = crate::process::tokio_command("git")
+        .args(["config", "--get", key])
+        .current_dir(path)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Resolve a ref to its commit hash, or `None` when the ref doesn't exist.
+async fn rev_parse_ref(path: &str, reference: &str) -> Option<String> {
+    let output = crate::process::tokio_command("git")
+        .args(["rev-parse", "--verify", "--quiet", reference])
+        .current_dir(path)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash)
+    }
+}
+
+/// How many files a ref moved across, mirroring `git_pull_core`'s accounting.
+async fn count_ref_advance(
+    path: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Result<usize, AppCommandError> {
+    match (before, after) {
+        (Some(before), Some(after)) if before != after => {
+            count_changed_files_between(path, before, after).await
+        }
+        (None, Some(after)) => count_files_in_commit(path, after).await,
+        _ => Ok(0),
+    }
+}
+
+/// Update a branch **without checking it out** — the "update code" action on a
+/// branch row in the branch selector.
+///
+/// - The checked-out branch delegates to [`git_pull_core`], so it behaves
+///   exactly like the dropdown's "pull" operation (merge + conflict reporting).
+/// - Any other local branch resolves its upstream from `branch.<b>.remote` /
+///   `branch.<b>.merge` and fast-forwards the local ref with
+///   `git fetch <remote> <upstream>:refs/heads/<branch>`. The working tree is
+///   never touched. We deliberately omit the `+` force prefix, so git itself
+///   rejects a non-fast-forward — and it also rejects a branch that is checked
+///   out in another worktree. Both surface as a plain command error rather than
+///   silently rewriting history under a worktree the user has open.
+/// - A remote branch row (`origin/foo`) fetches that remote ref only, advancing
+///   the remote-tracking ref without creating or moving any local branch.
+pub(crate) async fn git_update_branch_core(
+    path: &str,
+    branch: &str,
+    is_remote: bool,
+    credentials: Option<&GitCredentials>,
+    db: &AppDatabase,
+    data_dir: &std::path::Path,
+) -> Result<GitPullResult, AppCommandError> {
+    ensure_git_repo(path)?;
+
+    if is_remote {
+        // "origin/feature/x" → remote "origin", branch "feature/x".
+        let (remote, remote_branch) = branch
+            .split_once('/')
+            .filter(|(remote, rest)| !remote.is_empty() && !rest.is_empty())
+            .ok_or_else(|| {
+                AppCommandError::invalid_input(format!("Malformed remote branch ref: {branch}"))
+            })?;
+
+        let tracking_ref = format!("refs/remotes/{branch}");
+        let before = rev_parse_ref(path, &tracking_ref).await;
+
+        // Spell the refspec out rather than relying on `git fetch <remote>
+        // <branch>` opportunistically updating the tracking ref. `+` is correct
+        // here: a remote-tracking ref is a mirror of the remote and is meant to
+        // follow a force-push, exactly like the default fetch refspec does.
+        let refspec = format!("+refs/heads/{remote_branch}:{tracking_ref}");
+        let mut cmd = crate::process::tokio_command("git");
+        cmd.args(["fetch", remote, &refspec]).current_dir(path);
+        prepare_remote_git_cmd_with_remote(&mut cmd, path, Some(remote), credentials, db, data_dir)
+            .await;
+
+        let output = cmd.output().await.map_err(AppCommandError::io)?;
+        if !output.status.success() {
+            return Err(classify_remote_git_error("fetch", &output.stderr));
+        }
+
+        let after = rev_parse_ref(path, &tracking_ref).await;
+        return Ok(GitPullResult {
+            updated_files: count_ref_advance(path, before.as_deref(), after.as_deref()).await?,
+            conflict: None,
+        });
+    }
+
+    // The checked-out branch has a working tree to reconcile — only a real pull
+    // can do that safely.
+    if resolve_git_head(path).await?.branch.as_deref() == Some(branch) {
+        return git_pull_core(path, credentials, db, data_dir).await;
+    }
+
+    let Some(remote) = git_config_value(path, &format!("branch.{branch}.remote")).await else {
+        return Err(AppCommandError::invalid_input(format!(
+            "Branch '{branch}' has no upstream remote configured"
+        )));
+    };
+    // `branch.<b>.merge` is the upstream's FULL ref (`refs/heads/x`). Both sides
+    // of the refspec stay fully qualified so git can't reinterpret the
+    // destination as a remote-tracking ref.
+    let Some(upstream_ref) = git_config_value(path, &format!("branch.{branch}.merge")).await else {
+        return Err(AppCommandError::invalid_input(format!(
+            "Branch '{branch}' has no upstream branch configured"
+        )));
+    };
+
+    let local_ref = format!("refs/heads/{branch}");
+    let before = rev_parse_ref(path, &local_ref).await;
+
+    let mut refspecs = vec![format!("{upstream_ref}:{local_ref}")];
+    // Keep the remote-tracking ref in step with the branch we just advanced, so
+    // "ahead/behind" readouts don't claim the branch is unpushed. Skipped for
+    // the `.` pseudo-remote (a branch tracking another LOCAL branch), which has
+    // no `refs/remotes/.` namespace.
+    if remote != "." {
+        if let Some(upstream_branch) = upstream_ref.strip_prefix("refs/heads/") {
+            refspecs.push(format!(
+                "+{upstream_ref}:refs/remotes/{remote}/{upstream_branch}"
+            ));
+        }
+    }
+
+    let mut cmd = crate::process::tokio_command("git");
+    cmd.arg("fetch")
+        .arg(&remote)
+        .args(&refspecs)
+        .current_dir(path);
+    prepare_remote_git_cmd_with_remote(&mut cmd, path, Some(&remote), credentials, db, data_dir)
+        .await;
+
+    let output = cmd.output().await.map_err(AppCommandError::io)?;
+    if !output.status.success() {
+        return Err(classify_remote_git_error("fetch", &output.stderr));
+    }
+
+    let after = rev_parse_ref(path, &local_ref).await;
+    Ok(GitPullResult {
+        updated_files: count_ref_advance(path, before.as_deref(), after.as_deref()).await?,
+        conflict: None,
+    })
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn git_update_branch(
+    path: String,
+    branch: String,
+    is_remote: bool,
+    credentials: Option<GitCredentials>,
+    db: tauri::State<'_, AppDatabase>,
+    app_handle: tauri::AppHandle,
+) -> Result<GitPullResult, AppCommandError> {
+    let data_dir = app_handle.path().app_data_dir().map_err(|e| {
+        AppCommandError::external_command("Failed to resolve app data dir", e.to_string())
+    })?;
+    // Resolve through the effective data dir so a custom
+    // `CODEG_DATA_DIR` reaches the git credential helper invoked by
+    // this subprocess.
+    let data_dir = crate::paths::resolve_effective_data_dir(&data_dir);
+    git_update_branch_core(
+        &path,
+        &branch,
+        is_remote,
+        credentials.as_ref(),
+        &db,
+        &data_dir,
+    )
+    .await
+}
+
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn git_push_info(path: String) -> Result<GitPushInfo, AppCommandError> {
     ensure_git_repo(&path)?;

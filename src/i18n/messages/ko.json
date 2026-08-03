@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "푸시할 커밋이 없습니다",
         "pushedCommits": "{count, plural, one {#개 커밋 푸시됨} other {#개 커밋 푸시됨}}",
         "switchedToFolder": "{name}(으)로 전환했습니다",
-        "switchFailed": "브랜치 전환에 실패했습니다"
+        "switchFailed": "브랜치 전환에 실패했습니다",
+        "openStashWindowFailed": "스태시 창을 열지 못했습니다"
       },
       "tasks": {
         "newBranch": "브랜치 {name} 생성",
@@ -1798,7 +1799,8 @@
         "pushCode": "코드 push",
         "stashChanges": "변경 사항 stash",
         "stashPop": "stash pop",
-        "deleteBranch": "브랜치 {branchName} 삭제"
+        "deleteBranch": "브랜치 {branchName} 삭제",
+        "updateBranch": "브랜치 {branchName} 업데이트"
       },
       "confirm": {
         "mergeTitle": "브랜치 병합",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "추가 Git 작업"
     },
     "gitChangesTab": {
       "workspace": "작업 공간",
@@ -2077,7 +2080,11 @@
         "commitCode": "코드 커밋",
         "rollback": "롤백",
         "addToVcs": "VCS에 추가",
-        "delete": "삭제"
+        "delete": "삭제",
+        "moreActions": "추가 Git 작업",
+        "addAllToVcs": "모두 VCS에 추가",
+        "rollbackAll": "모두 롤백",
+        "refresh": "새로 고침"
       },
       "toasts": {
         "noAddableFilesInDir": "이 디렉터리에는 VCS에 추가할 수 있는 변경 파일이 없습니다",
@@ -2092,7 +2099,8 @@
         "deleted": "{name}이(가) 삭제되었습니다",
         "deleteFailed": "삭제에 실패했습니다",
         "deletedFiles": "{count}개 파일을 삭제했습니다",
-        "noDeletableFilesInDir": "이 디렉터리에서 삭제할 수 있는 변경된 파일이 없습니다"
+        "noDeletableFilesInDir": "이 디렉터리에서 삭제할 수 있는 변경된 파일이 없습니다",
+        "commitFailed": "커밋 실패"
       },
       "directoryDialog": {
         "descriptionAdd": "디렉터리 {path} 아래에서 VCS에 추가할 파일을 선택하세요.",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "이 작업은 되돌릴 수 없습니다.",
         "kindDirectory": "디렉터리",
         "kindFile": "파일"
+      },
+      "quickCommit": {
+        "placeholder": "커밋 메시지 (Enter로 커밋)",
+        "commit": "커밋",
+        "openWindow": "커밋 창 열기"
       }
     },
     "tabContext": {

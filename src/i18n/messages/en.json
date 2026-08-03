@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "No commits to push",
         "pushedCommits": "Pushed {count, plural, one {# commit} other {# commits}}",
         "switchedToFolder": "Switched to {name}",
-        "switchFailed": "Failed to switch branch"
+        "switchFailed": "Failed to switch branch",
+        "openStashWindowFailed": "Failed to open stash window"
       },
       "tasks": {
         "newBranch": "Create branch {name}",
@@ -1798,7 +1799,8 @@
         "pushCode": "Push code",
         "stashChanges": "Stash changes",
         "stashPop": "Pop stash",
-        "deleteBranch": "Delete branch {branchName}"
+        "deleteBranch": "Delete branch {branchName}",
+        "updateBranch": "Update branch {branchName}"
       },
       "confirm": {
         "mergeTitle": "Merge branch",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "More Git actions"
     },
     "gitChangesTab": {
       "workspace": "workspace",
@@ -2077,7 +2080,11 @@
         "commitCode": "Commit code",
         "rollback": "Rollback",
         "addToVcs": "Add to VCS",
-        "delete": "Delete"
+        "delete": "Delete",
+        "moreActions": "More Git actions",
+        "addAllToVcs": "Add all to VCS",
+        "rollbackAll": "Rollback all",
+        "refresh": "Refresh"
       },
       "toasts": {
         "noAddableFilesInDir": "No changed files in this directory can be added to VCS",
@@ -2092,7 +2099,8 @@
         "deleted": "Deleted {name}",
         "deleteFailed": "Delete failed",
         "deletedFiles": "Deleted {count, plural, one {# file} other {# files}}",
-        "noDeletableFilesInDir": "No changed files in this directory can be deleted"
+        "noDeletableFilesInDir": "No changed files in this directory can be deleted",
+        "commitFailed": "Commit failed"
       },
       "directoryDialog": {
         "descriptionAdd": "Select files under directory {path} to add to VCS.",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "This action cannot be undone.",
         "kindDirectory": "directory",
         "kindFile": "file"
+      },
+      "quickCommit": {
+        "placeholder": "Commit message (Enter to commit)",
+        "commit": "Commit",
+        "openWindow": "Open commit window"
       }
     },
     "tabContext": {

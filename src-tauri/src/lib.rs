@@ -951,6 +951,7 @@ mod tauri_app {
                 folders::git_start_pull_merge,
                 folders::git_has_merge_head,
                 folders::git_fetch,
+                folders::git_update_branch,
                 folders::git_push_info,
                 folders::git_push,
                 folders::git_new_branch,

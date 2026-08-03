@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "Não há commits para enviar",
         "pushedCommits": "{count, plural, one {# commit enviado} other {# commits enviados}}",
         "switchedToFolder": "Alternado para {name}",
-        "switchFailed": "Falha ao trocar de branch"
+        "switchFailed": "Falha ao trocar de branch",
+        "openStashWindowFailed": "Falha ao abrir a janela de stash"
       },
       "tasks": {
         "newBranch": "Criar branch {name}",
@@ -1798,7 +1799,8 @@
         "pushCode": "Enviar código",
         "stashChanges": "Fazer stash das alterações",
         "stashPop": "Aplicar stash",
-        "deleteBranch": "Excluir branch {branchName}"
+        "deleteBranch": "Excluir branch {branchName}",
+        "updateBranch": "Atualizar o branch {branchName}"
       },
       "confirm": {
         "mergeTitle": "Mesclar branch",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "Mais ações do Git"
     },
     "gitChangesTab": {
       "workspace": "espaço de trabalho",
@@ -2077,7 +2080,11 @@
         "commitCode": "Commit do código",
         "rollback": "Reverter",
         "addToVcs": "Adicionar ao VCS",
-        "delete": "Excluir"
+        "delete": "Excluir",
+        "moreActions": "Mais ações do Git",
+        "addAllToVcs": "Adicionar tudo ao VCS",
+        "rollbackAll": "Reverter tudo",
+        "refresh": "Atualizar"
       },
       "toasts": {
         "noAddableFilesInDir": "Nenhum arquivo alterado neste diretório pode ser adicionado ao VCS",
@@ -2092,7 +2099,8 @@
         "deleted": "{name} excluído",
         "deleteFailed": "Falha ao excluir",
         "deletedFiles": "{count} arquivos excluídos",
-        "noDeletableFilesInDir": "Nenhum arquivo alterado neste diretório pode ser excluído"
+        "noDeletableFilesInDir": "Nenhum arquivo alterado neste diretório pode ser excluído",
+        "commitFailed": "Falha ao confirmar"
       },
       "directoryDialog": {
         "descriptionAdd": "Selecione arquivos sob o diretório {path} para adicionar ao VCS.",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "Esta ação não pode ser desfeita.",
         "kindDirectory": "diretório",
         "kindFile": "arquivo"
+      },
+      "quickCommit": {
+        "placeholder": "Mensagem do commit (Enter para confirmar)",
+        "commit": "Confirmar",
+        "openWindow": "Abrir janela de commit"
       }
     },
     "tabContext": {

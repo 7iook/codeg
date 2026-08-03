@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "沒有可推送的提交",
         "pushedCommits": "已推送 {count} 個提交",
         "switchedToFolder": "已切換到 {name}",
-        "switchFailed": "切換分支失敗"
+        "switchFailed": "切換分支失敗",
+        "openStashWindowFailed": "開啟收藏視窗失敗"
       },
       "tasks": {
         "newBranch": "新增分支 {name}",
@@ -1798,7 +1799,8 @@
         "pushCode": "推送程式碼",
         "stashChanges": "暫存變更",
         "stashPop": "取消暫存",
-        "deleteBranch": "刪除分支 {branchName}"
+        "deleteBranch": "刪除分支 {branchName}",
+        "updateBranch": "更新分支 {branchName}"
       },
       "confirm": {
         "mergeTitle": "合併分支",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "更多 Git 操作"
     },
     "gitChangesTab": {
       "workspace": "工作區",
@@ -2077,7 +2080,11 @@
         "commitCode": "提交程式碼",
         "rollback": "回滾",
         "addToVcs": "加入到 VCS",
-        "delete": "刪除"
+        "delete": "刪除",
+        "moreActions": "更多 Git 操作",
+        "addAllToVcs": "全部加入 VCS",
+        "rollbackAll": "全部還原",
+        "refresh": "重新整理"
       },
       "toasts": {
         "noAddableFilesInDir": "該目錄下沒有可加入到 VCS 的變更檔案",
@@ -2092,7 +2099,8 @@
         "deleted": "已刪除 {name}",
         "deleteFailed": "刪除失敗",
         "deletedFiles": "已刪除 {count} 個檔案",
-        "noDeletableFilesInDir": "此目錄下沒有可刪除的變更檔案"
+        "noDeletableFilesInDir": "此目錄下沒有可刪除的變更檔案",
+        "commitFailed": "提交失敗"
       },
       "directoryDialog": {
         "descriptionAdd": "選擇目錄 {path} 下要加入到 VCS 的檔案。",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "此操作無法撤銷。",
         "kindDirectory": "目錄",
         "kindFile": "檔案"
+      },
+      "quickCommit": {
+        "placeholder": "提交訊息（Enter 提交）",
+        "commit": "提交",
+        "openWindow": "開啟提交視窗"
       }
     },
     "tabContext": {

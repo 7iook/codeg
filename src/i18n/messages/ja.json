@@ -1783,7 +1783,8 @@
         "noCommitsToPush": "プッシュするコミットはありません",
         "pushedCommits": "{count, plural, one {# 件のコミットをプッシュ} other {# 件のコミットをプッシュ}}",
         "switchedToFolder": "{name} に切り替えました",
-        "switchFailed": "ブランチの切り替えに失敗しました"
+        "switchFailed": "ブランチの切り替えに失敗しました",
+        "openStashWindowFailed": "stash ウィンドウを開けませんでした"
       },
       "tasks": {
         "newBranch": "ブランチ {name} を作成",
@@ -1798,7 +1799,8 @@
         "pushCode": "コードをプッシュ",
         "stashChanges": "変更を stash",
         "stashPop": "stash を pop",
-        "deleteBranch": "ブランチ {branchName} を削除"
+        "deleteBranch": "ブランチ {branchName} を削除",
+        "updateBranch": "ブランチ {branchName} を更新"
       },
       "confirm": {
         "mergeTitle": "ブランチをマージ",
@@ -2059,7 +2061,8 @@
             }
           }
         }
-      }
+      },
+      "moreActions": "その他の Git 操作"
     },
     "gitChangesTab": {
       "workspace": "ワークスペース",
@@ -2077,7 +2080,11 @@
         "commitCode": "コードをコミット",
         "rollback": "ロールバック",
         "addToVcs": "VCS に追加",
-        "delete": "削除"
+        "delete": "削除",
+        "moreActions": "その他の Git 操作",
+        "addAllToVcs": "すべて VCS に追加",
+        "rollbackAll": "すべてロールバック",
+        "refresh": "更新"
       },
       "toasts": {
         "noAddableFilesInDir": "このディレクトリには VCS に追加できる変更ファイルがありません",
@@ -2092,7 +2099,8 @@
         "deleted": "{name} を削除しました",
         "deleteFailed": "削除に失敗しました",
         "deletedFiles": "{count} 個のファイルを削除しました",
-        "noDeletableFilesInDir": "このディレクトリには削除可能な変更ファイルがありません"
+        "noDeletableFilesInDir": "このディレクトリには削除可能な変更ファイルがありません",
+        "commitFailed": "コミットに失敗しました"
       },
       "directoryDialog": {
         "descriptionAdd": "ディレクトリ {path} 配下で VCS に追加するファイルを選択してください。",
@@ -2118,6 +2126,11 @@
         "descriptionFallback": "この操作は元に戻せません。",
         "kindDirectory": "ディレクトリ",
         "kindFile": "ファイル"
+      },
+      "quickCommit": {
+        "placeholder": "コミットメッセージ（Enter でコミット）",
+        "commit": "コミット",
+        "openWindow": "コミットウィンドウを開く"
       }
     },
     "tabContext": {

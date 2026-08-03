@@ -1785,6 +1785,26 @@ export async function gitFetch(
   })
 }
 
+/**
+ * Update a branch WITHOUT checking it out. The checked-out branch falls back to
+ * a normal pull (so a conflict can still come back on `conflict`); any other
+ * local branch is fast-forwarded from its upstream, and a remote branch
+ * (`isRemote`, e.g. `origin/main`) only advances its remote-tracking ref.
+ */
+export async function gitUpdateBranch(
+  path: string,
+  branch: string,
+  isRemote: boolean,
+  credentials?: GitCredentials | null
+): Promise<GitPullResult> {
+  return getTransport().call("git_update_branch", {
+    path,
+    branch,
+    isRemote,
+    credentials: credentials ?? null,
+  })
+}
+
 export async function gitPushInfo(path: string): Promise<GitPushInfo> {
   return getTransport().call("git_push_info", { path })
 }
