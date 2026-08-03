@@ -19,31 +19,31 @@
 //!   `DelegationSuccess.text` explaining the CLI has no persona support;
 //!   never fails the delegation.
 //!
-//! # Stage 1 boundary
-//!
-//! This module lands the **type base only**:
+//! # Module surface
 //!
 //! - [`LaunchOption`] — closed enum, one variant per launch-time knob (v1 =
 //!   `KiroPersona`). Extend by adding a variant, NEVER by widening into an
 //!   opaque map (R2 A4: opaque maps grow infra surface without business
-//!   need).
+//!   need). Consumed by `manager::spawn_child_inner`, which turns
+//!   `KiroPersona(name)` into a `KIRO_AGENT=<name>` runtime-env entry.
 //! - [`AppliedPersona`] — three-state outcome the frontend renders. No
 //!   `Failed` variant (R3 F2 收窄): failures ride the wrapping
 //!   `DelegationOutcome::Err` instead.
 //! - [`PersonaEffect`] — broker-internal intermediate: what the resolver
 //!   produced, before the broker turns it into `applied_persona`.
 //! - [`PersonaError`] — resolver failure taxonomy. Emitted by
-//!   [`resolve_preamble_at`], which is only wired in stage 3.
+//!   [`resolve_preamble_at`].
 //! - [`is_valid_persona_name`] — the grammar gate shared across all three
 //!   tiers, applied BEFORE any filesystem access.
-//! - [`PersonaCapability`] — trait each `AgentType` implements in stage 2
-//!   to say whether persona has any meaning for it and how to resolve it.
-//! - [`resolve_preamble_at`] — full body landed in stage 3: canonical
-//!   direct-child safety check (R2 F4), TOCTOU-safe open on the
-//!   canonical path (not the candidate), `BufReader::take` hard read cap
-//!   at 200 KiB (R2 F4, not `metadata().len()`), UTF-8 + BOM validation,
-//!   strict frontmatter parsing (R2 F2: unclosed `---` → hard fail, not
-//!   lenient fall-through). Consumed by the Claude Code / Codex
+//! - [`PersonaCapability`] + [`provider_for`] — per-`AgentType` dispatch the
+//!   broker walks to decide whether persona has meaning for a CLI and how to
+//!   resolve it.
+//! - [`resolve_preamble_at`] — canonical direct-child safety check (R2 F4),
+//!   open on the canonical path (not the candidate) to reduce a symlink-swap
+//!   race (does NOT eliminate it — see the fn doc), `BufReader::take` hard
+//!   read cap at 200 KiB (R2 F4, not `metadata().len()`), UTF-8 + BOM
+//!   validation, strict frontmatter parsing (R2 F2: unclosed `---` → hard
+//!   fail, not lenient fall-through). Consumed by the Claude Code / Codex
 //!   providers below.
 
 use std::path::Path;
@@ -238,10 +238,7 @@ impl std::error::Error for PersonaError {}
 /// Rejects: empty string, 65+ chars, `.`, `/`, `\`, whitespace, any
 /// non-ASCII including CJK / emoji, dots (blocks `../` traversal at the
 /// syntax layer before path canonicalization even runs).
-// gate:allow-unwired stage-2 provider dispatch wires this via impls
-#[allow(dead_code)]
 pub fn is_valid_persona_name(name: &str) -> bool {
-    // gate:allow-unwired stage-2 wires it
     let len = name.chars().count();
     if !(1..=64).contains(&len) {
         return false;
@@ -270,10 +267,7 @@ pub fn is_valid_persona_name(name: &str) -> bool {
 /// all; Claude Code / Codex read `<home_dir>/.claude/agents/<name>.md`
 /// or `<home_dir>/.codex/agents/<name>.md` respectively via
 /// [`resolve_preamble_at`].
-// gate:allow-unwired stage-2 registers AgentType impls that consume this trait
-#[allow(dead_code)]
 pub trait PersonaCapability {
-    // gate:allow-unwired stage-2 registers impls
     /// Whether persona nomination has any meaning for this CLI family.
     ///
     /// - Kiro / Claude Code / Codex → `true`
@@ -313,9 +307,15 @@ pub trait PersonaCapability {
 ///   pointing outside `<root>` are `PathEscape`. Direct-child is checked
 ///   via `canonical.parent() == Some(canonical_root)`, NOT `starts_with`
 ///   — `starts_with` would let a persona in a subdirectory pass.
-/// - TOCTOU-safety (R2 F4): the file is opened on the canonical path
-///   itself, not the candidate, so a symlink swap between canonicalize
-///   and open still hits the original entity.
+/// - Symlink-swap race (R2 F4): the file is opened on the canonical path
+///   itself, not the candidate, so a symlink swapped between canonicalize
+///   and open still hits the original entity. This REDUCES the check/use
+///   (TOCTOU) race but does NOT eliminate it — canonicalize resolves the
+///   path, then open re-traverses it by name, so a swap in that window is
+///   still theoretically possible. Acceptable under the single-tenant
+///   trust model (R1 A2): the agents directory is the user's own, and a
+///   local attacker who can swap symlinks there already has the user's
+///   privileges.
 /// - Read cap (R2 F4): 200 KiB hard ceiling via `BufReader::take` — the
 ///   `+1` sentinel byte plus a `bytes.len() > cap` check detects
 ///   overflow without buffering the overflow content. `metadata().len()`
@@ -374,9 +374,11 @@ pub fn resolve_preamble_at(name: &str, root: &Path) -> Result<String, PersonaErr
         )));
     }
 
-    // 4. TOCTOU-safe open: open the CANONICAL path, not the candidate.
-    //    If a symlink was swapped between canonicalize() and open(), the
-    //    open still lands on the original inode (or fails cleanly).
+    // 4. Open the CANONICAL path, not the candidate. If a symlink was
+    //    swapped between canonicalize() and open(), the open still lands on
+    //    the original inode (or fails cleanly). This narrows — but does not
+    //    fully close — the check/use (TOCTOU) window; residual race is
+    //    acceptable under the single-tenant trust model (R1 A2, see fn doc).
     let file = std::fs::File::open(&canonical).map_err(|e| {
         PersonaError::IoError(format!("open persona {}: {}", canonical.display(), e))
     })?;
@@ -509,8 +511,6 @@ fn strip_frontmatter(text: &str, name: &str) -> Result<String, PersonaError> {
 /// Unit-struct bridge that hangs [`PersonaCapability`] off the `Kiro`
 /// [`AgentType`] variant. Zero-sized; a single static reference is handed
 /// out via [`provider_for`].
-// gate:allow-unwired stage-4 broker.rs wires this via provider_for
-#[allow(dead_code)]
 pub struct KiroProvider;
 
 impl PersonaCapability for KiroProvider {
@@ -549,8 +549,6 @@ impl PersonaCapability for KiroProvider {
 /// already handles `CLAUDE_CONFIG_DIR` env → `$HOME/.claude` fallback
 /// (see `crate::parsers::claude`). Keeping the parameter preserves the
 /// trait interface symmetry.
-// gate:allow-unwired stage-4 broker.rs wires this via provider_for
-#[allow(dead_code)]
 pub struct ClaudeCodeProvider;
 
 impl PersonaCapability for ClaudeCodeProvider {
@@ -580,8 +578,6 @@ impl PersonaCapability for ClaudeCodeProvider {
 /// `<resolve_codex_home_dir()>/agents/<name>.md` and follows the same
 /// shape as [`ClaudeCodeProvider`]. `resolve_codex_home_dir` honours the
 /// `CODEX_HOME` env variable (see `crate::parsers::codex`).
-// gate:allow-unwired stage-4 broker.rs wires this via provider_for
-#[allow(dead_code)]
 pub struct CodexProvider;
 
 impl PersonaCapability for CodexProvider {
@@ -615,8 +611,6 @@ impl PersonaCapability for CodexProvider {
 /// grammar check or HOME lookup (R3 F1). `resolve_persona_effect` is
 /// defensive: if a caller ignores `supports_persona()` and calls anyway,
 /// it must still get [`PersonaEffect::Ignored`] rather than a panic.
-// gate:allow-unwired stage-4 broker.rs wires this via provider_for
-#[allow(dead_code)]
 pub struct UnsupportedProvider;
 
 impl PersonaCapability for UnsupportedProvider {
@@ -650,9 +644,8 @@ static UNSUPPORTED_PROVIDER: UnsupportedProvider = UnsupportedProvider;
 /// 1. Add a `<Name>Provider` unit struct + `impl PersonaCapability`.
 /// 2. Add a `static <NAME>_PROVIDER: <Name>Provider = ...;`.
 /// 3. Add a `match` arm below.
+///
 /// broker.rs does NOT change.
-// gate:allow-unwired stage-4 broker.rs wires this
-#[allow(dead_code)]
 pub fn provider_for(agent_type: AgentType) -> &'static dyn PersonaCapability {
     match agent_type {
         AgentType::Kiro => &KIRO_PROVIDER,

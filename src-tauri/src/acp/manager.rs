@@ -3076,6 +3076,7 @@ impl ConnectionManagerSpawner {
         session_id: Option<String>,
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
+        launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
     ) -> Result<String, crate::acp::delegation::spawner::SpawnerError> {
         use crate::acp::delegation::spawner::SpawnerError;
         // Resolve the parent connection so we can inherit its emitter and
@@ -3116,6 +3117,33 @@ impl ConnectionManagerSpawner {
         .await
         .map_err(|e| SpawnerError::Spawn(e.to_string()))?;
 
+        // Per-call persona nomination (stage 5, closes P0-1): a Kiro persona
+        // resolved by the broker arrives as `LaunchOption::KiroPersona(name)`.
+        // Insert it as `KIRO_AGENT=<name>` so `connection::kiro_launch_args`
+        // later emits `--agent <name>` argv.
+        //
+        // MERGE-ORDER INVARIANT (spec design §Risks · the argv translation it
+        // depends on is locked by `connection::kiro_launch_args_*` unit tests):
+        // this insert MUST happen BEFORE `spawn_agent` → `spawn_agent_connection`
+        // → `apply_kiro_env_policy`. That policy STRIPS every `KIRO_*` launch
+        // knob out of the child's *inherited* environment after translating it
+        // to argv; the translation reads `runtime_env`, so KIRO_AGENT must
+        // already be present in `runtime_env` here. Inserting it after
+        // `spawn_agent` (or letting the policy run first) would drop the
+        // persona silently. A per-call nomination also intentionally OVERRIDES
+        // any panel-stored `KIRO_AGENT` (`env_json`) that
+        // `build_session_runtime_env` may have seeded — the LLM's explicit
+        // `subagent_type` wins over the persisted default.
+        let mut runtime_env = runtime_env;
+        if let Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(name)) =
+            &launch_option
+        {
+            runtime_env.insert(
+                crate::acp::connection::KIRO_AGENT_ENV.to_string(),
+                name.clone(),
+            );
+        }
+
         self.manager
             .spawn_agent(
                 agent_type,
@@ -3141,8 +3169,11 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
         working_dir: Option<String>,
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
+        launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
     ) -> Result<String, crate::acp::delegation::spawner::SpawnerError> {
         // Delegation children are brand-new sessions: no resume credential.
+        // The per-call `launch_option` (Kiro persona) rides through to the
+        // shared body, which merges it into the runtime env before spawn.
         self.spawn_child_inner(
             parent_connection_id,
             agent_type,
@@ -3150,6 +3181,7 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
             None,
             preferred_mode_id,
             preferred_config_values,
+            launch_option,
         )
         .await
     }
@@ -3163,6 +3195,8 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
     ) -> Result<String, crate::acp::delegation::spawner::SpawnerError> {
+        // A resume replays an EXISTING session — it must not re-nominate a
+        // persona (R7.4), so no `launch_option` is threaded here.
         self.spawn_child_inner(
             parent_connection_id,
             agent_type,
@@ -3170,6 +3204,7 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
             session_id,
             preferred_mode_id,
             preferred_config_values,
+            None,
         )
         .await
     }

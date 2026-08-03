@@ -80,6 +80,16 @@ pub trait ConnectionSpawner: Send + Sync {
     ///
     /// Returns the new connection id (codeg-internal UUID, not the ACP
     /// session id assigned by the agent).
+    ///
+    /// `launch_option` carries a per-call CLI launch knob resolved from the
+    /// LLM's persona nomination (`subagent_type`). Today the only variant is
+    /// [`crate::acp::delegation::persona::LaunchOption::KiroPersona`], which
+    /// the production impl turns into a `KIRO_AGENT=<name>` runtime-env entry
+    /// (→ `--agent <name>` argv). `None` = no persona nominated / the target
+    /// CLI resolved to a first-turn Hint or Ignored effect instead — neither
+    /// of which reaches the spawner. `spawn_for_resume` deliberately takes NO
+    /// `launch_option`: a resume replays an existing session and must not
+    /// re-nominate a persona (R7.4).
     async fn spawn(
         &self,
         parent_connection_id: &str,
@@ -87,6 +97,7 @@ pub trait ConnectionSpawner: Send + Sync {
         working_dir: Option<String>,
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
+        launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
     ) -> Result<String, SpawnerError>;
 
     /// Send the delegation task as the child's first prompt. The
@@ -194,6 +205,12 @@ pub mod mock {
         pub cancels: Mutex<Vec<String>>,
         pub disconnects: Mutex<Vec<String>>,
         pub spawn_args: Mutex<Vec<SpawnCallArgs>>,
+        /// Every `send_prompt_linked_for_delegation` task string, in call
+        /// order. Lets a persona test assert whether a Hint preamble was
+        /// prepended to the FIRST turn (Hint path) or the task text passed
+        /// through unchanged (Native / no-persona path) — the observable
+        /// half of the Native-vs-Hint mutual exclusivity.
+        pub first_prompt_tasks: Mutex<Vec<String>>,
         /// Every `spawn_for_resume` invocation, in call order — notably the
         /// `session_id` the broker forwarded as the resume credential.
         pub resume_args: Mutex<Vec<ResumeCallArgs>>,
@@ -229,6 +246,12 @@ pub mod mock {
         pub working_dir: Option<String>,
         pub preferred_mode_id: Option<String>,
         pub preferred_config_values: BTreeMap<String, String>,
+        /// The per-call launch option the broker forwarded — the whole point
+        /// of the stage-5 wiring. A Kiro persona nomination lands here as
+        /// `Some(LaunchOption::KiroPersona(name))`; every other case is
+        /// `None`. Broker tests assert on this to prove the resolved persona
+        /// actually reaches `spawn` (not just the observable `applied_persona`).
+        pub launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
     }
 
     /// Recorded `spawn_for_resume` call. Same shape as [`SpawnCallArgs`] plus
@@ -320,6 +343,7 @@ pub mod mock {
             working_dir: Option<String>,
             preferred_mode_id: Option<String>,
             preferred_config_values: BTreeMap<String, String>,
+            launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
         ) -> Result<String, SpawnerError> {
             self.spawn_args.lock().await.push(SpawnCallArgs {
                 parent_connection_id: parent_connection_id.to_string(),
@@ -327,6 +351,7 @@ pub mod mock {
                 working_dir,
                 preferred_mode_id,
                 preferred_config_values,
+                launch_option,
             });
             // Honor a test-installed gate: block here (after recording the call,
             // before returning the child id) so a test can pin `handle_request`
@@ -345,9 +370,10 @@ pub mod mock {
         async fn send_prompt_linked_for_delegation(
             &self,
             _conn_id: &str,
-            _task: String,
+            task: String,
             _link: DelegationLink,
         ) -> Result<i32, SpawnerError> {
+            self.first_prompt_tasks.lock().await.push(task);
             // Honor a test-installed gate: block here (after the broker has
             // reserved the child, before it parks the pending entry) until the
             // test releases it.
@@ -467,12 +493,20 @@ pub mod mock {
                     Some("/tmp".into()),
                     None,
                     BTreeMap::new(),
+                    None,
                 )
                 .await
                 .unwrap();
             assert_eq!(r1, "child-1");
             let r2 = m
-                .spawn("parent-1", AgentType::Codex, None, None, BTreeMap::new())
+                .spawn(
+                    "parent-1",
+                    AgentType::Codex,
+                    None,
+                    None,
+                    BTreeMap::new(),
+                    None,
+                )
                 .await
                 .unwrap_err();
             assert!(matches!(r2, SpawnerError::Spawn(_)));
@@ -488,6 +522,7 @@ pub mod mock {
                     None,
                     None,
                     BTreeMap::new(),
+                    None,
                 )
                 .await
                 .unwrap_err();
@@ -509,6 +544,7 @@ pub mod mock {
                 Some("/work".into()),
                 Some("auto".into()),
                 cfg.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -517,6 +553,7 @@ pub mod mock {
             assert_eq!(args[0].agent_type, AgentType::ClaudeCode);
             assert_eq!(args[0].preferred_mode_id.as_deref(), Some("auto"));
             assert_eq!(args[0].preferred_config_values, cfg);
+            assert_eq!(args[0].launch_option, None);
         }
 
         /// `spawn_for_resume` must record the resume credential it was handed

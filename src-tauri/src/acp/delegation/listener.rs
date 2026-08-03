@@ -675,9 +675,17 @@ impl DelegationListener {
             working_dir,
             requested_working_dir,
             external_handle: req.external_handle,
-            // stage 6 parses `subagent_type` off `req.input` here; stage 1
-            // lands the field as `None` so the type checks.
-            subagent_type: None,
+            // Parse the LLM's optional persona nomination off the raw tool
+            // input. Trimmed and empty-filtered so `"  "` / `""` degrade to
+            // `None` (no persona) rather than a whitespace name that would
+            // fail the grammar gate. A non-string JSON value also yields None.
+            // The broker enforces the full name grammar downstream.
+            subagent_type: req
+                .input
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         };
         self.broker.start_delegation(delegation_req).await
     }

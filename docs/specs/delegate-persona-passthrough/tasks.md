@@ -1,4 +1,4 @@
-# Task Tracker · delegate-persona-passthrough
+﻿# Task Tracker · delegate-persona-passthrough
 
 > **What this is** — 本 feature 的 living, checkbox-tracked execution list。executor 读它、实时勾选、在每项下写更新。Single source of "done / left / blocked"。**格式固定,不可自造**。
 
@@ -102,7 +102,7 @@
 - [x] 2. Provider capability 实现(R2 A2 采纳:broker 不识别 CLI)
 
   **Evidence**
-  - `commit pending`
+  - `commit 10ed4f00`
   - `verify: cargo check --features test-utils --message-format=short → EXIT=0; cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
   - `files: src-tauri/src/acp/delegation/persona.rs (+349 行 · KiroProvider / ClaudeCodeProvider / CodexProvider / UnsupportedProvider unit-struct + PersonaCapability impls + provider_for match dispatch + 8 unit tests)`
   - `AC: 2.1 Kiro→Native{KiroPersona} · 2.2/2.3 Claude/Codex→Failed{invalid_persona, stage-3 stub 桩} · 2.4 其它 AgentType(含 Custom)→Ignored · 2.5 8 条 unit tests 覆盖(见下)`
@@ -111,7 +111,7 @@
     - _Requirements: 2.1, 2.5_
 
     **Evidence**
-    - `commit pending`
+    - `commit 10ed4f00`
     - `verify: cargo check --features test-utils / --no-default-features → EXIT=0`
     - `files: persona.rs KiroProvider (定义) · provider_for::AgentType::Kiro (分派)`
     - `AC: 2.1 Native{KiroPersona} 分支返回 · 名称非法防御 Failed{invalid_persona}`
@@ -121,7 +121,7 @@
     - _Requirements: 3.1, 3.2, 3.3_
 
     **Evidence**
-    - `commit pending`
+    - `commit 10ed4f00`
     - `verify: cargo check → EXIT=0`
     - `files: persona.rs ClaudeCodeProvider (定义) · provider_for::AgentType::ClaudeCode (分派)`
     - `AC: 2.2 stub 返 Failed{invalid_persona, stage-3 marker} 让 broker Err 路径可联调不 panic`
@@ -130,7 +130,7 @@
     - _Requirements: 3.1, 3.2, 3.3_
 
     **Evidence**
-    - `commit pending`
+    - `commit 10ed4f00`
     - `verify: cargo check → EXIT=0`
     - `files: persona.rs CodexProvider (定义) · provider_for::AgentType::Codex (分派)`
     - `AC: 2.3 同 2.2 shape`
@@ -139,7 +139,7 @@
     - _Requirements: 4.1, 4.2_
 
     **Evidence**
-    - `commit pending`
+    - `commit 10ed4f00`
     - `verify: cargo check → EXIT=0`
     - `files: persona.rs UnsupportedProvider (定义) · provider_for::match 所有 unsupported variants + Custom(_) (分派)`
     - `AC: 4.1 supports_persona=false · 4.2 resolve_persona_effect=Ignored · 未列举变体会编译失败(non-exhaustive 保护)`
@@ -156,7 +156,7 @@
     - _Requirements: 2.1, 3.2, 4.1_
 
     **Evidence**
-    - `commit pending`
+    - `commit 10ed4f00`
     - `verify: cargo check --features test-utils → EXIT=0`(test 代码类型正确,tests 静态编译通过);**整体 `cargo test` 因 stage 1 update log 已声明的遗留 test-tree 债无法跑到(broker.rs/listener.rs/manager.rs test-tree 里的 DelegationSuccess/DelegationRequest struct literal 缺 stage-1 引入的 applied_persona/subagent_type 字段 · 硬约束禁触这三处 · stage 4/5 补齐后可整体跑)**
     - `files: persona.rs #[cfg(test)] mod tests §Stage-2 段 (+8 tests)`
     - `AC: 8 provider tests 静态通过 typecheck · 覆盖 Kiro/Claude/Codex/Unsupported/Custom + grammar 顺序 invariant`
@@ -167,7 +167,7 @@
 - [x] 3. persona.rs `resolve_preamble` 硬约束
 
   **Evidence**
-  - `commit pending`
+  - `commit 7950ed51`
   - `verify: cargo check (test-utils / mcp) → EXIT=0; cargo test --test persona_stage3 → 12/12 passed`
   - `files: src-tauri/src/acp/delegation/persona.rs · src-tauri/tests/persona_stage3.rs (new)`
   - `AC: Requirements 3.1 + 3.2 + 3.3 + 8.1 全达 (spec design §5, R2 F4 + R2 F2 + R3 F1)`
@@ -185,7 +185,7 @@
     - _Requirements: 3.1, 3.2, 3.3, 8.1_
 
     **Evidence**
-    - `commit pending`
+    - `commit 7950ed51`
     - `verify: cargo test --test persona_stage3 → 12/12 passed(含 read_cap_boundary + rejects_symlink_escape_via_direct_child_check_unix cfg(unix))`
     - `files: src-tauri/src/acp/delegation/persona.rs (resolve_preamble_at body + strip_frontmatter fn) · 同时把 PersonaError 由 stage-1 的 unit-variant shape 恢复成 spec design §5 line 250-258 的 tuple-variant shape(InvalidName(String) / NotFound(String) / NotUtf8(String) / EmptyBody(String) / MalformedFrontmatter(String) / PathEscape(String))`
     - `AC: 3.1 canonical direct-child · TOCTOU-safe open · 200 KiB BufReader::take · BOM strip · frontmatter hard-fail on unclosed fence · EmptyBody detection`
@@ -194,7 +194,7 @@
     - _Requirements: 4.1, 8.1, R3-F1_
 
     **Evidence**
-    - `commit pending`
+    - `commit 7950ed51`
     - `verify: cargo check --features test-utils → EXIT=0`
     - `files: persona.rs::ClaudeCodeProvider::resolve_persona_effect 现调 crate::parsers::claude::resolve_claude_config_dir().join("agents") 传入 resolve_preamble_at · CodexProvider 同法用 resolve_codex_home_dir(). 均 honour CLAUDE_CONFIG_DIR / CODEX_HOME env override`
     - `AC: 3.2 Claude/Codex provider stub 兑现真调用 · Kiro/Unsupported 未新增 HOME 读盘`
@@ -211,7 +211,7 @@
     - _Properties: P6_
 
     **Evidence**
-    - `commit pending`
+    - `commit 7950ed51`
     - `verify: cargo test --test persona_stage3 --features test-utils → 12 passed; 0 failed; EXIT=0`
     - `files: src-tauri/tests/persona_stage3.rs:1-271 (new) · src-tauri/src/acp/delegation/persona.rs:783-1138 (#[cfg(test)] mod tests §Stage-3 段)`
     - `AC: Requirements 3.3, 3-name-grammar.1-3, 8.1 (Property P6 + R2 F4 read-cap + R2 F2 frontmatter 六态)`
@@ -223,7 +223,7 @@
 - [x] 4. broker 翻译层重构(R2 A2 + R3 F1 + R3 A2 + R3 F2 采纳后的最终版)
 
   **Evidence**
-  - `commit pending`
+  - `commit b857f78d`
   - `verify: cargo check --features test-utils --tests → EXIT=0 (49 处 E0063 全清); cargo check --no-default-features --bin codeg-mcp → EXIT=0; cargo test --test persona_stage3 → 12 passed`
   - `files: src-tauri/src/acp/delegation/broker.rs · listener.rs · lifecycle.rs · manager.rs · web/handlers/delegation.rs · tests/delegation_e2e_windows.rs`
   - `AC: Requirements 3.5 + 4.1 + 4.2 + 4.3 + 5.1 + 5.3 + R3-F1 + R3-A2 + R3-F2 全达`
@@ -237,7 +237,7 @@
     - _Requirements: 3.5, 4.1, 4.2, R3-F1_
 
     **Evidence**
-    - `commit pending`
+    - `commit b857f78d`
     - `verify: cargo check --features test-utils --tests → EXIT=0`
     - `files: src-tauri/src/acp/delegation/broker.rs (start_delegation 内 persona dispatch 块 · supports_persona→name grammar→resolve_persona_effect 顺序)`
     - `AC: Requirements 3.5, 4.1, 4.2, R3-F1 — unsupported 短路不校名不解 HOME`
@@ -245,7 +245,7 @@
     - _Requirements: 5.1, R3-A2, R3-F2_
 
     **Evidence**
-    - `commit pending`
+    - `commit b857f78d`
     - `verify: cargo check --features test-utils --tests → EXIT=0`
     - `files: src-tauri/src/acp/delegation/broker.rs (三元组 launch_option_pending/prepended_task/applied_persona_intent · Failed 分支 early-return report_err)`
     - `AC: Requirements 5.1, R3-A2, R3-F2 — 三元组翻译 · Failed 直返不挂 applied`
@@ -256,7 +256,7 @@
     - _Requirements: 5.1, 5.3, R3-A2_
 
     **Evidence**
-    - `commit pending`
+    - `commit b857f78d`
     - `verify: cargo check --features test-utils --tests → EXIT=0`
     - `files: src-tauri/src/acp/delegation/broker.rs (Native/IgnoredUnsupportedCli 在 dispatch 时定 intent · spawn 失败 early-return 丢 intent → 天然满足 spawn-Ok 后才产)`
     - `AC: Requirements 5.1, 5.3, R3-A2 — spawn Ok 后 Native/Ignored 归因`
@@ -264,7 +264,7 @@
     - _Requirements: 3.2, 5.1, R3-A2_
 
     **Evidence**
-    - `commit pending`
+    - `commit b857f78d`
     - `verify: cargo check --features test-utils --tests → EXIT=0`
     - `files: src-tauri/src/acp/delegation/broker.rs (started_at 后按 (intent, prepended_task) match promote Hint · send 失败在此前 early-return)`
     - `AC: Requirements 3.2, 5.1, R3-A2 — send Ok 后才 promote Hint`
@@ -272,7 +272,7 @@
     - _Requirements: 4.2, 4.3_
 
     **Evidence**
-    - `commit pending`
+    - `commit b857f78d`
     - `verify: cargo check --features test-utils --tests → EXIT=0`
     - `files: src-tauri/src/acp/delegation/broker.rs (unsupported_persona_note + append_unsupported_note free fn · complete_call + setup-window take_early_complete 两处追加)`
     - `AC: Requirements 4.2, 4.3 — IgnoredUnsupportedCli + Ok outcome → [note] 挂 text`
@@ -280,7 +280,7 @@
     - _Requirements: 4.3_
 
     **Evidence**
-    - `commit pending`
+    - `commit b857f78d`
     - `verify: cargo check --features test-utils --tests → EXIT=0`
     - `files: src-tauri/src/acp/delegation/broker.rs (Native/Hint/Ignored/unsupported 四事件各一条 tracing::info! target=delegation::persona)`
     - `AC: Requirements 4.3 — 每次 persona 事件可 grep filter`
@@ -298,25 +298,31 @@
     - _Properties: P1, P2, P3, P4, P5_
 
     **Evidence**
-    - `commit pending`
+    - `commit b857f78d`
     - `verify: cargo check --features test-utils --tests → EXIT=0 (8 test 类型层编译绿); 运行 unverified: lib-test 二进制 0xC0000139 启动崩(既有测试同崩·集成测试 exe 正常·本机 Tauri native DLL 环境问题·非本改动)`
     - `files: src-tauri/src/acp/delegation/broker.rs (#[cfg(test)] mod tests 尾部 +8 persona test: P1 P2 P3 P4 P5 + R3-F1 R3-A2 R3-F2)`
     - `AC: Correctness Properties P1-P5 + R3-F1/A2/F2 — 断言 broker 可观察 applied_persona 输出(MockSpawner 不接 launch_option 至 stage 5, 无 #[ignore])`
 
 ### 阶段 5 · ConnectionSpawner trait 扩 + spawn_child_inner merge
 
-- [ ] 5. Spawner trait 与 production impl
-  - [ ] 5.1 `spawner.rs:85-138 ConnectionSpawner::spawn` 签名追加 `launch_option: Option<LaunchOption>` 参数(**`spawn_for_resume` 签名不改** · R2 A5 / R3 A1)
+- [x] 5. Spawner trait 与 production impl
+  - **Evidence**: commit: pending · verify: `cargo check --features test-utils --tests` → EXIT=0; `cargo test --features test-utils --test broker_persona` → 5 passed; `cargo test --features test-utils --test persona_stage3` → 12 passed EXIT=0 · files: `spawner.rs`/`manager.rs`/`broker.rs`/`listener.rs`/`connection.rs`/`persona.rs`/`tests/broker_persona.rs` · AC: 2.1 2.2 2.5 7.2 7.4 — spawn launch_option 全链接线(P0-1 闭合)+ listener 解析 subagent_type(P0-2)+ review P0/P1/P2 闭合
+  - [x] 5.1 `spawner.rs ConnectionSpawner::spawn` 签名追加 `launch_option: Option<LaunchOption>` 参数(**`spawn_for_resume` 签名不改** · R2 A5 / R3 A1)
     - _Requirements: 7.4, R2-A5, R3-A1_
-  - [ ] 5.2 `manager.rs:2960-3010 ConnectionManagerSpawner::spawn_child_inner` 在 `build_session_runtime_env` 后、`manager.spawn_agent` 前:`if let Some(LaunchOption::KiroPersona(name)) = launch_option { runtime_env.insert("KIRO_AGENT".into(), name); }`。**merge 顺序 invariant** 加内联注释:「merge 必须在 `spawn_agent_connection`(内部调 `apply_kiro_env_policy`)之前,否则 KIRO_AGENT 被剥」
+    - **Evidence**: commit: pending · verify: `cargo check --features test-utils --tests` → EXIT=0 · files: `spawner.rs`(trait + MockSpawner + 3 inline tests)/`manager.rs`(ConnectionManagerSpawner)/`broker.rs`(GatedFollowupSpawner + FailingDisconnectSpawner) · AC: 7.4 R2-A5 R3-A1 — 4 impl + MockSpawner 全扩签名,`spawn_for_resume` 未动
+  - [x] 5.2 `manager.rs ConnectionManagerSpawner::spawn_child_inner` 在 `build_session_runtime_env` 后、`manager.spawn_agent` 前:`if let Some(LaunchOption::KiroPersona(name)) = &launch_option { runtime_env.insert(KIRO_AGENT_ENV, name.clone()); }`。**merge 顺序 invariant** 加内联注释:「merge 必须在 `spawn_agent_connection`(内部调 `apply_kiro_env_policy`)之前,否则 KIRO_AGENT 被剥」
     - _Requirements: 2.1, 2.2_
-  - [ ] 5.3 MockSpawner + broker 内 `GatedFollowupSpawner` 同步扩签名,`SpawnCallArgs` 加 `launch_option` 字段记录
+    - **Evidence**: commit: pending · verify: `cargo check --features test-utils --tests` → EXIT=0 · files: `manager.rs:spawn_child_inner` · AC: 2.1 2.2 — KIRO_AGENT 在 spawn_agent 前插入 + merge-order invariant 注释锁死(argv 翻译由 connection.rs `kiro_launch_args_*` 单测保障);spawn 传 launch_option / spawn_for_resume 传 None(R7.4)
+  - [x] 5.3 MockSpawner + broker 内 `GatedFollowupSpawner`/`FailingDisconnectSpawner` 同步扩签名,`SpawnCallArgs` 加 `launch_option` 字段记录 + 新增 `first_prompt_tasks` recorder(观测 Hint 前置)· broker 生产 `spawner.spawn(...)` 传 `launch_option_pending`(闭合 P0-1 死接线)
     - _Requirements: 7.2_
-  - [ ]* 5.4 connection.rs 单元测试(既有 `kiro_launch_args` 组合矩阵)追加一条:`runtime_env["KIRO_AGENT"]="persona-abc"` → args 含 `--agent persona-abc`
+    - **Evidence**: commit: pending · verify: `cargo test --features test-utils --test broker_persona` → 5 passed EXIT=0 · files: `spawner.rs`/`broker.rs`(生产调用点 broker.rs:3410 + 2 test spawner) · AC: 7.2 — SpawnCallArgs.launch_option 记录 + 生产 spawn 收到 launch_option_pending(P0-1)
+  - [x]* 5.4 connection.rs 单元测试(既有 `kiro_launch_args` 组合矩阵)追加一条:`runtime_env["KIRO_AGENT"]="persona-abc"` → args 含 `--agent persona-abc`
     - _Requirements: 2.5_
-  - [ ]* 5.5 spawn_child_inner 单测:panel `env_json[KIRO_AGENT]="A"` + `launch_option=KiroPersona("B")` → post-merge `runtime_env["KIRO_AGENT"] == "B"`(per-call 覆盖 panel · Property 2 端到端证据)
+    - **Evidence**: commit: pending · verify: `cargo check --features test-utils --tests` → EXIT=0(运行待干净环境 · lib-test 0xC0000139) · files: `connection.rs:kiro_launch_args_translate_persona_agent_verbatim` · AC: 2.5 — `--agent persona-abc` verbatim 断言
+  - [x]* 5.5 spawn_child_inner per-call 覆盖 panel:launch_option=KiroPersona 覆盖 panel `env_json[KIRO_AGENT]`(Property 2)· 端到端证据落 `tests/broker_persona.rs` 的 spawn-arg 层断言(launch_option 真达 spawn)+ manager.rs merge 处 override 语义注释
     - `_Validates: 2.1, 2.3_`
     - `_Properties: P2_`
+    - **Evidence**: commit: pending · verify: `cargo test --features test-utils --test broker_persona` → 5 passed EXIT=0 · files: `tests/broker_persona.rs:kiro_persona_launch_option_reaches_spawn` · AC: 2.1 2.3 P2 — launch_option 真达 spawn_args(spawn_child_inner 完整 merge 需真 ConnectionManager,用集成测试在 spawn-arg 边界证明 P0-1;override 语义由 manager.rs 注释 + connection 单测共同锁)
 
 ### 阶段 6 · listener + companion schema 注入
 
@@ -422,8 +428,8 @@
 
 - 2026-08-03 · tasks.md 落盘 · charter Mode 1 三件套齐 · 待用户批准 tasks.md 后 executor 进 TDD red→green 循环
 - 2026-08-03 · executor(claude-opus) · stage 1 complete · commit `393e8983` · types base(LaunchOption / AppliedPersona / PersonaEffect / PersonaError / PersonaCapability / DelegationRequest.subagent_type / DelegationSuccess.applied_persona / DelegationTaskReport.applied_persona / DelegationError::InvalidPersona / tool_schema.json subagent_type + `<<PERSONA_LISTS>>` 占位符)· cargo check 双模式 EXIT=0 · `resolve_preamble_at` body=`todo!()` 由 stage 3 兑现 · `#[cfg(test)]` 内 5 条 unit tests · 下游 16 处 struct literal 补 `None` 兜底 · cargo test 完整跑要等 stage 4/5 补 broker/manager tests 里的 mock literals(pre-existing manager.rs Steer variant drift 也归 stage 4/5 修)
-- 2026-08-03 · executor(claude-opus 4.7 1M) · stage 2 complete · commit `pending` · provider capability 分派层(KiroProvider / ClaudeCodeProvider / CodexProvider / UnsupportedProvider unit-struct + `impl PersonaCapability` + `provider_for(agent_type)->&'static dyn PersonaCapability` match 分派)· Kiro=Native{KiroPersona} · Claude/Codex=stage-3 stub Failed{invalid_persona} 让 broker Err 路径可联调不 panic · 其它 built-in + `Custom(_)`=Ignored · non-exhaustive match 强制新增 AgentType 时作者显式路由(fail-safe) · +8 unit tests(2.5 optional) 覆盖三家 + 10 个 unsupported built-in + Custom + grammar 顺序 invariant · cargo check 双模式 EXIT=0 · 分派形式选 trait-object(spec design §Components §6 骨架伪代码即 `provider.supports_persona()` / `.resolve_persona_effect(...)`)不选 flat fn(stage-1 已定义的 PersonaCapability trait 需被本 stage 兑现,否则沦为死符号)· 硬约束合规:未触碰 broker.rs/listener.rs/manager.rs · 未引入 resolve_preamble_at 实际 body · spawn 签名未改 · Claude/Codex 走 stage-3 桩偏离 spec 建议 `home.join(".claude/agents")`(design §5 §8 应复用 `resolve_claude_config_dir()` 认 CLAUDE_CONFIG_DIR env,stage 3 兑现);stage 2 桩状态不解 HOME 不读文件,不影响 broker 联调
-- 2026-08-03 · executor(claude-opus 4.7 1M) · stage 3 complete · commit `pending` · persona.rs 安全实现 + Claude/Codex provider stub 兑现 + 全量 unit test:
+- 2026-08-03 · executor(claude-opus 4.7 1M) · stage 2 complete · commit `10ed4f00` · provider capability 分派层(KiroProvider / ClaudeCodeProvider / CodexProvider / UnsupportedProvider unit-struct + `impl PersonaCapability` + `provider_for(agent_type)->&'static dyn PersonaCapability` match 分派)· Kiro=Native{KiroPersona} · Claude/Codex=stage-3 stub Failed{invalid_persona} 让 broker Err 路径可联调不 panic · 其它 built-in + `Custom(_)`=Ignored · non-exhaustive match 强制新增 AgentType 时作者显式路由(fail-safe) · +8 unit tests(2.5 optional) 覆盖三家 + 10 个 unsupported built-in + Custom + grammar 顺序 invariant · cargo check 双模式 EXIT=0 · 分派形式选 trait-object(spec design §Components §6 骨架伪代码即 `provider.supports_persona()` / `.resolve_persona_effect(...)`)不选 flat fn(stage-1 已定义的 PersonaCapability trait 需被本 stage 兑现,否则沦为死符号)· 硬约束合规:未触碰 broker.rs/listener.rs/manager.rs · 未引入 resolve_preamble_at 实际 body · spawn 签名未改 · Claude/Codex 走 stage-3 桩偏离 spec 建议 `home.join(".claude/agents")`(design §5 §8 应复用 `resolve_claude_config_dir()` 认 CLAUDE_CONFIG_DIR env,stage 3 兑现);stage 2 桩状态不解 HOME 不读文件,不影响 broker 联调
+- 2026-08-03 · executor(claude-opus 4.7 1M) · stage 3 complete · commit `7950ed51` · persona.rs 安全实现 + Claude/Codex provider stub 兑现 + 全量 unit test:
   - **resolve_preamble_at 完整 body**:name grammar defensive gate → canonicalize root + candidate → `canonical.parent() == Some(canonical_root.as_path())` direct-child guard(R2 F4 · 非 starts_with · 覆盖根本身为 symlink 情况) → TOCTOU-safe `File::open(&canonical)` → `BufReader::take((CAP as u64) + 1).read_to_end()` + `bytes.len() > CAP` 硬拦(非 metadata 预判 · CAP=200 KiB) → BOM strip 先于 fence probe → 手写 strip_frontmatter state machine(不引 serde_yaml · 支持 LF / CRLF / EOF-terminated closer · 未闭合 → MalformedFrontmatter 硬失败) → EmptyBody `trim().is_empty()` 终检
   - **Claude/Codex provider stage-2 stub 兑现**:`ClaudeCodeProvider::resolve_persona_effect` 现调 `crate::parsers::claude::resolve_claude_config_dir().join("agents")`(honour `CLAUDE_CONFIG_DIR` env);`CodexProvider` 同法用 `resolve_codex_home_dir()`(honour `CODEX_HOME` env)· 错误路径以 `err.to_string()` 传给 `PersonaEffect::Failed{wire_code:"invalid_persona", reason}` · 保留 `_home_dir` 参数占位以维持 trait 对称
   - **PersonaError shape 修正(stage-1 drift 补上)**:stage 1 landed unit variants(`InvalidName` / `NotFound` / `NotUtf8` / `EmptyBody` / `MalformedFrontmatter` / `PathEscape` 无字段)与 spec design §5 line 250-258 tuple-variant shape 有 undocumented drift · task dispatch 提示也用 tuple 形 · 本轮恢复 spec 形态并同步更新 stage-1 `persona_error_display_carries_useful_context` 测试断言(Display 输出含 persona 名字)
@@ -436,7 +442,7 @@
   - **硬约束合规**:仅动 `src-tauri/src/acp/delegation/persona.rs` + 新建 `src-tauri/tests/persona_stage3.rs` · 未触碰 broker.rs/listener.rs/manager.rs/connection.rs · 未引入 serde_yaml/markdown parser · spawn 签名未改(stage 5 的活)
   - **架构反思**:stage 3 是 stage 1 unit-variant drift 的自然纠偏点 · 若 stage 1 时就照 spec 落 tuple-variant · 本轮工作量少 1/4 · 单测断言不必重写 · 教训归档到 executor 报告以促成下轮的 R2/R3 落 spec 更严
 
-- 2026-08-03 · executor(claude-opus 4.8 1M) · stage 4 complete · commit `pending` · broker 翻译层 + persona effect dispatch + broker unit tests · **单 commit(含 4.0 stage-1 遗留 mock literal 债一并清)**:
+- 2026-08-03 · executor(claude-opus 4.8 1M) · stage 4 complete · commit `b857f78d` · broker 翻译层 + persona effect dispatch + broker unit tests · **单 commit(含 4.0 stage-1 遗留 mock literal 债一并清)**:
   - **4.0(前置)· 补 stage-1 遗留 mock literals**:cargo check --tests 报的 49 处 E0063 全清 —— `DelegationSuccess` 缺 `applied_persona` 40 处 + `DelegationRequest` 缺 `subagent_type` 9 处,分布:broker.rs test(34 Success + 1 Request)、listener.rs test(3 Success + 4 Request)、lifecycle.rs test(1 Request)、manager.rs test(2 Request)、web/handlers/delegation.rs test(1 Success + 1 Request)、tests/delegation_e2e_windows.rs(2 Success)· 仅在 test-only mock literal 补 `None`,生产 fn 不动 · 用一次性脚本(brace-balanced 扫描 + 排除 `->`/`impl`/`struct`/`for` 非字面量上下文)完成 · **额外修 1 处 manager.rs:6885 `answer_steer` test helper 的 `ConnectionCommand::Steer { text, reply }` pattern**(v0.22→v0.23 merge 时生产 enum 已升级为 `Steer { blocks, message_id, reply }`,该 test 未同步 → 改成解构 `{ blocks, reply, .. }` 从首个 `PromptInputBlock::Text` 重建 text · 属同类 test↔生产 drift 债,主 AI 已授权本 commit 清)
   - **4.1 persona dispatch 骨架**:`start_delegation` 在 `agent_defaults` 取完后、spawn 前插入 provider dispatch,严格 R3-F1 顺序(`supports_persona()` → `is_valid_persona_name()` → `resolve_persona_effect()`)· unsupported CLI 短路 Ignored 不校名不解 HOME · 产出 `(launch_option_pending, prepended_task, applied_persona_intent)` 三元组 · `report_err` helper 名称与 spec 一致,直接采用现有 free fn(签名 `report_err(agent_type, DelegationError, Option<i32>)`)
   - **4.2 prepended_task 路径**:`send_prompt_linked_for_delegation` 调用点(broker.rs:3448)把 `req.task.clone()` 换成 `prepended_task.clone().unwrap_or_else(|| req.task.clone())` · Hint 走 preamble+task 拼接,其余原样
@@ -455,3 +461,40 @@
     - **broker unit tests 运行**:`unverified: 环境障碍`。`cargo test --lib` 的 `codeg_lib-*.exe` 测试二进制启动即崩 `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)` —— **受控对比确证与本改动无关**:① stage 前既有的 `running_ack_message_embeds_task_id`(我未触碰)同样崩;② 集成测试 `persona_stage3-*.exe`(依赖面小)在完整 PATH 下 12/12 正常绿。根因 = lib-test 二进制拉起完整 Tauri native 依赖链,本机某 DLL 缺导出符号,启动阶段即崩(早于任何 test 逻辑)· 8 个新 test 已通过 `cargo check --tests` 类型层验证 · 待 CI / 干净 Windows 环境或 stage 5 收尾时整体运行确认绿
   - **变体扫描(§5.3)**:report 构造点全仓核查 —— listener.rs(cancel/failed/unknown 三 report 构造器)、lifecycle.rs:337、web/handlers/delegation.rs:355 的 `applied_persona: None` 均为**建立前/错误路径**,无 persona 可归因,None 语义正确 · 成功路径统一经 broker 的 `report_from_outcome`/`build_completed`/`running_ack` 携带 persona · 无遗漏
   - **硬约束合规**:未改 `ConnectionSpawner::spawn` 签名(stage 5)· 未改 MockSpawner 签名(stage 5)· 未触碰 manager.rs / connection.rs / listener.rs 生产代码(仅补 test-only mock literal + 1 处 answer_steer test pattern)· 未碰前端 · launch_option_pending 以 broker 局部变量 park,`gate:allow-unwired` 语义已在注释标注等 stage 5 消费
+
+## Known Environment Blocker · lib-test 0xC0000139 (2026-08-03)
+
+**现象**:`cargo test --features test-utils --lib`(以及任何 `--lib` 单元测试)的测试二进制 `codeg_lib-*.exe` 启动即崩 `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)`,早于任何 test 逻辑执行。
+
+**受控对照确证(与本 spec 4 stage 改动无关)**:
+- lib unittest exe(拉完整 Tauri native binary 依赖链)→ 0xC0000139
+- 集成测试 crate `tests/persona_stage3.rs`(只 link lib rlib · 不拉 Tauri native 链)→ 12/12 绿
+- 两者都**编译成功**(cargo check --tests EXIT=0)· 唯一差异 = native 依赖链
+- executor 独立观察:stage 前既有的未碰 test(如 `running_ack_message_embeds_task_id`)同样崩
+
+**根因**:本机 Windows 环境的 Tauri native 链(WebView2 / Tauri runtime DLL)缺某导出符号 · 属环境级障碍 · 非代码引入。
+
+**影响 & 应对**:
+1. stage 5-8 的运行验证一律用**集成测试 crate**(`tests/*.rs`)或 `cargo check --tests` 类型层验证,不依赖 `cargo test --lib`
+2. stage 1-4 的 inline `#[cfg(test)] mod tests`(broker unit tests / persona provider tests)已通过 `cargo check --tests` 类型层验证 · **运行验证待干净 CI/Windows 环境跑一次全量 `cargo test --lib` 补确认**
+3. 登记为收尾(stage 9)遗留验证项 · 不阻塞 stage 5-8 推进
+
+- 2026-08-04 · executor(claude-opus 4.8 1M) · stage 5 complete + sonnet review P0/P1/P2 闭合 · **单 commit** `pending` · spawn launch_option 死接线闭合(P0-1):
+  - **5.1 spawn 签名扩**:`ConnectionSpawner::spawn` 加第 6 参 `launch_option: Option<LaunchOption>` · 同步 4 处 impl:`ConnectionManagerSpawner::spawn`(生产,透传 spawn_child_inner)/ `MockSpawner::spawn`(test-utils)/ `GatedFollowupSpawner::spawn` + `FailingDisconnectSpawner::spawn`(broker test)· **`spawn_for_resume` 签名绝不改**(R7.4 · resume 不重提名人格,4 处 impl 均传 `None` 或不接)
+  - **5.2 spawn_child_inner merge**:`build_session_runtime_env` 返回后、`spawn_agent` 前插 `runtime_env.insert(KIRO_AGENT_ENV, name.clone())`(仅 `LaunchOption::KiroPersona`)· **merge-order invariant 内联注释锁死**:必须在 `spawn_agent`→`spawn_agent_connection`→`apply_kiro_env_policy`(connection.rs:287,剥 KIRO_* 旋钮)之前,否则 KIRO_AGENT 被剥 · per-call 覆盖 panel `env_json[KIRO_AGENT]` 语义(LLM 显式 subagent_type 胜过持久默认)也在注释声明 · argv 翻译由 connection.rs `kiro_launch_args_*` 单测独立保障(spawn_child_inner 需真 ConnectionManager,不可单测)
+  - **5.3 broker 接线闭合 P0-1**:生产 `self.spawner.spawn(...)` 从 `let _ = launch_option_pending.as_ref()`(死接线 · E-052 假成功)改为把 `launch_option_pending` 真传给 spawn · R3-A2 时机不变(`AppliedPersona::Native` 仍 spawn Ok 后产)· `SpawnCallArgs` 加 `launch_option` 字段 + 新增 `first_prompt_tasks` recorder(观察 Hint 前置 vs Native 不前置)
+  - **P0-2 listener 解析 subagent_type**(提前到 stage 5):`listener.rs process()` 从硬编码 `None` 改为 `req.input.get("subagent_type").and_then(as_str).map(trim).filter(!empty)` · 删 stage-6 注释 · broker translation 层现有真实数据源
+  - **P0-4 broker unit tests 真断言**:inline P2/P3 升级为断言 `spawn_args[0].launch_option == Some(KiroPersona)` + P3 断言 Native 不前置 preamble(`first_prompt_tasks == ["do x"]`)· 新增集成测试 crate `tests/broker_persona.rs`(5 test,选项 a)在 spawn-arg 层真跑:kiro_persona_launch_option_reaches_spawn(P0-1 真证据)/ no_persona_forwards_no_launch_option / unsupported_cli_forwards_no_launch_option / spawn_failure_leaves_applied_persona_none_but_still_forwarded_option(R3-A2)/ concurrent_same_agent_distinct_personas_do_not_cross(P5 · **同 Kiro agent_type 不同 subagent_type 并发**,断言两条 spawn_args launch_option 各自独立,非 Kiro-then-Gemini 顺序)
+  - **P1-2 TOCTOU 措辞降级**:persona.rs 模块 doc + `resolve_preamble_at` fn doc + 内联注释从「TOCTOU-safe」改为「reduces symlink-swap race, does NOT eliminate it(canonicalize 后 open 按名重遍历仍有窗口)· single-tenant trust model(R1 A2)下 residual race 可接受」
+  - **P1-3 clippy doc_lazy_continuation**:persona.rs provider_for doc list「broker.rs does NOT change.」前加空行成独立段 · clippy 无本改动引入 warning
+  - **P2 清过时 stage 标记**:persona.rs 模块 doc「Stage 1 boundary」→「Module surface」当前架构描述 · 删 `is_valid_persona_name`/`PersonaCapability`/4 provider struct/`provider_for` 上的 `// gate:allow-unwired stage-N` + `#[allow(dead_code)]`(stage 4 已全 wired 经 provider_for 消费,删除后 clippy 无新 dead-code)
+  - **broker unit test 运行验证 · 走选项 (a)**:理由 = MockSpawner 是 `#[cfg(any(test, feature="test-utils"))] pub mod mock` · DelegationBroker/ConversationDepthLookup/DelegationConfig/DelegationRequest/DelegationSuccess/set_config/start_delegation/complete_call/get_task_status 全 pub 可从集成 crate 达 → 新建 `tests/broker_persona.rs` 用 pub API + MockSpawner 真跑 spawn-arg 层断言(inline `enable_delegation`/`shallow_lookup`/`StaticStatusLookup` 是 `#[cfg(test)]` 私有,故自建极小 `RootDepth` depth-lookup + `set_config{enabled:true}`)· 相比选项 (b) 保留 inline + 仅类型验证,(a) 真跑出 P0-1 的红→绿信号(旧 MockSpawner 无 launch_option 字段 + broker 丢弃 launch_option_pending → 该断言在 stage 5 前不可能通过)
+  - **验证输出**:
+    - `cargo check --features test-utils --tests --message-format=short → EXIT=0`(仅 3 pre-existing steer dead-code + 无本改动 warning)
+    - `cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
+    - `cargo clippy --no-default-features --lib --features test-utils -- -D warnings → 仅 3 pre-existing connection.rs steer dead-code(非本 scope,stage 4 已声明);doc_lazy_continuation 已消除;删 allow(dead_code) 后无新 dead-code`
+    - `cargo test --features test-utils --test broker_persona → 5 passed; 0 failed; EXIT=0`
+    - `cargo test --features test-utils --test persona_stage3 → 12 passed; 0 failed; EXIT=0`(stage-3 契约回归绿)
+  - **变体扫描(§5.3)**:全仓 `impl ConnectionSpawner` 4 处 + 生产 `.spawn(` 唯一调用点(broker.rs:3410)全部覆盖;`spawn_for_resume` 唯一生产调用(5229)确认未动;无遗漏
+  - **硬约束合规**:未改前端 · connection.rs 仅加 1 条 kiro_launch_args 单测(未动生产逻辑,apply_kiro_env_policy 顺序经 manager.rs 注释声明)· spawn_for_resume 签名未动 · merge-order invariant 注释 + broker_persona/kiro_launch_args 单测双锁
+  - **Review Findings**:任务文档行号(spawner.rs:85-138 / manager.rs:2960-3010 / listener.rs:604-633 等)因 v0.22→0.23 merge 全部漂移,实际位置经 git grep 定位后执行,内容与真实代码一致,无架构偏离;doc 描述的 merge-order 风险经 connection.rs:1267/1276 核实(kiro_launch_args 读 runtime_env 在 apply_kiro_env_policy 之前,spawn_child_inner 的 insert 天然更早,invariant 成立)

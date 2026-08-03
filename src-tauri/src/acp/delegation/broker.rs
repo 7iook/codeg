@@ -3266,14 +3266,12 @@ impl DelegationBroker {
             .map(|d: &AgentDelegationDefaults| (d.mode_id.clone(), d.config_values.clone()))
             .unwrap_or((None, BTreeMap::new()));
 
-        // --- [stage-4 T4.1] Persona translation --------------------------------
+        // --- [stage-4 T4.1 / stage-5 T5.3] Persona translation -----------------
         // Dispatch to the per-agent PersonaCapability provider and compute the
         // three broker-visible outputs of a persona nomination:
-        //   • `launch_option_pending` — Native effect's `LaunchOption`; the
-        //     spawner does NOT consume it yet (stage-5 will extend
-        //     `ConnectionSpawner::spawn`); kept as a broker-local variable so
-        //     the parked task's translation still exists at settle time.
-        //     `gate:allow-unwired` from `LaunchOption` covers the parked value.
+        //   • `launch_option_pending` — Native effect's `LaunchOption`; forwarded
+        //     to `ConnectionSpawner::spawn` below (stage 5 closed the wiring), so
+        //     a Kiro `--agent` nomination reaches the child's runtime env.
         //   • `prepended_task` — Hint effect's task-string prepend, applied to
         //     the FIRST turn's `send_prompt_linked_for_delegation`.
         //   • `applied_persona_intent` — what will land in the terminal
@@ -3392,10 +3390,8 @@ impl DelegationBroker {
                 }
             }
         };
-        // `launch_option_pending` is stage-5 fuel: kept alive as a broker-local
-        // Option so stage 5 can wire it into `ConnectionSpawner::spawn` without
-        // re-plumbing the caller side. Deliberately unused this round.
-        let _ = launch_option_pending.as_ref();
+        // `launch_option_pending` is consumed at the `spawner.spawn(...)` call
+        // below (stage 5 closed the wiring — see [stage-5 T5.3]).
 
         // Checkpoint #1 (opportunistic): if a parent cancel already landed
         // during the claim/depth phase, bail before spawning a child the parent
@@ -3417,6 +3413,15 @@ impl DelegationBroker {
                 req.working_dir.clone(),
                 preferred_mode_id,
                 preferred_config_values,
+                // [stage-5 T5.3] Closes P0-1: the Native persona's
+                // `LaunchOption` (a Kiro `--agent` nomination) now reaches the
+                // spawner, which merges it into the child's runtime env as
+                // `KIRO_AGENT=<name>`. `None` for every non-persona / Hint /
+                // Ignored case (Hint prepends to the task text instead; Ignored
+                // and unsupported carry no launch option). R3-A2 timing is
+                // unchanged: `applied_persona: Native` is still only committed
+                // on the spawn-Ok side below.
+                launch_option_pending,
             )
             .await
         {
@@ -6843,6 +6848,7 @@ mod tests {
             working_dir: Option<String>,
             preferred_mode_id: Option<String>,
             preferred_config_values: BTreeMap<String, String>,
+            launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
         ) -> Result<String, SpawnerError> {
             self.inner
                 .spawn(
@@ -6851,6 +6857,7 @@ mod tests {
                     working_dir,
                     preferred_mode_id,
                     preferred_config_values,
+                    launch_option,
                 )
                 .await
         }
@@ -7648,8 +7655,9 @@ mod tests {
                 w: Option<String>,
                 m: Option<String>,
                 c: BTreeMap<String, String>,
+                l: Option<crate::acp::delegation::persona::LaunchOption>,
             ) -> Result<String, SpawnerError> {
-                self.inner.spawn(p, a, w, m, c).await
+                self.inner.spawn(p, a, w, m, c, l).await
             }
             async fn send_prompt_linked_for_delegation(
                 &self,
@@ -13811,9 +13819,10 @@ mod tests {
     }
 
     /// P2 (R2.1 / R2.3): a Kiro persona resolves to a Native launch option and
-    /// the terminal report attributes `AppliedPersona::Native`. (The
-    /// `LaunchOption::KiroPersona` itself is verified at the spawn-arg layer in
-    /// stage 5; here we assert the broker's observable Native attribution.)
+    /// the terminal report attributes `AppliedPersona::Native`. Stage 5 closed
+    /// the spawn-arg wiring, so we now ALSO assert the `LaunchOption::KiroPersona`
+    /// actually reached `spawn` — the true P0-1 evidence, not just the
+    /// observable `applied_persona`.
     #[tokio::test]
     async fn persona_p2_kiro_resolves_to_native() {
         let mock = Arc::new(MockSpawner::new());
@@ -13837,6 +13846,17 @@ mod tests {
                 name: "plan-reality-recon".into(),
             }),
             "Kiro persona must attribute Native"
+        );
+        // Spawn-arg layer (stage 5): the resolved LaunchOption is forwarded to
+        // `spawn`, so a downstream `KIRO_AGENT=<name>` env can be set.
+        let args = mock.spawn_args.lock().await;
+        assert_eq!(args.len(), 1, "exactly one spawn for the delegation");
+        assert_eq!(
+            args[0].launch_option,
+            Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(
+                "plan-reality-recon".into()
+            )),
+            "the Kiro persona LaunchOption must reach spawn (P0-1 closure)"
         );
     }
 
@@ -13869,6 +13889,23 @@ mod tests {
                 Some(crate::acp::delegation::persona::AppliedPersona::Native { .. })
             ),
             "Kiro must be Native, never Hint"
+        );
+        // Mutual exclusivity, spawn-arg + send-arg evidence: Native carries a
+        // LaunchOption AND leaves the first-turn task text UNCHANGED (no Hint
+        // preamble prepended). `persona_request` fixes the task to "do x".
+        let args = mock.spawn_args.lock().await;
+        assert_eq!(
+            args[0].launch_option,
+            Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(
+                "plan-reality-recon".into()
+            )),
+            "Native path forwards a LaunchOption"
+        );
+        let sent = mock.first_prompt_tasks.lock().await;
+        assert_eq!(
+            sent.as_slice(),
+            &["do x".to_string()],
+            "Native path must NOT prepend a preamble to the first turn"
         );
     }
 

@@ -9421,6 +9421,21 @@ mod tests {
         assert!(kiro_launch_args(&blank).is_empty());
     }
 
+    /// [stage-5 T5.4] delegate-persona-passthrough R2.5: a per-call persona
+    /// nomination lands in `runtime_env` as `KIRO_AGENT=<name>` (see
+    /// `manager::spawn_child_inner`); `kiro_launch_args` must translate it to
+    /// `--agent <name>` argv verbatim. The combination-matrix test above only
+    /// counts the flag; this asserts the persona name reaches the CLI unchanged.
+    #[test]
+    fn kiro_launch_args_translate_persona_agent_verbatim() {
+        let args = kiro_launch_args(&env_of(&[(KIRO_AGENT_ENV, "persona-abc")]));
+        assert_eq!(
+            args,
+            vec!["--agent".to_string(), "persona-abc".to_string()],
+            "a delegated Kiro persona must reach the CLI as --agent <name>"
+        );
+    }
+
     #[test]
     fn kiro_launch_args_drop_an_unknown_effort_rather_than_failing_the_launch() {
         let args = kiro_launch_args(&env_of(&[(KIRO_EFFORT_ENV, "turbo")]));
