@@ -1192,6 +1192,23 @@ pub fn build_router(
             "/automation_cancel_run",
             post(handlers::automation::automation_cancel_run),
         )
+        // ─── Token usage dashboard ───
+        .route(
+            "/token_usage_report",
+            post(handlers::token_usage::token_usage_report),
+        )
+        .route(
+            "/token_usage_facets",
+            post(handlers::token_usage::token_usage_facets),
+        )
+        .route(
+            "/token_usage_status",
+            post(handlers::token_usage::token_usage_status),
+        )
+        .route(
+            "/token_usage_sync",
+            post(handlers::token_usage::token_usage_sync),
+        )
         // ─── Work tasks ───
         .route("/work_task_list", post(handlers::work_task::work_task_list))
         .route("/work_task_get", post(handlers::work_task::work_task_get))

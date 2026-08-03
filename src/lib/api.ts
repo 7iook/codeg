@@ -133,6 +133,11 @@ import type {
   OfficecliInfo,
   OfficecliSkill,
   SkillSyncReport,
+  TokenUsageFacets,
+  TokenUsageFilter,
+  TokenUsageReport,
+  TokenUsageSyncResult,
+  TokenUsageSyncStatus,
 } from "./types"
 
 export async function listConversations(params?: {
@@ -2550,6 +2555,30 @@ export async function quickMessagesDelete(id: number): Promise<void> {
 
 export async function quickMessagesReorder(ids: number[]): Promise<void> {
   return getTransport().call("quick_messages_reorder", { ids })
+}
+
+// Token usage dashboard
+
+export async function tokenUsageReport(
+  filter: TokenUsageFilter
+): Promise<TokenUsageReport> {
+  return getTransport().call("token_usage_report", { filter })
+}
+
+export async function tokenUsageFacets(): Promise<TokenUsageFacets> {
+  return getTransport().call("token_usage_facets")
+}
+
+export async function tokenUsageStatus(): Promise<TokenUsageSyncStatus> {
+  return getTransport().call("token_usage_status")
+}
+
+/** `full` drops every stored fact and re-parses every transcript — the escape
+ *  hatch for a session file the agent's own CLI grew behind codeg's back. */
+export async function tokenUsageSync(
+  mode: "incremental" | "full" = "incremental"
+): Promise<TokenUsageSyncResult> {
+  return getTransport().call("token_usage_sync", { mode })
 }
 
 // Automations

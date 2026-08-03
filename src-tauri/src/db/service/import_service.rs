@@ -270,6 +270,22 @@ async fn import_one(
         if existing.parent_id.is_some() || existing.deleted_at.is_some() {
             return Ok(ImportOutcome::Skipped);
         }
+        // The user just pointed at this session's file on disk, which is the
+        // one moment we know its transcript may have grown in the agent's own
+        // CLI since we last read it. Nothing else here bumps `updated_at` (by
+        // design — see this function's doc), so the token-usage stamp would
+        // otherwise keep reporting the conversation as already counted. Mark it
+        // for re-parse; a failure is non-fatal (the import is the user's goal,
+        // and "Rebuild all" still recovers).
+        if let Err(e) =
+            crate::db::service::token_usage_service::mark_stale_for_reparse(conn, existing.id).await
+        {
+            tracing::warn!(
+                conversation_id = existing.id,
+                error = %e,
+                "import: failed to invalidate the token-usage stamp"
+            );
+        }
         if let Some(title) = summary
             .title
             .as_deref()
@@ -374,6 +390,64 @@ mod tests {
             .expect("get");
         assert_eq!(got.title.as_deref(), Some("AI Summary"));
         assert!(!got.title_locked, "auto refresh must not lock the title");
+    }
+
+    #[tokio::test]
+    async fn reimport_marks_the_conversation_for_a_token_usage_re_parse() {
+        // A re-import is the one moment we learn a transcript may have grown in
+        // the agent's own CLI. Nothing else here bumps `updated_at` (by
+        // design), so without this the dashboard would keep reporting the
+        // conversation as already counted and silently under-report it.
+        use crate::db::service::token_usage_service::{
+            self as usage, replace_conversation_facts, UsageFact,
+        };
+
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/codeg-import-usage").await;
+        let at = AgentType::ClaudeCode;
+
+        import_one(&db.conn, folder, &at, &summary("ext-usage", Some("t")))
+            .await
+            .expect("import");
+        let id = find_id(&db.conn, "ext-usage").await;
+        let updated_at = conversation::Entity::find_by_id(id)
+            .one(&db.conn)
+            .await
+            .expect("query")
+            .expect("row")
+            .updated_at;
+
+        replace_conversation_facts(
+            &db.conn,
+            id,
+            updated_at,
+            &[UsageFact {
+                turn_key: "t1".into(),
+                occurred_at: Utc::now(),
+                model: None,
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                duration_ms: 0,
+            }],
+        )
+        .await
+        .expect("record usage");
+        assert!(!usage::list_sync_candidates(&db.conn).await.expect("c")[0].is_stale());
+
+        // Same title, so the title-refresh path reports `Skipped` — the mark
+        // must land regardless of whether the title moved.
+        let again = import_one(&db.conn, folder, &at, &summary("ext-usage", Some("t")))
+            .await
+            .expect("re-import");
+        assert_eq!(again, ImportOutcome::Skipped);
+
+        let candidate = usage::list_sync_candidates(&db.conn).await.expect("c")[0].clone();
+        assert!(candidate.is_stale());
+        // The stamp row itself survives, so a transcript that turns out to be
+        // unreachable on the re-parse can't erase the facts we already have.
+        assert_eq!(candidate.synced_turn_count, Some(1));
     }
 
     #[tokio::test]
