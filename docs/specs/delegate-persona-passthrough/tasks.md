@@ -306,23 +306,23 @@
 ### 阶段 5 · ConnectionSpawner trait 扩 + spawn_child_inner merge
 
 - [x] 5. Spawner trait 与 production impl
-  - **Evidence**: commit: pending · verify: `cargo check --features test-utils --tests` → EXIT=0; `cargo test --features test-utils --test broker_persona` → 5 passed; `cargo test --features test-utils --test persona_stage3` → 12 passed EXIT=0 · files: `spawner.rs`/`manager.rs`/`broker.rs`/`listener.rs`/`connection.rs`/`persona.rs`/`tests/broker_persona.rs` · AC: 2.1 2.2 2.5 7.2 7.4 — spawn launch_option 全链接线(P0-1 闭合)+ listener 解析 subagent_type(P0-2)+ review P0/P1/P2 闭合
+  - **Evidence**: commit 62edeb4f · verify: `cargo check --features test-utils --tests` → EXIT=0; `cargo test --features test-utils --test broker_persona` → 5 passed; `cargo test --features test-utils --test persona_stage3` → 12 passed EXIT=0 · files: `spawner.rs`/`manager.rs`/`broker.rs`/`listener.rs`/`connection.rs`/`persona.rs`/`tests/broker_persona.rs` · AC: 2.1 2.2 2.5 7.2 7.4 — spawn launch_option 全链接线(P0-1 闭合)+ listener 解析 subagent_type(P0-2)+ review P0/P1/P2 闭合
   - [x] 5.1 `spawner.rs ConnectionSpawner::spawn` 签名追加 `launch_option: Option<LaunchOption>` 参数(**`spawn_for_resume` 签名不改** · R2 A5 / R3 A1)
     - _Requirements: 7.4, R2-A5, R3-A1_
-    - **Evidence**: commit: pending · verify: `cargo check --features test-utils --tests` → EXIT=0 · files: `spawner.rs`(trait + MockSpawner + 3 inline tests)/`manager.rs`(ConnectionManagerSpawner)/`broker.rs`(GatedFollowupSpawner + FailingDisconnectSpawner) · AC: 7.4 R2-A5 R3-A1 — 4 impl + MockSpawner 全扩签名,`spawn_for_resume` 未动
+    - **Evidence**: commit 62edeb4f · verify: `cargo check --features test-utils --tests` → EXIT=0 · files: `spawner.rs`(trait + MockSpawner + 3 inline tests)/`manager.rs`(ConnectionManagerSpawner)/`broker.rs`(GatedFollowupSpawner + FailingDisconnectSpawner) · AC: 7.4 R2-A5 R3-A1 — 4 impl + MockSpawner 全扩签名,`spawn_for_resume` 未动
   - [x] 5.2 `manager.rs ConnectionManagerSpawner::spawn_child_inner` 在 `build_session_runtime_env` 后、`manager.spawn_agent` 前:`if let Some(LaunchOption::KiroPersona(name)) = &launch_option { runtime_env.insert(KIRO_AGENT_ENV, name.clone()); }`。**merge 顺序 invariant** 加内联注释:「merge 必须在 `spawn_agent_connection`(内部调 `apply_kiro_env_policy`)之前,否则 KIRO_AGENT 被剥」
     - _Requirements: 2.1, 2.2_
-    - **Evidence**: commit: pending · verify: `cargo check --features test-utils --tests` → EXIT=0 · files: `manager.rs:spawn_child_inner` · AC: 2.1 2.2 — KIRO_AGENT 在 spawn_agent 前插入 + merge-order invariant 注释锁死(argv 翻译由 connection.rs `kiro_launch_args_*` 单测保障);spawn 传 launch_option / spawn_for_resume 传 None(R7.4)
+    - **Evidence**: commit 62edeb4f · verify: `cargo check --features test-utils --tests` → EXIT=0 · files: `manager.rs:spawn_child_inner` · AC: 2.1 2.2 — KIRO_AGENT 在 spawn_agent 前插入 + merge-order invariant 注释锁死(argv 翻译由 connection.rs `kiro_launch_args_*` 单测保障);spawn 传 launch_option / spawn_for_resume 传 None(R7.4)
   - [x] 5.3 MockSpawner + broker 内 `GatedFollowupSpawner`/`FailingDisconnectSpawner` 同步扩签名,`SpawnCallArgs` 加 `launch_option` 字段记录 + 新增 `first_prompt_tasks` recorder(观测 Hint 前置)· broker 生产 `spawner.spawn(...)` 传 `launch_option_pending`(闭合 P0-1 死接线)
     - _Requirements: 7.2_
-    - **Evidence**: commit: pending · verify: `cargo test --features test-utils --test broker_persona` → 5 passed EXIT=0 · files: `spawner.rs`/`broker.rs`(生产调用点 broker.rs:3410 + 2 test spawner) · AC: 7.2 — SpawnCallArgs.launch_option 记录 + 生产 spawn 收到 launch_option_pending(P0-1)
+    - **Evidence**: commit 62edeb4f · verify: `cargo test --features test-utils --test broker_persona` → 5 passed EXIT=0 · files: `spawner.rs`/`broker.rs`(生产调用点 broker.rs:3410 + 2 test spawner) · AC: 7.2 — SpawnCallArgs.launch_option 记录 + 生产 spawn 收到 launch_option_pending(P0-1)
   - [x]* 5.4 connection.rs 单元测试(既有 `kiro_launch_args` 组合矩阵)追加一条:`runtime_env["KIRO_AGENT"]="persona-abc"` → args 含 `--agent persona-abc`
     - _Requirements: 2.5_
-    - **Evidence**: commit: pending · verify: `cargo check --features test-utils --tests` → EXIT=0(运行待干净环境 · lib-test 0xC0000139) · files: `connection.rs:kiro_launch_args_translate_persona_agent_verbatim` · AC: 2.5 — `--agent persona-abc` verbatim 断言
+    - **Evidence**: commit 62edeb4f · verify: `cargo check --features test-utils --tests` → EXIT=0(运行待干净环境 · lib-test 0xC0000139) · files: `connection.rs:kiro_launch_args_translate_persona_agent_verbatim` · AC: 2.5 — `--agent persona-abc` verbatim 断言
   - [x]* 5.5 spawn_child_inner per-call 覆盖 panel:launch_option=KiroPersona 覆盖 panel `env_json[KIRO_AGENT]`(Property 2)· 端到端证据落 `tests/broker_persona.rs` 的 spawn-arg 层断言(launch_option 真达 spawn)+ manager.rs merge 处 override 语义注释
     - `_Validates: 2.1, 2.3_`
     - `_Properties: P2_`
-    - **Evidence**: commit: pending · verify: `cargo test --features test-utils --test broker_persona` → 5 passed EXIT=0 · files: `tests/broker_persona.rs:kiro_persona_launch_option_reaches_spawn` · AC: 2.1 2.3 P2 — launch_option 真达 spawn_args(spawn_child_inner 完整 merge 需真 ConnectionManager,用集成测试在 spawn-arg 边界证明 P0-1;override 语义由 manager.rs 注释 + connection 单测共同锁)
+    - **Evidence**: commit 62edeb4f · verify: `cargo test --features test-utils --test broker_persona` → 5 passed EXIT=0 · files: `tests/broker_persona.rs:kiro_persona_launch_option_reaches_spawn` · AC: 2.1 2.3 P2 — launch_option 真达 spawn_args(spawn_child_inner 完整 merge 需真 ConnectionManager,用集成测试在 spawn-arg 边界证明 P0-1;override 语义由 manager.rs 注释 + connection 单测共同锁)
 
 ### 阶段 6 · listener + companion schema 注入
 
