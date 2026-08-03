@@ -1625,6 +1625,7 @@
       "toggleAuxPanel": "Hilfspaneel umschalten",
       "search": "Suchen",
       "openSettings": "Einstellungen öffnen",
+      "backToConversations": "Zurück zu Konversationen",
       "withShortcut": "{label} (Tastenkürzel: {shortcut})"
     },
     "statusBar": {

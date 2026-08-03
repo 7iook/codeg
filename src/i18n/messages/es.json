@@ -1625,6 +1625,7 @@
       "toggleAuxPanel": "Alternar panel auxiliar",
       "search": "Buscar",
       "openSettings": "Abrir configuración",
+      "backToConversations": "Volver a conversaciones",
       "withShortcut": "{label} (atajo: {shortcut})"
     },
     "statusBar": {

@@ -1625,6 +1625,7 @@
       "toggleAuxPanel": "切换辅助面板",
       "search": "搜索",
       "openSettings": "打开设置",
+      "backToConversations": "返回会话",
       "withShortcut": "{label}（{shortcut}）"
     },
     "statusBar": {

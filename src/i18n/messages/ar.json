@@ -1625,6 +1625,7 @@
       "toggleAuxPanel": "تبديل اللوحة المساعدة",
       "search": "بحث",
       "openSettings": "فتح الإعدادات",
+      "backToConversations": "العودة إلى المحادثات",
       "withShortcut": "{label} (اختصار: {shortcut})"
     },
     "statusBar": {
