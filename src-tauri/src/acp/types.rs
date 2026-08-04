@@ -316,7 +316,27 @@ pub enum AcpEvent {
         /// background shell tasks) accounted from transcript acks. Mirrored
         /// into `SessionState` to exempt the connection from both idle sweeps
         /// while work is pending.
+        ///
+        /// Stays the AGGREGATE of the two per-kind counts below, and remains
+        /// the field every consumer can rely on: a client that ignores the
+        /// split still reads the exact same total it always did.
         outstanding: u32,
+        /// The `agent` slice of `outstanding` — Claude's own async sub-agents
+        /// (`toolUseResult.agentId`). Split out so the chip can say WHICH pool
+        /// its number describes (R5A.1): the aggregate alone is unreadable,
+        /// because codeg's delegated sub-agents are accounted by the delegation
+        /// broker and are never counted here at all (R5A.3).
+        ///
+        /// `#[serde(default)]` + skip-zero keeps the wire byte-identical when
+        /// there is nothing of this kind to report, and lets a consumer that
+        /// predates the split degrade to `outstanding`'s aggregate meaning.
+        #[serde(default, skip_serializing_if = "u32_is_zero")]
+        outstanding_agents: u32,
+        /// The `shell` slice of `outstanding` — background shell tasks
+        /// (`toolUseResult.backgroundTaskId`). Same rationale and wire
+        /// treatment as `outstanding_agents`.
+        #[serde(default, skip_serializing_if = "u32_is_zero")]
+        outstanding_shells: u32,
         /// Tasks settled by `<task-notification>` records in this batch — the
         /// frontend raises one OS notification per entry.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -924,6 +944,14 @@ pub struct CodexWorkspaceWrite {
     pub exclude_tmpdir_env_var: bool,
     /// Drop `/tmp` from the default writable roots (UNIX).
     pub exclude_slash_tmp: bool,
+}
+
+/// `skip_serializing_if` helper for the `u32` counters that are omitted when
+/// zero so a no-activity payload keeps the pre-feature wire shape byte-identical
+/// (`AcpEvent::BackgroundActivity`'s per-kind counts,
+/// `LiveSessionSnapshot.background_outstanding`).
+pub(crate) fn u32_is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// `absent` vs `null` for a nullable field: serde folds both into `None` on a

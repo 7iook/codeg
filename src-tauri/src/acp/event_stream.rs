@@ -440,6 +440,8 @@ fn estimate_envelope_size(envelope: &EventEnvelope) -> usize {
             session_id,
             turns,
             outstanding: _,
+            outstanding_agents: _,
+            outstanding_shells: _,
             settled,
             watermark: _,
         } => {
@@ -1058,6 +1060,11 @@ mod tests {
                 session_id: "1f8b332f-128a-4603-a5f4-f44d5a0bf932".into(),
                 turns: vec![turn.clone(), turn],
                 outstanding: u32::MAX,
+                // Saturated per-kind counts too: the estimate must cover the
+                // widest serialization of the split fields, not just the
+                // aggregate.
+                outstanding_agents: u32::MAX,
+                outstanding_shells: u32::MAX,
                 settled: vec![
                     crate::acp::types::BackgroundSettledInfo {
                         task_id: "ae6bd822f7a0e23a8".into(),
@@ -1091,6 +1098,8 @@ mod tests {
                 session_id: "s".into(),
                 turns: vec![],
                 outstanding: 0,
+                outstanding_agents: 0,
+                outstanding_shells: 0,
                 settled: vec![],
                 watermark: 0,
             },

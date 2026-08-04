@@ -3141,6 +3141,9 @@
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# tâche en arrière-plan en cours} other {# tâches en arrière-plan en cours}}",
+        "runningAgents": "{count, plural, one {# sous-agent en arrière-plan en cours} other {# sous-agents en arrière-plan en cours}}",
+        "runningShells": "{count, plural, one {# commande en arrière-plan en cours} other {# commandes en arrière-plan en cours}}",
+        "runningBoth": "{agents, plural, one {# sous-agent en arrière-plan} other {# sous-agents en arrière-plan}} et {shells, plural, one {# commande} other {# commandes}} en cours",
         "settling": "Synchronisation des résultats d'arrière-plan…",
         "settledFallback": "Tâche en arrière-plan terminée ({status})",
         "cardRunning": "En cours d'exécution en arrière-plan",

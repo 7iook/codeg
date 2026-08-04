@@ -3141,6 +3141,9 @@
       },
       "backgroundTasks": {
         "running": "백그라운드 작업 {count}개 실행 중",
+        "runningAgents": "백그라운드 서부 에이전트 {count}개 실행 중",
+        "runningShells": "백그라운드 명령 {count}개 실행 중",
+        "runningBoth": "백그라운드 서부 에이전트 {agents}개, 명령 {shells}개 실행 중",
         "settling": "백그라운드 결과 동기화 중…",
         "settledFallback": "백그라운드 작업이 종료되었습니다 ({status})",
         "cardRunning": "백그라운드에서 실행 중",

@@ -322,9 +322,33 @@ async fn run_watch(
     }
 }
 
+/// Which kind of background work one [`TaskEntry`] represents. An enum rather
+/// than the `&'static str` it used to be: the per-kind counts on
+/// `BackgroundActivity` are derived by matching on this, so adding a third kind
+/// of background work forces the counting site to be updated instead of
+/// silently folding the newcomer into `shells`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskKind {
+    /// Claude's own async sub-agent (`toolUseResult.agentId`).
+    Agent,
+    /// Background shell task (`toolUseResult.backgroundTaskId`).
+    Shell,
+}
+
+impl TaskKind {
+    /// Lower-case label for tracing output (the wording the pre-enum
+    /// `&'static str` logged).
+    fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Shell => "shell",
+        }
+    }
+}
+
 /// One launched-but-unresolved background task.
 struct TaskEntry {
-    kind: &'static str,
+    kind: TaskKind,
     started_at: Instant,
 }
 
@@ -539,7 +563,7 @@ impl WatchState {
             if !keep {
                 tracing::info!(
                     "[bg-watch] expiring {} task={id} after max-age (completion never observed)",
-                    t.kind
+                    t.kind.label()
                 );
             }
             keep
@@ -671,6 +695,18 @@ impl WatchState {
         }
 
         let outstanding = self.tasks.len() as u32;
+        // Per-kind split, derived from the SAME map read as the aggregate
+        // (rather than tallied incrementally on the register/settle paths) so
+        // `agents + shells == outstanding` holds unconditionally — including
+        // after a max-age expiry, which removes entries with no settle record
+        // an incremental tally could hook. The chip relies on this to omit a
+        // zero clause instead of printing "0 sub-agents" (R5A.4).
+        let outstanding_agents = self
+            .tasks
+            .values()
+            .filter(|t| matches!(t.kind, TaskKind::Agent))
+            .count() as u32;
+        let outstanding_shells = outstanding - outstanding_agents;
         let accounting_changed = expired_any || self.last_emitted_outstanding != Some(outstanding);
         if changed_turns.is_empty() && settled.is_empty() && !accounting_changed {
             return None;
@@ -680,6 +716,8 @@ impl WatchState {
             session_id,
             turns: changed_turns,
             outstanding,
+            outstanding_agents,
+            outstanding_shells,
             settled,
             watermark: self.committed,
         })
@@ -761,7 +799,7 @@ impl WatchState {
                             self.tasks.entry(id.to_string()).or_insert_with(|| {
                                 tracing::info!("[bg-watch] registered async agent task={id}");
                                 TaskEntry {
-                                    kind: "agent",
+                                    kind: TaskKind::Agent,
                                     started_at: Instant::now(),
                                 }
                             });
@@ -787,7 +825,7 @@ impl WatchState {
                         self.tasks.entry(id.to_string()).or_insert_with(|| {
                             tracing::info!("[bg-watch] registered background shell task={id}");
                             TaskEntry {
-                                kind: "shell",
+                                kind: TaskKind::Shell,
                                 started_at: Instant::now(),
                             }
                         });
@@ -900,7 +938,9 @@ impl WatchState {
                                 self.tasks.insert(
                                     to.to_string(),
                                     TaskEntry {
-                                        kind: "agent",
+                                        // `SendMessage(to:)` resumes a settled
+                                        // async sub-agent — never a shell.
+                                        kind: TaskKind::Agent,
                                         started_at: Instant::now(),
                                     },
                                 );
@@ -1358,6 +1398,22 @@ mod tests {
         }
     }
 
+    /// The per-kind split of one `BackgroundActivity`: `(agents, shells,
+    /// aggregate)`. The aggregate is returned alongside so every assertion can
+    /// also check the invariant the wire's backward compatibility rests on —
+    /// `outstanding == agents + shells` (R5A.1).
+    fn unpack_kinds(event: AcpEvent) -> (u32, u32, u32) {
+        match event {
+            AcpEvent::BackgroundActivity {
+                outstanding,
+                outstanding_agents,
+                outstanding_shells,
+                ..
+            } => (outstanding_agents, outstanding_shells, outstanding),
+            other => panic!("expected BackgroundActivity, got {other:?}"),
+        }
+    }
+
     #[test]
     fn force_rotates_a_single_giant_turn_and_bounds_the_episode() {
         let dir = tempfile::tempdir().unwrap();
@@ -1684,6 +1740,101 @@ mod tests {
 
         // Unchanged file → stat-gated, no event.
         assert!(tick_now(&mut ws, &ledger).is_none());
+    }
+
+    /// The aggregate `outstanding` alone cannot say WHAT it counted: one async
+    /// sub-agent and one background shell both read as "2 background tasks".
+    /// The watcher already distinguishes them internally (`TaskEntry.kind`), so
+    /// it reports the split too (R5A.1) — that is what lets the chip name the
+    /// kinds instead of printing an unreadable total.
+    #[test]
+    fn reports_the_two_task_kinds_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+
+        write_lines(
+            &path,
+            &[
+                &agent_ack("agent1"),
+                &agent_ack("agent2"),
+                &bash_ack("shell1"),
+            ],
+        );
+        let (agents, shells, aggregate) =
+            unpack_kinds(tick_now(&mut ws, &ledger).expect("accounting event"));
+        assert_eq!(agents, 2, "two `agentId` acks are async sub-agents");
+        assert_eq!(shells, 1, "one `backgroundTaskId` ack is a shell");
+        // The aggregate keeps its pre-split meaning exactly — this is what a
+        // consumer that ignores the new fields still reads.
+        assert_eq!(aggregate, 3);
+    }
+
+    /// The transition the chip's wording depends on: when one kind drains to
+    /// zero the event must report that kind as `0` while the other keeps its
+    /// count, so the chip can omit the zero clause (R5A.4) rather than saying
+    /// "0 sub-agents". A single aggregate cannot express this.
+    #[test]
+    fn per_kind_counts_drop_to_zero_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[&agent_ack("agent1"), &bash_ack("shell1")]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+
+        let (agents, shells, aggregate) =
+            unpack_kinds(tick_now(&mut ws, &ledger).expect("accounting event"));
+        assert_eq!((agents, shells, aggregate), (1, 1, 2));
+
+        // The agent settles via its `<task-notification>`; the shell keeps
+        // running.
+        write_lines(&path, &[&notification("agent1", "completed")]);
+        let (agents, shells, aggregate) =
+            unpack_kinds(tick_now(&mut ws, &ledger).expect("settle event"));
+        assert_eq!(
+            (agents, shells),
+            (0, 1),
+            "the settled kind reports 0 while the other keeps its count"
+        );
+        assert_eq!(aggregate, 1);
+
+        // Now the shell settles too (its dominant path: an inline-awaited
+        // `TaskOutput` collection) — both kinds are zero and so is the total.
+        write_lines(&path, &[&taskoutput_result("shell1", "completed")]);
+        let (agents, shells, aggregate) =
+            unpack_kinds(tick_now(&mut ws, &ledger).expect("shell settle event"));
+        assert_eq!((agents, shells, aggregate), (0, 0, 0));
+    }
+
+    /// A max-age expiry drops tasks straight out of the map without any settle
+    /// record, so the per-kind counts must be derived from the map at emission
+    /// (not tallied incrementally on settle paths) or they would drift above the
+    /// aggregate and strand a phantom clause in the chip.
+    #[test]
+    fn per_kind_counts_follow_max_age_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[&agent_ack("agent1"), &bash_ack("shell1")]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+        let (agents, shells, _) =
+            unpack_kinds(tick_now(&mut ws, &ledger).expect("accounting event"));
+        assert_eq!((agents, shells), (1, 1));
+
+        // Backdate the agent past the keep-alive max age; the shell stays fresh.
+        let max_age = background_keepalive_max_age().to_std().unwrap();
+        let entry = ws.tasks.get_mut("agent1").expect("registered");
+        entry.started_at = Instant::now() - max_age - Duration::from_secs(1);
+
+        let (agents, shells, aggregate) =
+            unpack_kinds(tick_now(&mut ws, &ledger).expect("expiry event"));
+        assert_eq!(
+            (agents, shells, aggregate),
+            (0, 1, 1),
+            "an expired task must leave its own kind's count, not the other's"
+        );
     }
 
     /// A background shell re-observed via a repeat `BashOutput`-style poll

@@ -83,6 +83,14 @@ export interface SnapshotPatch {
    *  the one-shot `background_activity` events won't replay. `0` when the
    *  server omitted the field. */
   backgroundOutstanding: number
+  /** The `agent` / `shell` split of `backgroundOutstanding`, letting the chip
+   *  name which pool it counted. `0` each when the server omitted them —
+   *  either because there is nothing of that kind pending, or because the
+   *  server predates the split. The two cases are told apart by whether the
+   *  pair sums to `backgroundOutstanding` (see `resolveBackgroundKinds`), not
+   *  by a tri-state here. */
+  backgroundOutstandingAgents: number
+  backgroundOutstandingShells: number
   /** Latest ACP runtime error carried by the snapshot. `null` means none. */
   lastError: string | null
   /** Diagnostic evidence attached to `lastError` (agent stderr tail, unparsed
@@ -157,6 +165,8 @@ export function denormalizeSnapshot(wire: LiveSessionSnapshot): SnapshotPatch {
     configStale: wire.config_stale ?? false,
     configStaleKind: wire.config_stale_kind ?? null,
     backgroundOutstanding: wire.background_outstanding ?? 0,
+    backgroundOutstandingAgents: wire.background_outstanding_agents ?? 0,
+    backgroundOutstandingShells: wire.background_outstanding_shells ?? 0,
     lastError,
     lastErrorDetails,
     eventSeq: wire.event_seq,

@@ -13,7 +13,7 @@ use crate::acp::feedback::{FeedbackItem, FeedbackStatus};
 use crate::acp::plan_approval::PendingPlanApprovalState;
 use crate::acp::question::PendingQuestionState;
 use crate::acp::types::{
-    AcpEvent, AvailableCommandInfo, ConfigStaleKind, ConnectionStatus, EventEnvelope,
+    u32_is_zero, AcpEvent, AvailableCommandInfo, ConfigStaleKind, ConnectionStatus, EventEnvelope,
     GrokEffortSpec, PromptCapabilitiesInfo, SessionConfigOptionInfo, SessionModeStateInfo,
     ToolCallImageInfo,
 };
@@ -311,6 +311,15 @@ pub struct SessionState {
     /// dies with it). Carried on `to_snapshot()` so a client attaching
     /// mid-episode recovers the pending count without replaying events.
     pub background_outstanding: u32,
+    /// The `agent` / `shell` split of `background_outstanding`, mirrored from
+    /// the same event so a client attaching mid-episode can name the kinds
+    /// rather than falling back to the unreadable aggregate (R5A.1-R5A.2).
+    /// Their sum is `background_outstanding`; both zero means "nothing
+    /// pending", identical to the aggregate being zero. Backend-internal
+    /// accounting is unaffected: only `background_outstanding` gates the
+    /// idle-sweep exemption.
+    pub background_outstanding_agents: u32,
+    pub background_outstanding_shells: u32,
     /// Instant of the most recent `BackgroundActivity` event. Bounds the sweep
     /// exemption: if the watcher stops reporting (task died, bug) the
     /// exemption lapses after `background_keepalive_max_age()` instead of
@@ -565,6 +574,8 @@ impl SessionState {
             active_delegations: BTreeMap::new(),
             feedback: Vec::new(),
             background_outstanding: 0,
+            background_outstanding_agents: 0,
+            background_outstanding_shells: 0,
             background_activity_at: None,
             modes: None,
             current_mode: None,
@@ -1138,13 +1149,23 @@ impl SessionState {
                     }
                 }
             }
-            AcpEvent::BackgroundActivity { outstanding, .. } => {
+            AcpEvent::BackgroundActivity {
+                outstanding,
+                outstanding_agents,
+                outstanding_shells,
+                ..
+            } => {
                 // Mirror the watcher's authoritative accounting so the idle
                 // sweeps can exempt this connection while background work is
                 // pending. The turns/settled payloads are frontend-only; the
                 // trailing `last_activity_at = now` below additionally resets
                 // the backend idle timer on every batch of transcript activity.
+                // The per-kind split rides along for the snapshot's benefit
+                // (a client attaching mid-episode must be able to name the
+                // kinds); only the aggregate gates the sweep exemption.
                 self.background_outstanding = *outstanding;
+                self.background_outstanding_agents = *outstanding_agents;
+                self.background_outstanding_shells = *outstanding_shells;
                 self.background_activity_at = Some(Utc::now());
             }
             AcpEvent::ClaudeSdkMessage { .. }
@@ -1459,6 +1480,8 @@ impl SessionState {
             active_delegations: self.active_delegations.values().cloned().collect(),
             feedback: self.feedback.clone(),
             background_outstanding: self.background_outstanding,
+            background_outstanding_agents: self.background_outstanding_agents,
+            background_outstanding_shells: self.background_outstanding_shells,
             feedback_tool_available: self.feedback_tool_available,
             native_steering_available: self.native_steering_available,
             modes: self.modes.clone(),
@@ -1547,6 +1570,16 @@ pub struct LiveSessionSnapshot {
     /// common no-background case keeps the wire shape byte-identical.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub background_outstanding: u32,
+    /// The `agent` / `shell` split of `background_outstanding` (see
+    /// `SessionState`'s fields of the same names), so a client attaching
+    /// mid-episode can name the kinds instead of showing the unreadable
+    /// aggregate. `#[serde(default)]` + skip-zero: an older client ignores them
+    /// and reads `background_outstanding` exactly as before, and a snapshot with
+    /// no background work keeps its pre-feature wire shape byte-identical.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub background_outstanding_agents: u32,
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub background_outstanding_shells: u32,
     /// Whether this agent has the `check_user_feedback` tool (see
     /// `SessionState.feedback_tool_available`). `#[serde(default)]` so older
     /// payloads deserialize to `false`; the frontend gates the feedback bar on
@@ -1599,11 +1632,6 @@ pub struct LiveSessionSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<SessionLastError>,
     pub event_seq: u64,
-}
-
-/// `skip_serializing_if` helper for `LiveSessionSnapshot.background_outstanding`.
-fn u32_is_zero(v: &u32) -> bool {
-    *v == 0
 }
 
 /// Last non-empty line of `s`, trimmed. `None` if every line is blank.
@@ -1930,6 +1958,8 @@ mod tests {
             session_id: "sid".into(),
             turns: vec![],
             outstanding: 2,
+            outstanding_agents: 1,
+            outstanding_shells: 1,
             settled: vec![],
             watermark: 42,
         });
@@ -1947,6 +1977,8 @@ mod tests {
             session_id: "sid".into(),
             turns: vec![],
             outstanding: 0,
+            outstanding_agents: 0,
+            outstanding_shells: 0,
             settled: vec![],
             watermark: 43,
         });
@@ -1960,6 +1992,8 @@ mod tests {
             session_id: "sid".into(),
             turns: vec![],
             outstanding: 3,
+            outstanding_agents: 2,
+            outstanding_shells: 1,
             settled: vec![],
             watermark: 0,
         });
@@ -1975,6 +2009,52 @@ mod tests {
         let zero = fresh_state();
         let json = serde_json::to_value(zero.to_snapshot()).unwrap();
         assert!(json.get("background_outstanding").is_none());
+    }
+
+    /// The snapshot must carry the per-kind split too, or a client attaching
+    /// mid-episode (web reconnect, new window) silently degrades to the
+    /// unreadable aggregate — the very thing R5A fixes. Backward compatibility
+    /// is expressed by skip-zero: absent fields mean "none of that kind", which
+    /// is exactly what an older client's aggregate-only reading implies.
+    #[test]
+    fn snapshot_carries_the_background_kind_split_and_skips_zero_kinds() {
+        let mut s = fresh_state();
+        s.apply_event(&AcpEvent::BackgroundActivity {
+            session_id: "sid".into(),
+            turns: vec![],
+            outstanding: 3,
+            outstanding_agents: 2,
+            outstanding_shells: 1,
+            settled: vec![],
+            watermark: 0,
+        });
+        let snap = s.to_snapshot();
+        assert_eq!(snap.background_outstanding_agents, 2);
+        assert_eq!(snap.background_outstanding_shells, 1);
+        assert_eq!(
+            snap.background_outstanding_agents + snap.background_outstanding_shells,
+            snap.background_outstanding,
+            "the split must always sum to the aggregate an older client reads"
+        );
+
+        // Only shells pending: the agents field leaves the wire entirely rather
+        // than serializing a `0` the chip would have to special-case.
+        s.apply_event(&AcpEvent::BackgroundActivity {
+            session_id: "sid".into(),
+            turns: vec![],
+            outstanding: 1,
+            outstanding_agents: 0,
+            outstanding_shells: 1,
+            settled: vec![],
+            watermark: 1,
+        });
+        let json = serde_json::to_value(s.to_snapshot()).unwrap();
+        assert!(json.get("background_outstanding_agents").is_none());
+        assert_eq!(
+            json.get("background_outstanding_shells")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
     }
 
     #[test]

@@ -285,6 +285,19 @@ export interface ConnectionState {
    */
   backgroundOutstanding: number
   /**
+   * The `agent` / `shell` split of `backgroundOutstanding`, mirrored from the
+   * same source. Lets `BackgroundTasksChip` say WHICH pool its number counts —
+   * the aggregate alone is unreadable next to the sub-agent chip, which counts
+   * a disjoint pool (codeg's delegated sub-agents, accounted by the delegation
+   * broker and never included here).
+   *
+   * Both `0` while `backgroundOutstanding > 0` means the split is UNKNOWN (a
+   * backend predating it), not "no tasks" — the chip then falls back to the
+   * aggregate wording. `resolveBackgroundTaskKinds` owns that judgement.
+   */
+  backgroundOutstandingAgents: number
+  backgroundOutstandingShells: number
+  /**
    * Epoch ms of the most recent `background_activity` event that settled a
    * task, cleared when the follow-up overlay turns start arriving. Bridges
    * the otherwise-blank gap between "N tasks running" disappearing and the
@@ -373,6 +386,11 @@ type Action =
       type: "SET_BACKGROUND_OUTSTANDING"
       contextKey: string
       outstanding: number
+      /** Per-kind split of `outstanding`. Both `0` with a non-zero aggregate
+       *  means the emitting backend predates the split (see
+       *  `ConnectionState.backgroundOutstandingAgents`). */
+      outstandingAgents: number
+      outstandingShells: number
       outOfTurnSettleCount: number
       turnsCount: number
     }
@@ -1257,6 +1275,8 @@ function connectionsReducer(
         configStaleKind: null,
         configStaleDismissed: false,
         backgroundOutstanding: 0,
+        backgroundOutstandingAgents: 0,
+        backgroundOutstandingShells: 0,
         backgroundSettleSyncingSince: null,
         outOfTurnToolCalls: null,
       })
@@ -1316,6 +1336,8 @@ function connectionsReducer(
         configStaleKind: null,
         configStaleDismissed: false,
         backgroundOutstanding: 0,
+        backgroundOutstandingAgents: 0,
+        backgroundOutstandingShells: 0,
         backgroundSettleSyncingSince: null,
         outOfTurnToolCalls: null,
       })
@@ -1435,8 +1457,12 @@ function connectionsReducer(
         configStaleKind: action.patch.configStaleKind,
         // Current-state field like `status`: a client attaching mid-episode
         // recovers the pending-background count the one-shot events won't
-        // replay for it (sweep exemption + chip).
+        // replay for it (sweep exemption + chip). The per-kind split rides the
+        // same projection — omitting it here would silently degrade a
+        // reconnected client's chip to the aggregate-only wording.
         backgroundOutstanding: action.patch.backgroundOutstanding,
+        backgroundOutstandingAgents: action.patch.backgroundOutstandingAgents,
+        backgroundOutstandingShells: action.patch.backgroundOutstandingShells,
         error: action.patch.lastError,
         lastAppliedSeq: action.patch.eventSeq,
       })
@@ -1533,6 +1559,8 @@ function connectionsReducer(
             : conn.backgroundSettleSyncingSince
       if (
         conn.backgroundOutstanding === action.outstanding &&
+        conn.backgroundOutstandingAgents === action.outstandingAgents &&
+        conn.backgroundOutstandingShells === action.outstandingShells &&
         conn.backgroundSettleSyncingSince === syncingSince
       ) {
         return state
@@ -1541,6 +1569,8 @@ function connectionsReducer(
       next.set(action.contextKey, {
         ...conn,
         backgroundOutstanding: action.outstanding,
+        backgroundOutstandingAgents: action.outstandingAgents,
+        backgroundOutstandingShells: action.outstandingShells,
         backgroundSettleSyncingSince: syncingSince,
       })
       return next
@@ -3268,6 +3298,11 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             type: "SET_BACKGROUND_OUTSTANDING",
             contextKey,
             outstanding: e.outstanding,
+            // Absent = zero of that kind (the backend skips zero); absent on
+            // BOTH while the aggregate is non-zero = a backend predating the
+            // split, which the chip detects and falls back on.
+            outstandingAgents: e.outstanding_agents ?? 0,
+            outstandingShells: e.outstanding_shells ?? 0,
             // Only settles whose reply arrives out of turn (NOT wire-visible)
             // warrant the syncing hint; a #870-held settle's reply is already
             // live on screen (see the reducer + BackgroundSettledInfo).

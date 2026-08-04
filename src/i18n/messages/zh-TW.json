@@ -3141,6 +3141,9 @@
       },
       "backgroundTasks": {
         "running": "{count} 個背景任務執行中",
+        "runningAgents": "{count} 個背景子智慧體執行中",
+        "runningShells": "{count} 個背景命令執行中",
+        "runningBoth": "{agents} 個背景子智慧體、{shells} 個背景命令執行中",
         "settling": "正在同步背景結果…",
         "settledFallback": "背景任務已結束（{status}）",
         "cardRunning": "背景執行中",

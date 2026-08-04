@@ -3141,6 +3141,9 @@
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# tarefa em segundo plano em execução} other {# tarefas em segundo plano em execução}}",
+        "runningAgents": "{count, plural, one {# subagente em segundo plano em execução} other {# subagentes em segundo plano em execução}}",
+        "runningShells": "{count, plural, one {# comando em segundo plano em execução} other {# comandos em segundo plano em execução}}",
+        "runningBoth": "{agents, plural, one {# subagente em segundo plano} other {# subagentes em segundo plano}} e {shells, plural, one {# comando} other {# comandos}} em execução",
         "settling": "Sincronizando resultados em segundo plano…",
         "settledFallback": "Tarefa em segundo plano concluída ({status})",
         "cardRunning": "Executando em segundo plano",
