@@ -229,6 +229,36 @@ pub struct CompanionContext {
     /// flag). Disabled customs never appear here: the parent just leaves them
     /// out of `custom_agents`.
     pub disabled_agents: Vec<String>,
+    /// Rendered inventory of the personas this host actually defines, spliced
+    /// into `delegate_to_agent`'s `subagent_type` description at `tools/list`
+    /// time in place of [`PERSONA_LISTS_PLACEHOLDER`].
+    ///
+    /// `None` when the parent omitted `--persona-lists` — either because the
+    /// host defines no personas at all, or because the parent predates the
+    /// flag. **The placeholder is still substituted in that case** (with an
+    /// empty string): leaving the literal in the description would ship
+    /// `<<PERSONA_LISTS>>` to the model.
+    ///
+    /// The parent only passes the flag when there is something to advertise,
+    /// because an older `codeg-mcp` binary rejects unknown flags at startup —
+    /// see `persona::persona_lists_args`.
+    pub persona_lists: Option<String>,
+}
+
+impl CompanionContext {
+    /// Decode the raw `--persona-lists` argv value into [`Self::persona_lists`].
+    ///
+    /// Lives here rather than in `bin/codeg_mcp.rs` so the decode step sits on
+    /// the lib side, where it is reachable by both the wiring gate and a test.
+    /// The binary stays a thin argv shim.
+    ///
+    /// An undecodable payload degrades to `None` — the placeholder is then
+    /// substituted with an empty string rather than failing the launch, since
+    /// only a parent/companion version skew can produce one and serving the
+    /// schema without the inventory beats serving no tools at all.
+    pub fn decode_persona_lists(raw: Option<&str>) -> Option<String> {
+        raw.and_then(crate::acp::delegation::persona::decode_persona_lists_arg)
+    }
 }
 
 /// Per-in-flight-call state. The companion stashes one of these per
@@ -400,6 +430,7 @@ pub async fn dispatch_line(
             };
             remove_disabled_agents_from_delegate_enum(&mut tools, &ctx.disabled_agents);
             append_custom_agents_to_delegate_enum(&mut tools, &ctx.custom_agents);
+            substitute_persona_lists(&mut tools, ctx.persona_lists.as_deref());
             LineAction::Respond(ok(id, json!({ "tools": tools })))
         }
         "tools/call" => build_tools_call_spawn(ctx.clone(), inflight, id, req.params).await,
@@ -464,6 +495,43 @@ fn append_custom_agents_to_delegate_enum(tools: &mut Value, custom_agents: &[Str
             variants.push(Value::String(slug.clone()));
         }
     }
+}
+
+/// Marker the embedded `tool_schema.json` carries at the tail of
+/// `delegate_to_agent`'s `subagent_type` description, where the host's own
+/// persona inventory gets spliced in.
+pub const PERSONA_LISTS_PLACEHOLDER: &str = "<<PERSONA_LISTS>>";
+
+/// Splice the parent-supplied persona inventory into `delegate_to_agent`'s
+/// `subagent_type` description, replacing [`PERSONA_LISTS_PLACEHOLDER`].
+///
+/// `None` substitutes an EMPTY string rather than skipping the substitution.
+/// That distinction is the whole point: skipping would ship the literal
+/// `<<PERSONA_LISTS>>` to the model, which reads as a template bug in the tool
+/// description — worse than an empty inventory.
+///
+/// Same defensive posture as the two enum mutators above — a missing tool,
+/// property, or non-string description leaves the schema untouched instead of
+/// erroring, so a schema edit can never break `tools/list` at runtime.
+pub fn substitute_persona_lists(tools: &mut Value, persona_lists: Option<&str>) {
+    let Some(arr) = tools.as_array_mut() else {
+        return;
+    };
+    let Some(description) = arr
+        .iter_mut()
+        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("delegate_to_agent"))
+        .and_then(|t| t.pointer_mut("/inputSchema/properties/subagent_type/description"))
+    else {
+        return;
+    };
+    let Some(current) = description.as_str() else {
+        return;
+    };
+    if !current.contains(PERSONA_LISTS_PLACEHOLDER) {
+        return;
+    }
+    let replaced = current.replace(PERSONA_LISTS_PLACEHOLDER, persona_lists.unwrap_or(""));
+    *description = Value::String(replaced);
 }
 
 /// Build the spawned-call descriptor for a `tools/call` (or, when the
@@ -1446,6 +1514,10 @@ mod tests {
             features,
             custom_agents: Vec::new(),
             disabled_agents: Vec::new(),
+            // Persona-inventory injection has its own coverage in
+            // `tests/persona_lists_injection.rs`; these cases predate it and
+            // assert the schema shape without an inventory.
+            persona_lists: None,
         }
     }
 
