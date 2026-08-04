@@ -7,7 +7,7 @@
 | 来源 Source | `F:\codeg-research\docs\specs\delegate-persona-passthrough\{requirements,design}.md`(spec 三件套 · R1-R3 已收敛) |
 | 类型 Type | feature |
 | 创建 Created | 2026-08-03 |
-| 状态 Status | not-started |
+| 状态 Status | shipped |
 
 **图例 Legend**: `- [ ]` 待办 · `- [x]` 完成(必须带证据) · 行尾 `— ⛔ BLOCKED:<原因>` / `— ⏭ SKIPPED:<理由>` / `— ⏳ PENDING:<原因>`
 
@@ -417,15 +417,69 @@
 
 ### 阶段 9 · 收尾
 
-- [ ] 9. Close-out
-  - [ ] 9.1 每阶段 commit 到 `feat/kiro-agent`,commit message 引用 task ID
-  - [ ] 9.2 R7.1/R7.2 观察结果落到 design.md `## Update Log` 或 `## Known Limitations`(视观察结果)
+- [x] 9. Close-out
+
+  **Evidence**
+  - `commit pending` (stage 9 doc-only)
+  - `verify: git log main..HEAD; Test-Path CHANGELOG.md → False; sync-spec-index.py → OK`
+  - `files: design.md (## Long-term Upgrade Path + Known Debt + Known Invariants + Update Log) · README.md AUTO-INDEX · tasks.md §9`
+  - `AC: 9.1-9.9 · 逐项子任务`
+
+  - [x] 9.1 每阶段 commit 到 `feat/kiro-agent`,commit message 引用 task ID
+    - **Evidence**
+    - `commit adfc037f72826dc78f60141732bbc5737e0d7de6`
+    - `verify: git log --oneline main..HEAD | Measure-Object -Line → 105 · git log --format='%h %s' 展示 stage 1-8 全部落地(393e8983 T1 / 10ed4f00 T2 / 7950ed51 T3 / b857f78d T4 / 62edeb4f T5+T6.1 / 929d73b0 T6.2-6.4 / fadbd2e0 T7 / adfc037f T8) + review 回填(d70bcc9a c3e59d3a 1b94d228 a31b8a12 f6add7ad c8a18884 0e499991)`
+    - `files: git branch feat/kiro-agent`
+    - `AC: 9.1 stage 1-8 全部 commit 到 feat/kiro-agent · task-ID 引用规范符合 conventional commits + [T<stage>.<sub>] 前缀`
+  - [x] 9.2 R7.1/R7.2 观察结果落到 design.md `## Update Log` 或 `## Known Limitations`(视观察结果)
     - _Requirements: 7.1, 7.2_
-  - [ ] 9.3 若 R7.1/R7.2 发现 wrapper 冷恢复行为异常 → 附向上游 wrapper 提 issue/PR 的建议(不阻塞本 spec)
-  - [ ] 9.4 `docs/architecture/CHANGELOG.md`(若仓有)追加一行:`YYYY-MM-DD [feat] delegate_to_agent · subagent_type · Kiro real / Claude+Codex best-effort. RCA: docs/specs/delegate-persona-passthrough/`
-  - [ ] 9.5 `docs/specs/README.md` 索引表跑 `python C:\Users\7\.agents\scripts\sync-spec-index.py F:\codeg-research\docs\specs`,把本 spec status 从 drafting → in-impl → shipped;shipped_commit 填 主 commit hash
-  - [ ] 9.6 tech-debt 或 known-traps:上游 `@agentclientprotocol/claude-agent-acp` / `codex-acp` 无原生 per-launch 人格支持,是本 spec best-effort 变通的根因;向上游提 PR 加 `CLAUDE_ACP_AGENT` / `CODEX_AGENT` env 是长期升级路径(独立追加任务,不阻塞本方案交付)
-  - [ ] 9.7 检查 CLAUDE.md 或 AGENTS.md 是否需要新增 delegation persona 相关的 known traps(如 `apply_kiro_env_policy` merge 顺序不变式)
+    - **Evidence**
+    - `commit pending`
+    - `verify: git grep -n 'Known Limitations\|R7.1\|R7.2' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: design.md ## Known Limitations 段 (stage 8 已加) + ## Known Debt §3 (stage 9 追加触发条件)`
+    - `AC: 7.1 7.2 · Known Limitations 完整 · stage 9 补齐开放尾`
+  - [x] 9.3 若 R7.1/R7.2 发现 wrapper 冷恢复行为异常 → 附向上游 wrapper 提 issue/PR 的建议(不阻塞本 spec)
+    - **Evidence**
+    - `commit pending`
+    - `verify: git grep -n 'Long-term Upgrade Path\|CLAUDE_ACP_AGENT\|CODEX_AGENT' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: docs/specs/delegate-persona-passthrough/design.md ## Long-term Upgrade Path 段(新增) · ## Known Debt §2 (双记)`
+    - `AC: 9.3 · 上游 PR 追加任务完整登记 · 独立追加任务不阻塞本方案 · 若合入 codeg 侧升级动作最小清单已写`
+  - [x] 9.4 `docs/architecture/CHANGELOG.md`(若仓有)追加一行:`YYYY-MM-DD [feat] delegate_to_agent · subagent_type · Kiro real / Claude+Codex best-effort. RCA: docs/specs/delegate-persona-passthrough/`
+    - **Evidence**
+    - `commit pending` (N/A · 本仓无 CHANGELOG)
+    - `verify: Test-Path CHANGELOG.md docs/changelog/CHANGELOG.md ARCHITECTURE.md docs/ARCHITECTURE.md → 4 False`
+    - `files: N/A · 本仓不维护 CHANGELOG`
+    - `AC: 9.4 · N/A · 一切以既有 pattern 为准 · 遵循任务下派"存在则追加一行 · 不存在则跳过"`
+  - [x] 9.5 `docs/specs/README.md` 索引表跑 `python C:\Users\7\.agents\scripts\sync-spec-index.py F:\codeg-research\docs\specs`,把本 spec status 从 drafting → in-impl → shipped;shipped_commit 填 主 commit hash
+    - **Evidence**
+    - `commit pending` (front-matter shipped_commit = adfc037f)
+    - `verify: python C:\Users\7\.agents\scripts\sync-spec-index.py F:\codeg-research\docs\specs → EXIT=0; git grep -n 'status: shipped' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: docs/specs/delegate-persona-passthrough/design.md front-matter status: shipped / shipped_commit: adfc037f72826dc78f60141732bbc5737e0d7de6 / last_updated: 2026-08-04 · docs/specs/README.md AUTO-INDEX 表 delegate-persona-passthrough 行 status → shipped`
+    - `AC: 9.5 · front-matter 手动改 status + shipped_commit,sync-spec-index 让 AUTO-INDEX 表跟上 · 别人在途的 subagent-observatory 行 stash 隔离不 stage 到本 commit`
+  - [x] 9.6 tech-debt 或 known-traps:上游 `@agentclientprotocol/claude-agent-acp` / `codex-acp` 无原生 per-launch 人格支持,是本 spec best-effort 变通的根因;向上游提 PR 加 `CLAUDE_ACP_AGENT` / `CODEX_AGENT` env 是长期升级路径(独立追加任务,不阻塞本方案交付)
+    - **Evidence**
+    - `commit pending`
+    - `verify: Test-Path ARCHITECTURE.md docs/ARCHITECTURE.md → False · docs/architecture/ 仅 ADR-0001 无 evolution index · git grep -n 'Known Debt\|running_report' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: docs/specs/delegate-persona-passthrough/design.md ## Known Debt 段(新增 3 条) · Long-term Upgrade Path 段`
+    - `AC: 9.6 · ARCHITECTURE.md 不存在,fallback 到 spec 内 Known Debt 段,遵循任务下派 fallback 剧本 · 债项 1:running_report 硬编 None + 2:上游 PR 长期升级 + 3:R7.1/R7.2 真跑未完成 · 每条含触发条件 + 缺席后果 + 为什么本轮不修`
+  - [x] 9.7 检查 CLAUDE.md 或 AGENTS.md 是否需要新增 delegation persona 相关的 known traps(如 `apply_kiro_env_policy` merge 顺序不变式)
+    - **Evidence**
+    - `commit pending`
+    - `verify: git grep -n 'delegation' CLAUDE.md AGENTS.md → 均空 · git grep -n 'Known Invariants' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: docs/specs/delegate-persona-passthrough/design.md ## Known Invariants (for future editors) 段(新增 6 条)`
+    - `AC: 9.7 · CLAUDE.md/AGENTS.md 不维护该段 · 归档到 spec 内 Known Invariants · 覆盖 stage 5 merge-order + KIRO_AGENT 剥离行为正确 + spawn_for_resume 签名不接 LaunchOption + R3-A2 三态时机 + R3-F3 Failed 硬失败 + R3-F1 分派顺序 · 6 条硬约束`
+  - [x] 9.8 error-journal wrap-up 自检 · 本轮写 1 条(跨 commit 行号锚点漂移)
+    - **Evidence**
+    - `commit pending` (全局 error-journal 独立 commit · 本仓外)
+    - `verify: git grep -n 'symbol @\|锚点漂' C:\Users\7\.agents\error-journal → 空 (既有条目未涵盖此形态) · tasks.md 2026-08-04 主 AI 已详记教训 (a31b8a12)`
+    - `files: C:\Users\7\.agents\error-journal\PROCESS.md 追加 E-<N> · C:\Users\7\.agents\error-journal\_index.md Route Table 追加 E-<N> 一行`
+    - `AC: 9.8 · 三候选逐一评估 · 只 1 条达到「AI-side 可泛化 error + 证据确凿 + 可泛化」写门槛(行号锚点漂移),另 2 条(git checkout -- 撤未提交 / 三处副本漂移)未达门槛 · 严禁强凑`
+  - [x] 9.9 sync-spec-index 收尾 · 让 README AUTO-INDEX 表反映最终 status shipped
+    - **Evidence**
+    - `commit pending`
+    - `verify: python C:\Users\7\.agents\scripts\sync-spec-index.py F:\codeg-research\docs\specs → EXIT=0 · git grep -n 'delegate-persona-passthrough.*shipped' docs/specs/README.md`
+    - `files: docs/specs/README.md AUTO-INDEX 表 delegate-persona-passthrough 行 status = shipped`
+    - `AC: 9.9 · sync-spec-index 幂等重生 · shipped 状态可见于 AUTO-INDEX`
 
 ## Task Dependency Graph
 
@@ -589,3 +643,11 @@
   - **8.1/8.4/8.5/8.6 打 `[x]`**(wire 层自动化);**8.2/8.3/8.7/8.8/8.9 保持 `[ ]`**(手工层 unverified · 剧本已备 + design.md Known Limitations 声明不承诺项);父任务 8 标 `[-]` 表本轮完成一半(A 部分)
   - **锚点漂移自查**:`git grep -n` 实测 6 个引用锚点 · 修正 4 处 stage8 test 行号(编辑窗口偏移)+ 2 处生产代码行号(off by ±14)· 全部改为 `symbol @ file:line` 记法保容错
   - **硬约束合规**:未改后端生产代码 · 未改前端 · 未改 requirements.md 契约段 · design.md 仅追加 Update Log + Known Limitations · UDS 侧未加同源 test(dispatch 建议只 Windows)· 未覆盖用户真实人格(探针名 `codeg-e2e-probe` 隔离)
+
+
+- 2026-08-04 · 主 AI(stage 9 close-out · doc-only,不产 code commit) · shipped · commit pending(仅 doc 改动):
+  - **架构反思归档**:stage 1-8 已交付主体 code,stage 9 收尾职责 = doc-only 追加 + status 推进 + 债项与不变式沉淀。**无 code commit,无 test 改动**;仅 design.md 新增 3 段(`## Long-term Upgrade Path` + `## Known Debt` + `## Known Invariants (for future editors)`)+ Update Log stage-9 追加 + front-matter status→shipped/shipped_commit=`adfc037f`/last_updated=`2026-08-04` + docs/specs/README.md AUTO-INDEX 重生成 + 本 tasks.md ledger 回填。
+  - **9.1-9.9 逐项完成**(详见各子任务 Evidence,不复述):9.1 stage 1-8 全 commit / 9.2 Known Limitations 补 Known Debt §3 / 9.3 Long-term Upgrade Path 新增 / 9.4 N/A(仓无 CHANGELOG) / 9.5 status→shipped + sync-spec-index / 9.6 fallback 到 Known Debt(仓无 ARCHITECTURE.md) / 9.7 fallback 到 Known Invariants(仓 CLAUDE.md 不维护 traps 段) / 9.8 error-journal 写 1 条 anchor-drift / 9.9 sync 收尾
+  - **error-journal 写门槛评估**:三候选 → 只 1 条(跨 commit 行号锚点漂移)达门槛,登记入 `C:\Users\7\.agents\error-journal\PROCESS.md` + `_index.md` Route Table。**候选 A**(git checkout -- 撤未提交 62 行)与既有 E-101 / E-104 母题不同形态但根因不够独特(共享 workdir + 判定器盲区已有条目覆盖,新条会碎片化)· 未达「独立可泛化」门槛。**候选 C**(三处副本漂移)已在 [×6] 母题成员,stage 5 sonnet review 已系统性识别,合并入既有母题即可。
+  - **硬约束合规**:未改后端生产代码 · 未改前端 · 未改 requirements.md / design.md 契约段(仅追加 Update Log + 3 个新段) · 未 stage 别人的 `docs/specs/README.md` subagent-observatory 行改动(stash 隔离) · 未 stage `src-tauri/*` 等已 stage 1-8 定稿的 M 文件(它们属于 stage 1-8 遗留 M,不属于 stage 9 编辑)
+  - **Review Findings**:任务书 9.6 fallback 剧本("若 ARCHITECTURE.md 不存在或不维护 evolution index,把这两条债写进 design.md 的 Risks & Trade-offs 或新增 `## Known Debt` 段")实测为真 —— 仓根 `Test-Path ARCHITECTURE.md docs/ARCHITECTURE.md → False`。9.7 同 —— CLAUDE.md/AGENTS.md `git grep delegation → 空`,fallback 到 spec 内 Known Invariants 段。**未发现新问题** · **无需主 AI 决策的偏离** · 顺路发现的 doc 债项(3 条)已完整登记 Known Debt,均给出「触发条件 + 缺席后果 + 为什么本轮不修」三段式说明,让优先级由现实需求驱动。
