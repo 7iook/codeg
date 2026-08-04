@@ -1813,19 +1813,32 @@ export async function gitUpdateBranch(
   })
 }
 
-export async function gitPushInfo(path: string): Promise<GitPushInfo> {
-  return getTransport().call("git_push_info", { path })
+/** `branch` omitted (or null) reports on the checked-out branch. */
+export async function gitPushInfo(
+  path: string,
+  branch?: string | null
+): Promise<GitPushInfo> {
+  return getTransport().call("git_push_info", {
+    path,
+    branch: branch ?? null,
+  })
 }
 
+/**
+ * Push a branch. `branch` omitted (or null) pushes the checked-out one; naming
+ * one pushes it without checking it out (`git push <remote> <branch>`).
+ */
 export async function gitPush(
   path: string,
   remote?: string | null,
   credentials?: GitCredentials | null,
-  folderId?: number | null
+  folderId?: number | null,
+  branch?: string | null
 ): Promise<GitPushResult> {
   return getTransport().call("git_push", {
     path,
     remote: remote ?? null,
+    branch: branch ?? null,
     credentials: credentials ?? null,
     folderId: folderId ?? null,
   })
@@ -1986,19 +1999,27 @@ export async function openStashWindow(folderId: number): Promise<void> {
   window.open(result.path, `stash-${folderId}`)
 }
 
-export async function openPushWindow(folderId: number): Promise<void> {
+/** `branch` preselects the push target; omitted means the checked-out branch. */
+export async function openPushWindow(
+  folderId: number,
+  branch?: string | null
+): Promise<void> {
   const locale = getCurrentEffectiveAppLocale()
   if (isDesktop()) {
     return getShellTransport().call("open_push_window", {
       folderId,
       locale,
       remoteConnectionId: getActiveRemoteConnectionId(),
+      branch: branch ?? null,
     })
   }
   const result = await getTransport().call<{ path: string }>(
     "open_push_window",
-    { folderId, locale }
+    { folderId, locale, branch: branch ?? null }
   )
+  // Reusing the window NAME navigates an already-open push window to the new
+  // URL, so the preselected branch applies there too (the desktop path gets the
+  // same effect from the `push://retarget-branch` event).
   window.open(result.path, `push-${folderId}`)
 }
 

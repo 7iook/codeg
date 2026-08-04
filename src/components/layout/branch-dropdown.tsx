@@ -46,7 +46,6 @@ import {
   gitDeleteRemoteBranch,
 } from "@/lib/api"
 import { subscribe } from "@/lib/platform"
-import { RemoteManageDialog } from "@/components/layout/remote-manage-dialog"
 import { DirectoryPathInput } from "@/components/shared/directory-path-input"
 import { useSwitchToBranch } from "@/hooks/use-switch-to-branch"
 import {
@@ -141,7 +140,6 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
   const [worktreeOpen, setWorktreeOpen] = useState(false)
   const [worktreeBranchName, setWorktreeBranchName] = useState("")
   const [worktreePath, setWorktreePath] = useState("")
-  const [manageRemotesOpen, setManageRemotesOpen] = useState(false)
 
   // Task running, credential retry, pull/fetch/window openers and the
   // conflict/stash dialogs all live in the shared hook, so the aux-panel git
@@ -154,8 +152,6 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
     updateBranch,
     openCommitWindow: openCommit,
     openPushWindow: openPush,
-    openStashDialog,
-    openUnstashWindow,
     reportConflict,
     dialogs: gitDialogs,
   } = useGitQuickActions({ folderId, folderPath })
@@ -175,7 +171,12 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
   // Operations shown as a searchable block at the top of the popup; the list
   // resolves each id to an icon and dispatches back through `runOperation`.
   // `groupEnd` inserts a separator after that op (non-search) to restore the old
-  // menu's pull/fetch | commit/push | new | stash | remotes blocking.
+  // menu's pull/fetch | commit/push | new blocking. Deliberately short: this chip
+  // sits under the composer and is first of all a BRANCH picker, so the
+  // long-tail operations (stash, unstash, manage remotes) live in the aux
+  // panel's git tabs — the changes tab owns the working-tree ones, the commits
+  // tab owns the remotes. The last entry carries no `groupEnd`: the row builder
+  // already separates the operation block from the branch tree.
   const operations = useMemo<BranchOperationMeta[]>(
     () => [
       { id: "pull", label: t("pullCode") },
@@ -183,10 +184,7 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
       { id: "commit", label: t("openCommitWindow") },
       { id: "push", label: t("pushCode"), groupEnd: true },
       { id: "newBranch", label: t("newBranch") },
-      { id: "newWorktree", label: t("newWorktree"), groupEnd: true },
-      { id: "stash", label: t("stashChanges") },
-      { id: "stashPop", label: t("stashPop"), groupEnd: true },
-      { id: "manageRemotes", label: t("manageRemotes") },
+      { id: "newWorktree", label: t("newWorktree") },
     ],
     [t]
   )
@@ -480,15 +478,6 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
       case "newWorktree":
         handleOpenWorktreeDialog()
         break
-      case "stash":
-        openStashDialog()
-        break
-      case "stashPop":
-        openUnstashWindow()
-        break
-      case "manageRemotes":
-        setManageRemotesOpen(true)
-        break
     }
   }
 
@@ -508,6 +497,12 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
     setDropdownOpen(false)
     if (action === "pull") {
       updateBranch(fullName, isRemote)
+      return
+    }
+    // Push opens the push window preselected for this branch, so the commits
+    // about to be published are reviewable before anything leaves the machine.
+    if (action === "push") {
+      openPush(fullName)
       return
     }
     setConfirmAction({ type: action, branchName: fullName })
@@ -714,13 +709,6 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <RemoteManageDialog
-        open={manageRemotesOpen}
-        onOpenChange={setManageRemotesOpen}
-        folderPath={folderPath}
-        onSaved={() => loadAllBranches()}
-      />
 
       {gitDialogs}
     </>

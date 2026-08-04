@@ -232,10 +232,18 @@ pub async fn git_has_merge_head(
     Ok(Json(result))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPushInfoParams {
+    pub path: String,
+    /// Target branch; omitted means the checked-out one.
+    pub branch: Option<String>,
+}
+
 pub async fn git_push_info(
-    Json(params): Json<PathParams>,
+    Json(params): Json<GitPushInfoParams>,
 ) -> Result<Json<folder_commands::GitPushInfo>, AppCommandError> {
-    let result = folder_commands::git_push_info(params.path).await?;
+    let result = folder_commands::git_push_info(params.path, params.branch).await?;
     Ok(Json(result))
 }
 
@@ -620,6 +628,8 @@ pub struct GitPushParams {
     pub folder_id: Option<i32>,
     pub path: String,
     pub remote: Option<String>,
+    /// Target branch; omitted means the checked-out one.
+    pub branch: Option<String>,
     pub credentials: Option<GitCredentials>,
 }
 
@@ -635,6 +645,7 @@ pub async fn git_push(
         params.folder_id,
         &params.path,
         params.remote.as_deref(),
+        params.branch.as_deref(),
         params.credentials.as_ref(),
         db,
     )

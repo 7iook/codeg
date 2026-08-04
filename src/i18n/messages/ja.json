@@ -1887,6 +1887,7 @@
       "fetchRemoteBranches": "リモートブランチをフェッチ",
       "openCommitWindow": "コードをコミット...",
       "pushCode": "プッシュ...",
+      "pushBranch": "プッシュ",
       "newBranch": "新規ブランチ...",
       "newWorktree": "新規ワークツリー...",
       "stashChanges": "スタッシュ...",
@@ -2190,9 +2191,7 @@
         "kindFile": "ファイル"
       },
       "quickCommit": {
-        "placeholder": "コミットメッセージ（Enter でコミット）",
-        "commit": "コミット",
-        "openWindow": "コミットウィンドウを開く"
+        "placeholder": "コミットメッセージ（Enter でコミット）"
       }
     },
     "tabContext": {

@@ -1887,6 +1887,7 @@
       "fetchRemoteBranches": "Fetch remote branches",
       "openCommitWindow": "Commit code...",
       "pushCode": "Push...",
+      "pushBranch": "Push",
       "newBranch": "New branch...",
       "newWorktree": "New worktree...",
       "stashChanges": "Stash changes...",
@@ -2190,9 +2191,7 @@
         "kindFile": "file"
       },
       "quickCommit": {
-        "placeholder": "Commit message (Enter to commit)",
-        "commit": "Commit",
-        "openWindow": "Open commit window"
+        "placeholder": "Commit message (Enter to commit)"
       }
     },
     "tabContext": {

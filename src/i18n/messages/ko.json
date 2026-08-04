@@ -1887,6 +1887,7 @@
       "fetchRemoteBranches": "원격 브랜치 가져오기",
       "openCommitWindow": "코드 커밋...",
       "pushCode": "푸시...",
+      "pushBranch": "푸시",
       "newBranch": "새 브랜치...",
       "newWorktree": "새 워크트리...",
       "stashChanges": "스태시...",
@@ -2190,9 +2191,7 @@
         "kindFile": "파일"
       },
       "quickCommit": {
-        "placeholder": "커밋 메시지 (Enter로 커밋)",
-        "commit": "커밋",
-        "openWindow": "커밋 창 열기"
+        "placeholder": "커밋 메시지 (Enter로 커밋)"
       }
     },
     "tabContext": {

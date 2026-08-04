@@ -1887,6 +1887,7 @@
       "fetchRemoteBranches": "提取远程分支",
       "openCommitWindow": "提交代码...",
       "pushCode": "推送...",
+      "pushBranch": "推送",
       "newBranch": "新建分支...",
       "newWorktree": "新建工作树...",
       "stashChanges": "贮藏更改...",
@@ -2190,9 +2191,7 @@
         "kindFile": "文件"
       },
       "quickCommit": {
-        "placeholder": "提交信息（回车提交）",
-        "commit": "提交",
-        "openWindow": "打开提交窗口"
+        "placeholder": "提交信息（回车提交）"
       }
     },
     "tabContext": {

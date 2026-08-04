@@ -23,7 +23,6 @@ import {
   MoreHorizontal,
   PlusCircle,
   RefreshCw,
-  SquareArrowOutUpRight,
   Undo2,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
@@ -65,6 +64,7 @@ import { useWorkspaceActions } from "@/contexts/workspace-context"
 import { useWorkspaceStateStore } from "@/hooks/use-workspace-state-store"
 import { useGitQuickActions } from "@/hooks/use-git-quick-actions"
 import { AuxPanelNoFolderEmpty } from "@/components/layout/aux-panel-no-folder-empty"
+import { GIT_TOOLBAR_ICON_BUTTON_CLASS } from "@/components/layout/git-toolbar-controls"
 import { WorkspaceDegradedBanner } from "@/components/layout/workspace-degraded-banner"
 import {
   deleteFileTreeEntry,
@@ -1483,9 +1483,14 @@ export function GitChangesTab() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Toolbar: type a message and commit right here, or reach the same git
-          operations the branch selector offers. Hidden on a non-repo folder —
-          there is nothing to commit to (the body shows the "not a repo" hint). */}
+      {/* Toolbar: type a message and commit right here with Enter, or reach the
+          same git operations the branch selector offers. Just a text field and
+          one round "more" circle — no commit button: Enter is the submit (the
+          placeholder says so) and the menu's "commit code" row opens the full
+          commit window, so a dedicated button would only repeat what both
+          already do. The circle matches the commits tab's header, so the two
+          tabs read as one panel. Hidden on a non-repo folder — there is nothing
+          to commit to (the body shows the "not a repo" hint). */}
       {workspaceState.isGitRepo && (
         <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/50 px-2">
           <Input
@@ -1505,41 +1510,27 @@ export function GitChangesTab() {
             disabled={committing}
             placeholder={t("quickCommit.placeholder")}
             aria-label={t("quickCommit.placeholder")}
-            className="h-7 min-w-0 flex-1 border-0 bg-transparent px-1.5 text-xs shadow-none focus-visible:ring-0"
+            className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1.5 text-xs shadow-none focus-visible:ring-0"
           />
-          <Button
-            size="xs"
-            className="shrink-0"
-            disabled={!canQuickCommit}
-            onClick={() => {
-              void handleQuickCommit()
-            }}
-          >
-            {committing && <Loader2 className="animate-spin" />}
-            {t("quickCommit.commit")}
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            className="shrink-0 text-muted-foreground hover:text-foreground"
-            onClick={handleOpenCommitWindow}
-            title={t("quickCommit.openWindow")}
-            aria-label={t("quickCommit.openWindow")}
-          >
-            <SquareArrowOutUpRight />
-          </Button>
+          {/* With no button to grey out, this is the only sign a commit is in
+              flight besides the disabled field — so it stays. */}
+          {committing && (
+            <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
                 variant="ghost"
-                size="icon-xs"
-                className="shrink-0 text-muted-foreground hover:text-foreground"
+                size="icon"
+                className={GIT_TOOLBAR_ICON_BUTTON_CLASS}
                 title={t("actions.moreActions")}
                 aria-label={t("actions.moreActions")}
               >
-                <MoreHorizontal />
+                <MoreHorizontal className="size-3.5" />
               </Button>
             </DropdownMenuTrigger>
+            {/* Blocked like the branch selector's operation list: incoming |
+                outgoing | stash | working tree | refresh. */}
             <DropdownMenuContent align="end" className="w-56">
               <DropdownMenuItem
                 disabled={gitActions.running}
@@ -1555,13 +1546,16 @@ export function GitChangesTab() {
                 <CloudSync />
                 {tBranch("fetchRemoteBranches")}
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={gitActions.openPushWindow}>
-                <CloudUpload />
-                {tBranch("pushCode")}
-              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem onSelect={handleOpenCommitWindow}>
                 <GitCommitHorizontal />
                 {tBranch("openCommitWindow")}
+              </DropdownMenuItem>
+              {/* Wrapped, not passed bare: onSelect hands the handler an Event,
+                  which openPushWindow would read as the branch to push. */}
+              <DropdownMenuItem onSelect={() => gitActions.openPushWindow()}>
+                <CloudUpload />
+                {tBranch("pushCode")}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onSelect={gitActions.openStashDialog}>
@@ -1642,7 +1636,14 @@ export function GitChangesTab() {
           <div className="space-y-2 pb-2">
             {trackedChanges.length > 0 && (
               <section className="space-y-1">
-                <div className="flex items-center justify-between px-2 py-1 text-[11px] text-muted-foreground">
+                {/* px-3.5 lines this row up with the toolbar above rather than
+                    with the panel edge: the label lands on the 14px guide the
+                    commit field's placeholder sits on (8px bar padding + the
+                    field's own 6px), and the 14px chevron — inset 3px inside its
+                    20px button — ends 17px from the right, exactly where the
+                    toolbar's "more" glyph ends (8px + the 9px inset of a 14px
+                    glyph in a 32px circle). */}
+                <div className="flex items-center justify-between px-3.5 py-1 text-[11px] text-muted-foreground">
                   <span>
                     {t("trackedChanges", { count: trackedChanges.length })}
                   </span>
@@ -1759,7 +1760,8 @@ export function GitChangesTab() {
 
             {untrackedChanges.length > 0 && (
               <section className="space-y-1">
-                <div className="flex items-center justify-between px-2 py-1 text-[11px] text-muted-foreground">
+                {/* px-3.5 for the same alignment as the tracked header above. */}
+                <div className="flex items-center justify-between px-3.5 py-1 text-[11px] text-muted-foreground">
                   <span>
                     {t("untrackedFiles", { count: untrackedChanges.length })}
                   </span>

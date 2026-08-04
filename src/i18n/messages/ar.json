@@ -1887,6 +1887,7 @@
       "fetchRemoteBranches": "جلب الفروع البعيدة",
       "openCommitWindow": "التزام الكود...",
       "pushCode": "دفع...",
+      "pushBranch": "دفع",
       "newBranch": "فرع جديد...",
       "newWorktree": "Worktree جديد...",
       "stashChanges": "...تخبئة التغييرات",
@@ -2190,9 +2191,7 @@
         "kindFile": "الملف"
       },
       "quickCommit": {
-        "placeholder": "رسالة الالتزام (اضغط Enter للالتزام)",
-        "commit": "التزام",
-        "openWindow": "فتح نافذة الالتزام"
+        "placeholder": "رسالة الالتزام (اضغط Enter للالتزام)"
       }
     },
     "tabContext": {

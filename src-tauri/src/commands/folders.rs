@@ -415,9 +415,80 @@ async fn count_changed_files_between(
     )))
 }
 
-async fn estimate_push_commit_count(path: &str) -> usize {
+/// Reject a caller-supplied push target that isn't a plain branch name.
+///
+/// The value reaches `git` as its own argv element (no shell), so quoting isn't
+/// the concern — it's that `git push <remote> <value>` reads the value as a
+/// REFSPEC, and this path is reachable from the push window's `?branch=` query
+/// and from the server-mode HTTP API. Left unchecked, `:main` deletes the remote
+/// branch, `+main:main` force-pushes over it, and `--mirror` parses as a flag.
+/// So: no leading `-`/`+`, no `:`, no whitespace or control characters. What
+/// survives can only be a single ref name — `ensure_local_branch_exists` then
+/// confirms it actually is one.
+fn ensure_pushable_branch_name(branch: &str) -> Result<(), AppCommandError> {
+    let rejected = branch.is_empty()
+        || branch.starts_with('-')
+        || branch.starts_with('+')
+        || branch.contains(':')
+        || branch.chars().any(|c| c.is_whitespace() || c.is_control());
+    if rejected {
+        return Err(AppCommandError::invalid_input("Invalid branch name")
+            .with_detail(format!("branch={branch}")));
+    }
+    Ok(())
+}
+
+/// Confirm `branch` names an existing local branch, so a push can only ever
+/// publish a ref that already exists here. Belt to
+/// `ensure_pushable_branch_name`'s braces: that one rules out refspec syntax,
+/// this one rules out everything else a caller could invent.
+///
+/// `show-ref --verify` deliberately, NOT `rev-parse --verify`: the latter takes
+/// a revision EXPRESSION, so `main^` and `main@{1}` would both resolve and slip
+/// through. `show-ref --verify` only accepts an exact ref path.
+async fn ensure_local_branch_exists(
+    path: &str,
+    branch: &str,
+) -> Result<(), AppCommandError> {
+    let output = crate::process::tokio_command("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(path)
+        .output()
+        .await
+        .map_err(AppCommandError::io)?;
+    if !output.status.success() {
+        return Err(AppCommandError::not_found("Branch not found")
+            .with_detail(format!("branch={branch}")));
+    }
+    Ok(())
+}
+
+/// How many commits a push would publish. `branch` names the ref to measure;
+/// `None` means the checked-out one (`HEAD`), which is what every caller but the
+/// per-branch push uses.
+async fn estimate_push_commit_count(path: &str, branch: Option<&str>) -> usize {
+    // Full ref for an explicit branch — see `git_push_core` for why short names
+    // can't be trusted as revs.
+    let rev = match branch {
+        Some(name) => format!("refs/heads/{name}"),
+        None => "HEAD".to_string(),
+    };
+    // ...but the `@{push}` SUFFIX is the one place that must stay short: git
+    // resolves it through `branch.<name>.*` config and rejects a qualified ref
+    // outright ("fatal: no such branch: 'refs/heads/x'"), which would silently
+    // drop every explicit-branch call into the fallback below. Only the range's
+    // left side needs it; the right side keeps the unambiguous full ref.
+    let push_range = match branch {
+        Some(name) => format!("{name}@{{push}}..refs/heads/{name}"),
+        None => "@{push}..HEAD".to_string(),
+    };
     let upstream_ahead = crate::process::tokio_command("git")
-        .args(["rev-list", "--count", "@{push}..HEAD"])
+        .args(["rev-list", "--count", &push_range])
         .current_dir(path)
         .output()
         .await;
@@ -429,21 +500,28 @@ async fn estimate_push_commit_count(path: &str) -> usize {
         }
     }
 
-    let branch_output = crate::process::tokio_command("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(path)
-        .output()
-        .await;
-    let Ok(branch_output) = branch_output else {
-        return 0;
+    // Fallback for a branch with no `@{push}`: count what it holds that no ref
+    // of its remote has. The SHORT name is what keys `branch.<name>.remote`;
+    // the rev-list below still walks the full ref.
+    let branch = match branch {
+        Some(name) => name.to_string(),
+        None => {
+            let branch_output = crate::process::tokio_command("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(path)
+                .output()
+                .await;
+            let Ok(branch_output) = branch_output else {
+                return 0;
+            };
+            if !branch_output.status.success() {
+                return 0;
+            }
+            String::from_utf8_lossy(&branch_output.stdout)
+                .trim()
+                .to_string()
+        }
     };
-    if !branch_output.status.success() {
-        return 0;
-    }
-
-    let branch = String::from_utf8_lossy(&branch_output.stdout)
-        .trim()
-        .to_string();
     if branch.is_empty() || branch == "HEAD" {
         return 0;
     }
@@ -463,7 +541,7 @@ async fn estimate_push_commit_count(path: &str) -> usize {
 
     let remote_arg = format!("--remotes={}", remote);
     let output = crate::process::tokio_command("git")
-        .args(["rev-list", "--count", "HEAD", "--not", &remote_arg])
+        .args(["rev-list", "--count", &rev, "--not", &remote_arg])
         .current_dir(path)
         .output()
         .await;
@@ -1499,21 +1577,35 @@ pub async fn git_update_branch(
 }
 
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn git_push_info(path: String) -> Result<GitPushInfo, AppCommandError> {
+pub async fn git_push_info(
+    path: String,
+    branch: Option<String>,
+) -> Result<GitPushInfo, AppCommandError> {
     ensure_git_repo(&path)?;
 
-    // Get current branch name
-    let branch_output = crate::process::tokio_command("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(&path)
-        .output()
-        .await
-        .map_err(AppCommandError::io)?;
-    let branch = String::from_utf8_lossy(&branch_output.stdout)
-        .trim()
-        .to_string();
+    // The branch this push targets: an explicit one (the push window opened for
+    // a specific branch from the branch selector) or, as before, the checked-out
+    // one.
+    let branch = match branch.filter(|value| !value.trim().is_empty()) {
+        Some(explicit) => {
+            let explicit = explicit.trim().to_string();
+            ensure_pushable_branch_name(&explicit)?;
+            explicit
+        }
+        None => {
+            let branch_output = crate::process::tokio_command("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&path)
+                .output()
+                .await
+                .map_err(AppCommandError::io)?;
+            String::from_utf8_lossy(&branch_output.stdout)
+                .trim()
+                .to_string()
+        }
+    };
 
-    // Get tracking remote for current branch
+    // Get tracking remote for the target branch
     let remote_key = format!("branch.{}.remote", branch);
     let remote_output = crate::process::tokio_command("git")
         .args(["config", "--get", &remote_key])
@@ -1536,31 +1628,76 @@ pub async fn git_push_info(path: String) -> Result<GitPushInfo, AppCommandError>
     })
 }
 
+/// Push a branch to a remote, setting upstream when it doesn't already track the
+/// target remote.
+///
+/// `branch` names the ref to push; `None` keeps the historical behaviour of
+/// pushing whatever is checked out. An explicit branch does NOT have to be
+/// checked out — `git push <remote> <branch>` publishes it either way, which is
+/// what the branch selector's per-branch push relies on.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn git_push_core(
     data_dir: &std::path::Path,
     emitter: &EventEmitter,
     folder_id: Option<i32>,
     path: &str,
     remote: Option<&str>,
+    branch: Option<&str>,
     credentials: Option<&GitCredentials>,
     db: &AppDatabase,
 ) -> Result<GitPushResult, AppCommandError> {
-    let pushed_commits = estimate_push_commit_count(path).await;
+    let branch = branch.map(str::trim).filter(|value| !value.is_empty());
+    // Validate BEFORE anything runs: `branch` is interpolated into the rev
+    // arguments below as well as into the push refspec.
+    if let Some(branch) = branch {
+        ensure_pushable_branch_name(branch)?;
+        ensure_local_branch_exists(path, branch).await?;
+    }
+    let pushed_commits = estimate_push_commit_count(path, branch).await;
 
     let target_remote = remote.filter(|s| !s.is_empty()).unwrap_or("origin");
 
-    let branch_output = crate::process::tokio_command("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(path)
-        .output()
-        .await
-        .map_err(AppCommandError::io)?;
-    let branch = String::from_utf8_lossy(&branch_output.stdout)
-        .trim()
-        .to_string();
+    // The PUSH REFSPEC is fully qualified for an explicit branch: a short name
+    // goes through git's revision resolution, where `@` means HEAD and a
+    // same-named tag makes the name ambiguous, so `refs/heads/x:refs/heads/x` is
+    // the only form that reliably publishes the branch
+    // `ensure_local_branch_exists` just verified.
+    //
+    // The `@{u}` probe must NOT be qualified the same way — git resolves that
+    // suffix through `branch.<name>.*` config and rejects `refs/heads/x@{u}`
+    // ("fatal: no such branch"), which would make every explicit-branch push
+    // look upstream-less and re-run `--set-upstream` each time. Short name there,
+    // full ref for the refspec. (Residual: a branch literally named `@` reads
+    // HEAD's upstream here, which can only cost an unnecessary `-u` — the push
+    // itself still goes to the qualified ref.)
+    //
+    // The no-branch path keeps its original short-name / `@{u}` form verbatim.
+    let (push_ref, upstream_ref) = match branch {
+        Some(explicit) => (
+            format!("refs/heads/{explicit}:refs/heads/{explicit}"),
+            format!("{explicit}@{{u}}"),
+        ),
+        None => {
+            let branch_output = crate::process::tokio_command("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(path)
+                .output()
+                .await
+                .map_err(AppCommandError::io)?;
+            let head = String::from_utf8_lossy(&branch_output.stdout)
+                .trim()
+                .to_string();
+            (head, "@{u}".to_string())
+        }
+    };
 
     let upstream_check = crate::process::tokio_command("git")
-        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            &upstream_ref,
+        ])
         .current_dir(path)
         .output()
         .await
@@ -1583,7 +1720,7 @@ pub(crate) async fn git_push_core(
 
     let output = if needs_set_upstream {
         let mut cmd = crate::process::tokio_command("git");
-        cmd.args(["push", "--set-upstream", target_remote, &branch])
+        cmd.args(["push", "--set-upstream", target_remote, &push_ref])
             .current_dir(path);
         prepare_remote_git_cmd_with_remote(
             &mut cmd,
@@ -1597,7 +1734,8 @@ pub(crate) async fn git_push_core(
         cmd.output().await.map_err(AppCommandError::io)?
     } else {
         let mut cmd = crate::process::tokio_command("git");
-        cmd.args(["push", target_remote, &branch]).current_dir(path);
+        cmd.args(["push", target_remote, &push_ref])
+            .current_dir(path);
         prepare_remote_git_cmd_with_remote(
             &mut cmd,
             path,
@@ -1636,11 +1774,13 @@ pub(crate) async fn git_push_core(
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
+#[allow(clippy::too_many_arguments)]
 pub async fn git_push(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     path: String,
     remote: Option<String>,
+    branch: Option<String>,
     credentials: Option<GitCredentials>,
     folder_id: Option<i32>,
     db: tauri::State<'_, AppDatabase>,
@@ -1665,6 +1805,7 @@ pub async fn git_push(
         folder_id,
         &path,
         remote.as_deref(),
+        branch.as_deref(),
         credentials.as_ref(),
         &db,
     )

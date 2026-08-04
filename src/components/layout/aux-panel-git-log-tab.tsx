@@ -1,7 +1,6 @@
 "use client"
 
 import {
-  Fragment,
   type ReactElement,
   useCallback,
   useDeferredValue,
@@ -13,8 +12,6 @@ import {
 import { useTranslations } from "next-intl"
 import { Virtualizer, type VirtualizerHandle } from "virtua"
 import {
-  Archive,
-  ArchiveRestore,
   Check,
   ChevronDown,
   ChevronRight,
@@ -28,8 +25,8 @@ import {
   CloudUpload,
   GitBranch,
   GitBranchPlus,
-  GitCommitHorizontal,
   GitCompare,
+  Globe,
   Hash,
   LocateFixed,
   MoreHorizontal,
@@ -91,7 +88,6 @@ import {
 } from "@/components/ui/popover"
 import {
   Command,
-  CommandEmpty,
   CommandGroup,
   CommandInput,
   CommandItem,
@@ -100,6 +96,9 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { AuxPanelNoFolderEmpty } from "@/components/layout/aux-panel-no-folder-empty"
 import { GitLogCommitMessage } from "@/components/layout/git-log-commit-message"
+import { GitLogBranchFilterList } from "@/components/layout/git-log-branch-filter-list"
+import { GIT_TOOLBAR_ICON_BUTTON_CLASS } from "@/components/layout/git-toolbar-controls"
+import { RemoteManageDialog } from "@/components/layout/remote-manage-dialog"
 import { subscribe } from "@/lib/platform"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useActiveFolder } from "@/contexts/active-folder-context"
@@ -131,15 +130,6 @@ import type {
 import { toast } from "sonner"
 import { isNotAGitRepoError, toErrorMessage } from "@/lib/app-error"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import {
-  buildBranchTree,
-  buildRemoteBranchSections,
-  containsBranch,
-  expandedKeysForBranch,
-  localBranchItems,
-  type BranchTreeNode,
-} from "@/lib/branch-tree"
-import { useBranchTreeExpansion } from "@/hooks/use-branch-tree-expansion"
 
 // Commits load in pages of PAGE_SIZE via the backend `skip` offset; the next
 // page is fetched once the scroll comes within LOAD_MORE_PX of the estimated
@@ -725,138 +715,12 @@ function BranchSelector({
   const t = useTranslations("Folder.gitLogTab.branchSelector")
   const [popoverOpen, setPopoverOpen] = useState(false)
 
-  // Tree mode (browse) when the search box is empty; flat list (cmdk filters)
-  // when the user types — cmdk unmounts filtered items, so collapsed branches
-  // would otherwise be unsearchable. Controlled query, cleared on every close.
-  const [query, setQuery] = useState("")
-  const [prevOpen, setPrevOpen] = useState(popoverOpen)
-  if (popoverOpen !== prevOpen) {
-    setPrevOpen(popoverOpen)
-    if (!popoverOpen) setQuery("")
-  }
-  const isSearching = query.trim().length > 0
-
-  const localNodes = useMemo(
-    () => buildBranchTree(localBranchItems(branchList.local), "local"),
-    [branchList.local]
-  )
-  const remoteSections = useMemo(
-    () => buildRemoteBranchSections(branchList.remote),
-    [branchList.remote]
-  )
-
-  // Auto-expand the prefix groups leading to the selected (or current) branch
-  // when the popover opens. Under the HEAD filter the selection is a sentinel,
-  // not a ref in the tree — seed with the branch it actually resolves to.
-  const seedKeys = useMemo(() => {
-    const target = isHeadFilter(selectedBranch)
-      ? currentBranch
-      : (selectedBranch ?? currentBranch)
-    if (!target) return []
-    if (containsBranch(localNodes, target)) {
-      return expandedKeysForBranch(localNodes, target)
-    }
-    for (const section of remoteSections) {
-      if (containsBranch(section.nodes, target)) {
-        const keys = expandedKeysForBranch(section.nodes, target)
-        if (section.key) keys.push(section.key)
-        return keys
-      }
-    }
-    return []
-  }, [selectedBranch, currentBranch, localNodes, remoteSections])
-
-  const { isExpanded, toggle } = useBranchTreeExpansion(popoverOpen, seedKeys)
-
   const handleSelect = (branch: string | null) => {
     setPopoverOpen(false)
     if (branch !== selectedBranch) onBranchChange(branch)
   }
 
   const headSelected = isHeadFilter(selectedBranch)
-
-  const indentStyle = (depth: number) => ({
-    paddingLeft: `${0.5 + depth * 0.75}rem`,
-  })
-
-  // Recursively render the prefix tree as cmdk items. Group headers toggle
-  // expansion (and never close the popover); leaves pick the branch to filter by
-  // (its full ref, so a remote like `origin/main` filters that remote).
-  const renderTreeItems = (
-    nodes: BranchTreeNode[],
-    depth: number
-  ): ReactElement[] =>
-    nodes.flatMap((node) => {
-      if (node.type === "group") {
-        const groupOpen = isExpanded(node.key)
-        const header = (
-          <CommandItem
-            key={node.key}
-            value={node.key}
-            aria-expanded={groupOpen}
-            onSelect={() => toggle(node.key)}
-            style={indentStyle(depth)}
-          >
-            <ChevronRight
-              className={cn(
-                "size-3 shrink-0 text-muted-foreground/70 transition-transform",
-                groupOpen && "rotate-90"
-              )}
-            />
-            <span className="min-w-0 flex-1 truncate">{node.label}</span>
-            <span className="shrink-0 text-xs text-muted-foreground/60">
-              {node.count}
-            </span>
-          </CommandItem>
-        )
-        return groupOpen
-          ? [header, ...renderTreeItems(node.children, depth + 1)]
-          : [header]
-      }
-      const isSelected = node.fullName === selectedBranch
-      return [
-        <CommandItem
-          key={node.key}
-          value={node.key}
-          title={node.fullName}
-          onSelect={() => handleSelect(node.fullName)}
-          style={indentStyle(depth)}
-        >
-          <GitBranch className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{node.label}</span>
-          {node.fullName === currentBranch && (
-            <span className="shrink-0 text-[10px] text-muted-foreground">
-              {t("current")}
-            </span>
-          )}
-          {isSelected && <Check className="size-3.5 shrink-0" />}
-        </CommandItem>,
-      ]
-    })
-
-  const renderFlatItem = (fullName: string, scope: "local" | "remote") => {
-    const isSelected = fullName === selectedBranch
-    return (
-      // Prefix the cmdk value with the scope so an identically named local and
-      // remote ref (e.g. a local branch literally called `origin/x`) stay
-      // distinct rows; onSelect still filters by the raw ref.
-      <CommandItem
-        key={`${scope}-${fullName}`}
-        value={`${scope} ${fullName}`}
-        title={fullName}
-        onSelect={() => handleSelect(fullName)}
-      >
-        <GitBranch className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{fullName}</span>
-        {fullName === currentBranch && (
-          <span className="shrink-0 text-[10px] text-muted-foreground">
-            {t("current")}
-          </span>
-        )}
-        {isSelected && <Check className="size-3.5 shrink-0" />}
-      </CommandItem>
-    )
-  }
 
   return (
     // The popover trigger and the clear (✕) button are siblings — never nested
@@ -926,82 +790,16 @@ function BranchSelector({
           sideOffset={6}
           className="w-72 overflow-hidden p-0"
         >
-          <Command className="rounded-2xl" shouldFilter={isSearching}>
-            <CommandInput
-              placeholder={t("searchBranch")}
-              aria-label={t("searchBranch")}
-              value={query}
-              onValueChange={setQuery}
-            />
-            <CommandList>
-              <CommandEmpty>{t("noBranches")}</CommandEmpty>
-              {/* Pinned above the branch groups: the dynamic "current branch"
-                  view. It filters by the literal `HEAD` ref, so it follows every
-                  checkout instead of pinning a name. The cmdk value carries both
-                  the sentinel and the branch it resolves to, so typing either
-                  still finds this row in search mode. */}
-              <CommandGroup>
-                <CommandItem
-                  value={`head HEAD ${currentBranch ?? ""}`}
-                  title={t("headHint")}
-                  onSelect={() => handleSelect(HEAD_BRANCH_FILTER)}
-                >
-                  <LocateFixed className="size-3.5 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">{t("head")}</span>
-                  {currentBranch && (
-                    <span className="min-w-0 shrink truncate text-[10px] text-muted-foreground">
-                      {currentBranch}
-                    </span>
-                  )}
-                  {headSelected && <Check className="size-3.5 shrink-0" />}
-                </CommandItem>
-              </CommandGroup>
-              {branchList.local.length > 0 && (
-                <CommandGroup heading={t("localBranches")}>
-                  {isSearching
-                    ? branchList.local.map((b) => renderFlatItem(b, "local"))
-                    : renderTreeItems(localNodes, 0)}
-                </CommandGroup>
-              )}
-              {branchList.remote.length > 0 && (
-                <CommandGroup heading={t("remoteBranches")}>
-                  {isSearching
-                    ? branchList.remote.map((b) => renderFlatItem(b, "remote"))
-                    : remoteSections.map((section) =>
-                        section.remoteName == null ? (
-                          <Fragment key="remote-single">
-                            {renderTreeItems(section.nodes, 0)}
-                          </Fragment>
-                        ) : (
-                          <Fragment key={section.key}>
-                            <CommandItem
-                              value={section.key}
-                              aria-expanded={isExpanded(section.key)}
-                              onSelect={() => toggle(section.key)}
-                              style={indentStyle(0)}
-                            >
-                              <ChevronRight
-                                className={cn(
-                                  "size-3 shrink-0 text-muted-foreground/70 transition-transform",
-                                  isExpanded(section.key) && "rotate-90"
-                                )}
-                              />
-                              <span className="min-w-0 flex-1 truncate">
-                                {section.remoteName}
-                              </span>
-                              <span className="shrink-0 text-xs text-muted-foreground/60">
-                                {section.count}
-                              </span>
-                            </CommandItem>
-                            {isExpanded(section.key) &&
-                              renderTreeItems(section.nodes, 1)}
-                          </Fragment>
-                        )
-                      )}
-                </CommandGroup>
-              )}
-            </CommandList>
-          </Command>
+          <GitLogBranchFilterList
+            branchList={branchList}
+            currentBranch={currentBranch}
+            selectedBranch={
+              isHeadFilter(selectedBranch) ? null : selectedBranch
+            }
+            headSelected={headSelected}
+            onSelectBranch={handleSelect}
+            onSelectHead={() => handleSelect(HEAD_BRANCH_FILTER)}
+          />
         </PopoverContent>
       </Popover>
       {selectedBranch && (
@@ -1020,75 +818,57 @@ function BranchSelector({
   )
 }
 
-function RefreshButton({
-  onRefresh,
-  refreshing,
-  className,
-}: {
-  onRefresh: () => void
-  refreshing: boolean
-  className?: string
-}) {
-  const t = useTranslations("Folder.gitLogTab.branchSelector")
-  return (
-    // Round hover circle, part of the header's one control system: same h-8
-    // height + rounded-full + foreground/10 hover as the branch/author pills
-    // (foreground/10 in both themes, overriding the ghost variant's muted
-    // default). -mr-1 pushes the circle's right rim out to the 8px guide so it
-    // lines up with the expanded commit card's border and mirrors the branch
-    // pill's left rim; size-8 (not a narrow w-6) keeps it a clean circle with the
-    // glyph centered.
-    <Button
-      variant="ghost"
-      size="icon"
-      className={cn(
-        "-mr-1 size-8 shrink-0 rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground dark:hover:bg-foreground/10",
-        className
-      )}
-      onClick={onRefresh}
-      disabled={refreshing}
-      title={t("refreshCommitHistory")}
-      aria-label={t("refreshCommitHistory")}
-    >
-      <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} />
-    </Button>
-  )
-}
-
-// The header's git operations. Same set — and the same wording — as the branch
-// selector's operation block, so seeing a commit you're behind on is one click
-// from updating, and a commit you haven't shared is one click from pushing.
+// The header's git operations, worded exactly like the branch selector's — so
+// seeing a commit you're behind on is one click from updating, and a commit you
+// haven't shared is one click from pushing. Deliberately narrow: this is the
+// COMMITS tab, so it carries only the remote-facing operations (the working-tree
+// ones — commit, stash — belong to the changes tab's toolbar), the remote
+// bookkeeping the branch selector no longer offers, and — pinned at the top —
+// the plain reload of this very list.
 function GitActionsMenu({
   actions,
   disabled,
+  onManageRemotes,
+  onRefresh,
+  refreshing,
   className,
 }: {
   actions: GitQuickActions
   /** Whole menu is inert — see the `folderStale` call site. */
   disabled: boolean
+  onManageRemotes: () => void
+  onRefresh: () => void
+  refreshing: boolean
   className?: string
 }) {
   const t = useTranslations("Folder.gitLogTab")
   const tBranch = useTranslations("Folder.branchDropdown")
+  const tSelector = useTranslations("Folder.gitLogTab.branchSelector")
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        {/* Same round hover circle as RefreshButton — one control system. */}
+        {/* The header's only icon button: same round hover circle as the changes
+            tab's, so both tabs read as one control system. */}
         <Button
           variant="ghost"
           size="icon"
           disabled={disabled}
-          className={cn(
-            "size-8 shrink-0 rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground dark:hover:bg-foreground/10",
-            className
-          )}
+          className={cn(GIT_TOOLBAR_ICON_BUTTON_CLASS, className)}
           title={t("moreActions")}
           aria-label={t("moreActions")}
         >
           <MoreHorizontal className="size-3.5" />
         </Button>
       </DropdownMenuTrigger>
+      {/* Blocked like the branch selector's operation list: refresh | incoming |
+          outgoing | remote bookkeeping. Refresh leads because it's the one row
+          that touches nothing but this list. */}
       <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuItem disabled={refreshing} onSelect={onRefresh}>
+          <RefreshCw className={cn(refreshing && "animate-spin")} />
+          {tSelector("refreshCommitHistory")}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuItem disabled={actions.running} onSelect={actions.pull}>
           <CloudDownload />
           {tBranch("pullCode")}
@@ -1100,22 +880,17 @@ function GitActionsMenu({
           <CloudSync />
           {tBranch("fetchRemoteBranches")}
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={actions.openPushWindow}>
+        <DropdownMenuSeparator />
+        {/* Wrapped, not passed bare: onSelect hands the handler an Event, which
+            openPushWindow would read as the branch to push. */}
+        <DropdownMenuItem onSelect={() => actions.openPushWindow()}>
           <CloudUpload />
           {tBranch("pushCode")}
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={actions.openCommitWindow}>
-          <GitCommitHorizontal />
-          {tBranch("openCommitWindow")}
-        </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={actions.openStashDialog}>
-          <Archive />
-          {tBranch("stashChanges")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={actions.openUnstashWindow}>
-          <ArchiveRestore />
-          {tBranch("stashPop")}
+        <DropdownMenuItem onSelect={onManageRemotes}>
+          <Globe />
+          {tBranch("manageRemotes")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -1409,6 +1184,7 @@ function LogHeader({
   isMobile,
   gitActions,
   gitActionsStale,
+  onManageRemotes,
 }: {
   branchList: GitBranchList
   currentBranch: string | null
@@ -1426,10 +1202,17 @@ function LogHeader({
   gitActions: GitQuickActions
   /** Deferred render still on the PREVIOUS folder — see the call sites. */
   gitActionsStale: boolean
+  onManageRemotes: () => void
 }) {
+  // The FILTERS need refs to filter, the actions don't — so an empty branch list
+  // hides the two pills, not the whole header. A repo created by `git init` has
+  // no branch until its first commit (git_log returns an empty list rather than
+  // an error there, so this tab renders normally), and that is exactly when
+  // "manage remotes" matters most: adding the first remote before the first
+  // push. This menu is now its only home, so the header must survive a repo with
+  // no refs yet.
   const hasBranches =
     branchList.local.length > 0 || branchList.remote.length > 0
-  if (!hasBranches) return null
 
   return (
     <div
@@ -1441,28 +1224,35 @@ function LogHeader({
       )}
     >
       {/* Branch selector + author filter sit together at the leading edge; the
-          git actions menu and refresh button are pushed to the trailing edge
-          with ml-auto on the first of them. */}
-      <BranchSelector
-        branchList={branchList}
-        currentBranch={currentBranch}
-        selectedBranch={selectedBranch}
-        onBranchChange={onBranchChange}
-      />
-      <AuthorFilter
-        meName={meName}
-        recentAuthors={recentAuthors}
-        selectedAuthor={selectedAuthor}
-        folderPath={folderPath}
-        onAuthorChange={onAuthorChange}
-        onRemoveRecent={onRemoveRecent}
-      />
+          actions menu — the header's only button, refresh included — is pushed
+          to the trailing rim with ml-auto (-mr-1 puts that rim on the header's
+          8px guide). */}
+      {hasBranches && (
+        <>
+          <BranchSelector
+            branchList={branchList}
+            currentBranch={currentBranch}
+            selectedBranch={selectedBranch}
+            onBranchChange={onBranchChange}
+          />
+          <AuthorFilter
+            meName={meName}
+            recentAuthors={recentAuthors}
+            selectedAuthor={selectedAuthor}
+            folderPath={folderPath}
+            onAuthorChange={onAuthorChange}
+            onRemoveRecent={onRemoveRecent}
+          />
+        </>
+      )}
       <GitActionsMenu
         actions={gitActions}
         disabled={gitActionsStale}
-        className="ml-auto"
+        onManageRemotes={onManageRemotes}
+        onRefresh={onRefresh}
+        refreshing={refreshing}
+        className="-mr-1 ml-auto"
       />
-      <RefreshButton onRefresh={onRefresh} refreshing={refreshing} />
     </div>
   )
 }
@@ -1562,6 +1352,7 @@ export function GitLogTab() {
   const [resetTarget, setResetTarget] = useState<CommitResetTarget | null>(null)
   const [resetMode, setResetMode] = useState<GitResetMode>("mixed")
   const [resetting, setResetting] = useState(false)
+  const [manageRemotesOpen, setManageRemotesOpen] = useState(false)
 
   // ── Pagination (infinite scroll) ──────────────────────────────────────────
   // The log loads in PAGE_SIZE pages via the backend `skip` offset and appends
@@ -1609,16 +1400,18 @@ export function GitLogTab() {
   // pending request's finally still clears its loading flag (no latch).
   const filesGenRef = useRef(0)
 
-  // Close the create-branch / reset dialogs the instant the ACTIVE folder
-  // changes (keyed on the live id, not the deferred `folder`) so a dialog opened
-  // under the previous folder can't create-branch / reset against the new one
-  // after the deferred render settles. The branch/author selection is NOT reset
-  // here — it's restored per folder during render (see the selectionFolder
-  // adjustment above), which lands each folder's saved filter before its first
-  // fetch, so the previous folder's filter never leaks into the new query.
+  // Close the create-branch / reset / manage-remotes dialogs the instant the
+  // ACTIVE folder changes (keyed on the live id, not the deferred `folder`) so a
+  // dialog opened under the previous folder can't create-branch / reset / rewrite
+  // remotes against the new one after the deferred render settles. The
+  // branch/author selection is NOT reset here — it's restored per folder during
+  // render (see the selectionFolder adjustment above), which lands each folder's
+  // saved filter before its first fetch, so the previous folder's filter never
+  // leaks into the new query.
   useEffect(() => {
     setNewBranchTarget(null)
     setResetTarget(null)
+    setManageRemotesOpen(false)
   }, [activeFolder?.id])
 
   const pushStatusLabels = useMemo(
@@ -2246,6 +2039,29 @@ export function GitLogTab() {
     return <AuxPanelNoFolderEmpty />
   }
 
+  // The header — and so its actions menu — is live in every branch below, so the
+  // dialog that menu opens has to mount alongside each of them. Saving rewrites
+  // the repo's remotes, which the log's push status is computed against, so it
+  // runs the same refresh as an incoming git event.
+  //
+  // Keyed by path so a folder switch REMOUNTS it: unlike the branch chip (one
+  // instance per conversation tile, pinned to that tile's folder) this tab
+  // follows the active folder, and the dialog holds its remote drafts in its own
+  // state. Merely closing it on a switch — which the effect above does — would
+  // leave repo A's drafts in a component whose `folderPath` is now B, and a
+  // reopen re-reads the list asynchronously, so a Save landing before that read
+  // resolves would delete/rewrite B's remotes from A's drafts. Remounting drops
+  // the drafts with the folder they belong to.
+  const remoteManageDialog = (
+    <RemoteManageDialog
+      key={folder.path}
+      open={manageRemotesOpen}
+      onOpenChange={setManageRemotesOpen}
+      folderPath={folder.path}
+      onSaved={() => onGitEventRef.current()}
+    />
+  )
+
   // `folderStale`: skeleton over the previous folder's commits while the deferred
   // render catches up to the switch (see the declaration above).
   if (loading || folderStale) {
@@ -2267,6 +2083,7 @@ export function GitLogTab() {
           isMobile={isMobile}
           gitActions={gitActions}
           gitActionsStale={folderStale}
+          onManageRemotes={() => setManageRemotesOpen(true)}
         />
         <ScrollArea className="min-h-0 flex-1 px-3 py-3">
           <div className="space-y-4">
@@ -2285,6 +2102,7 @@ export function GitLogTab() {
         {/* The header (and its actions menu) is live while the log loads, so
             its dialogs have to mount here too. */}
         {gitActions.dialogs}
+        {remoteManageDialog}
       </div>
     )
   }
@@ -2333,6 +2151,7 @@ export function GitLogTab() {
         isMobile={isMobile}
         gitActions={gitActions}
         gitActionsStale={folderStale}
+        onManageRemotes={() => setManageRemotesOpen(true)}
       />
       {error ? (
         <ScrollArea className="min-h-0 flex-1 px-3 py-3">
@@ -2888,6 +2707,7 @@ export function GitLogTab() {
       </Dialog>
 
       {gitActions.dialogs}
+      {remoteManageDialog}
     </div>
   )
 }

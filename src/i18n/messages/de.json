@@ -1887,6 +1887,7 @@
       "fetchRemoteBranches": "Remote-Branches fetchen",
       "openCommitWindow": "Code committen...",
       "pushCode": "Hochladen...",
+      "pushBranch": "Hochladen",
       "newBranch": "Neuer Branch...",
       "newWorktree": "Neuer Worktree...",
       "stashChanges": "Änderungen stashen...",
@@ -2190,9 +2191,7 @@
         "kindFile": "Datei"
       },
       "quickCommit": {
-        "placeholder": "Commit-Nachricht (Enter zum Committen)",
-        "commit": "Committen",
-        "openWindow": "Commit-Fenster öffnen"
+        "placeholder": "Commit-Nachricht (Enter zum Committen)"
       }
     },
     "tabContext": {

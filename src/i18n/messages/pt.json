@@ -1887,6 +1887,7 @@
       "fetchRemoteBranches": "Buscar branches remotas",
       "openCommitWindow": "Commit de código...",
       "pushCode": "Enviar...",
+      "pushBranch": "Enviar",
       "newBranch": "Nova branch...",
       "newWorktree": "Novo worktree...",
       "stashChanges": "Guardar alterações...",
@@ -2190,9 +2191,7 @@
         "kindFile": "arquivo"
       },
       "quickCommit": {
-        "placeholder": "Mensagem do commit (Enter para confirmar)",
-        "commit": "Confirmar",
-        "openWindow": "Abrir janela de commit"
+        "placeholder": "Mensagem do commit (Enter para confirmar)"
       }
     },
     "tabContext": {

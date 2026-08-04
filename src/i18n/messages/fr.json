@@ -1887,6 +1887,7 @@
       "fetchRemoteBranches": "Récupérer les branches distantes",
       "openCommitWindow": "Commit du code...",
       "pushCode": "Pousser...",
+      "pushBranch": "Pousser",
       "newBranch": "Nouvelle branche...",
       "newWorktree": "Nouveau worktree...",
       "stashChanges": "Remiser les changements...",
@@ -2190,9 +2191,7 @@
         "kindFile": "fichier"
       },
       "quickCommit": {
-        "placeholder": "Message du commit (Entrée pour valider)",
-        "commit": "Valider",
-        "openWindow": "Ouvrir la fenêtre de commit"
+        "placeholder": "Message du commit (Entrée pour valider)"
       }
     },
     "tabContext": {

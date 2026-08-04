@@ -65,7 +65,8 @@ export interface GitQuickActions {
    */
   reportConflict: (conflict: GitConflictInfo) => void
   openCommitWindow: () => void
-  openPushWindow: () => void
+  /** `branch` preselects the push target; omitted means the checked-out one. */
+  openPushWindow: (branch?: string) => void
   /** Open the in-place "stash changes" dialog. */
   openStashDialog: () => void
   /** Open the unstash workspace window. */
@@ -259,9 +260,15 @@ export function useGitQuickActions({
     openWindow(openCommitWindow, t("toasts.openCommitWindowFailed"))
   }, [openWindow, t])
 
-  const openPush = useCallback(() => {
-    openWindow(openPushWindow, t("toasts.openPushWindowFailed"))
-  }, [openWindow, t])
+  const openPush = useCallback(
+    (branch?: string) => {
+      openWindow(
+        (id) => openPushWindow(id, branch),
+        t("toasts.openPushWindowFailed")
+      )
+    },
+    [openWindow, t]
+  )
 
   const openUnstash = useCallback(() => {
     openWindow(openStashWindow, t("toasts.openStashWindowFailed"))
