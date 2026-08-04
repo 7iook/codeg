@@ -354,10 +354,12 @@ pub async fn prune_orphaned_facts(conn: &DatabaseConnection) -> Result<u32, DbEr
 /// everything the stamp knows about them.
 ///
 /// This is the hook the import path uses: re-importing an already-imported
-/// session deliberately does NOT bump `conversation.updated_at`
-/// (`refresh_auto_title` avoids it so a re-import can't reorder the
-/// recency-sorted sidebar), so a transcript that grew in the agent's own CLI
-/// between imports would otherwise stay invisible to the usage stamp.
+/// session is not guaranteed to bump `conversation.updated_at` — a title
+/// refresh deliberately never does (so a re-import can't reorder the
+/// recency-sorted sidebar), and an activity refresh only does when the parsed
+/// transcript time is strictly newer than what the row already carries. A
+/// transcript that grew in the agent's own CLI between imports would otherwise
+/// stay invisible to the usage stamp.
 ///
 /// Two things are deliberately preserved rather than deleted:
 ///   * the **facts**, so the dashboard keeps showing the old numbers until the
