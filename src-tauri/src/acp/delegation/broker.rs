@@ -1937,23 +1937,29 @@ enum StatusClass {
 /// conversation id) agree on what "owned" means. Comparing the connection id
 /// alone made every user-side call resolve to `Unknown`, because that synthetic
 /// marker never matches a spawned task's real connection.
-/// `task_parent_connection_id` is the connection recorded on the task itself
-/// (running set or completed cache); the conversation id is read from the
-/// SESSION registry, which is the only layer that persists it (`SessionEntry`).
-/// A task with no session entry can only be matched by connection id.
+///
+/// Deliberately a PURE function over already-snapshotted facts rather than a
+/// reader of `PendingInner`: every call site holds a borrow of some sub-map of
+/// `inner` (or needs `&mut inner` right after, as cancel does for
+/// `drain_and_record_canceled`), so a helper that re-borrowed `inner` could not
+/// be shared — which is exactly why three sites ended up inlining the rule.
+///
+/// `session_parent_conversation_id` is read from the SESSION registry, the only
+/// layer that persists a conversation id (`SessionEntry`); `None` means no
+/// session entry, so the caller can only ever be matched by connection id.
+/// `record_parent_connection_id` is the connection recorded on whichever record
+/// the call site addresses — the task itself (running set / completed cache) for
+/// status and cancel, the session's run lease for continue and close. That
+/// distinction is intentional and stays the caller's choice.
 fn owned_by(
-    inner: &PendingInner,
-    task_id: &str,
-    task_parent_connection_id: &str,
+    session_parent_conversation_id: Option<i32>,
+    record_parent_connection_id: &str,
     caller_parent_conversation_id: Option<i32>,
     caller_parent_connection_id: &str,
 ) -> bool {
     match caller_parent_conversation_id {
-        Some(pc) => inner
-            .sessions
-            .get(task_id)
-            .is_some_and(|s| s.parent_conversation_id == pc),
-        None => task_parent_connection_id == caller_parent_connection_id,
+        Some(pc) => session_parent_conversation_id == Some(pc),
+        None => record_parent_connection_id == caller_parent_connection_id,
     }
 }
 
@@ -1969,10 +1975,13 @@ fn classify_locked(
     parent_conversation_id: Option<i32>,
     task_id: &str,
 ) -> StatusClass {
+    let session_conv = inner
+        .sessions
+        .get(task_id)
+        .map(|s| s.parent_conversation_id);
     if let Some(c) = inner.completed.get(task_id) {
         if owned_by(
-            inner,
-            task_id,
+            session_conv,
             &c.parent_connection_id,
             parent_conversation_id,
             parent_connection_id,
@@ -1984,8 +1993,7 @@ fn classify_locked(
     match inner.running.get(task_id) {
         Some(r)
             if owned_by(
-                inner,
-                task_id,
+                session_conv,
                 &r.parent_connection_id,
                 parent_conversation_id,
                 parent_connection_id,
@@ -4959,8 +4967,8 @@ impl DelegationBroker {
         let drained = {
             let mut inner = self.pending.inner.lock().await;
             // Ownership is resolved from immutable snapshots first: `owned_by`
-            // reads the SESSION map, so holding a borrow into `completed` /
-            // `running` across the call would alias `inner`.
+            // is pure over the snapshotted session conversation id, so no borrow
+            // of `inner` is held into the `&mut inner` drain below.
             let session_conv = inner
                 .sessions
                 .get(task_id)
@@ -4970,11 +4978,12 @@ impl DelegationBroker {
                 .get(task_id)
                 .map(|c| c.parent_connection_id.clone());
             if let Some(conn) = completed_conn {
-                let owned = match parent_conversation_id {
-                    Some(pc) => session_conv == Some(pc),
-                    None => conn == parent_connection_id,
-                };
-                if owned {
+                if owned_by(
+                    session_conv,
+                    &conn,
+                    parent_conversation_id,
+                    parent_connection_id,
+                ) {
                     let c = inner.completed.get(task_id).expect("just checked");
                     return completed_report(task_id, c);
                 }
@@ -4986,11 +4995,12 @@ impl DelegationBroker {
                 .map(|r| r.parent_connection_id.clone());
             match running_conn {
                 Some(conn) => {
-                    let owned = match parent_conversation_id {
-                        Some(pc) => session_conv == Some(pc),
-                        None => conn == parent_connection_id,
-                    };
-                    if !owned {
+                    if !owned_by(
+                        session_conv,
+                        &conn,
+                        parent_conversation_id,
+                        parent_connection_id,
+                    ) {
                         return unknown_report(task_id);
                     }
                     drain_and_record_canceled(
@@ -5125,14 +5135,16 @@ impl DelegationBroker {
                 }
                 return unknown_report(task_id);
             };
-            // Ownership (D5): prefer the persistent parent conversation id;
-            // fall back to the connection id only when the caller has no
-            // conversation context. A mismatch never leaks existence.
-            let owned = match parent_conversation_id {
-                Some(pc) => s.parent_conversation_id == pc,
-                None => s.parent_connection_id == parent_connection_id,
-            };
-            if !owned {
+            // Ownership (D5) via the shared [`owned_by`] rule. The connection
+            // compared here is the session's run lease (refreshed on dispatch
+            // below), not a task record's — a reconnected parent continues
+            // through the conversation id instead.
+            if !owned_by(
+                Some(s.parent_conversation_id),
+                &s.parent_connection_id,
+                parent_conversation_id,
+                parent_connection_id,
+            ) {
                 return unknown_report(task_id);
             }
             if s.released {
@@ -5652,11 +5664,14 @@ impl DelegationBroker {
                 return unknown_report(task_id);
             };
             let (s_parent_conv, s_parent_conn, s_released, s_status, s_child_conv, s_agent) = snap;
-            let owned = match parent_conversation_id {
-                Some(pc) => s_parent_conv == pc,
-                None => s_parent_conn == parent_connection_id,
-            };
-            if !owned {
+            // Ownership (D5) via the shared [`owned_by`] rule; like `continue`,
+            // the fallback compares the session's run lease.
+            if !owned_by(
+                Some(s_parent_conv),
+                &s_parent_conn,
+                parent_conversation_id,
+                parent_connection_id,
+            ) {
                 return unknown_report(task_id);
             }
             if s_released {
