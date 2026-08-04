@@ -3114,6 +3114,9 @@
       },
       "backgroundTasks": {
         "running": "{count} 个后台任务运行中",
+        "runningAgents": "{count} 个后台子智能体运行中",
+        "runningShells": "{count} 个后台命令运行中",
+        "runningBoth": "{agents} 个后台子智能体、{shells} 个后台命令运行中",
         "settling": "正在同步后台结果…",
         "settledFallback": "后台任务已结束（{status}）",
         "cardRunning": "后台运行中",

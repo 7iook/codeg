@@ -1615,6 +1615,15 @@ export type AcpEvent =
       session_id: string
       turns?: MessageTurn[]
       outstanding: number
+      /** The `agent` slice of `outstanding` — Claude's own async sub-agents.
+       *  Absent when zero (and on a backend predating the split), which reads
+       *  the same way: no sub-agents of this kind pending. Consumers that
+       *  ignore both split fields still read `outstanding`'s unchanged
+       *  aggregate. */
+      outstanding_agents?: number
+      /** The `shell` slice of `outstanding` — background shell tasks. Same
+       *  absent-means-zero treatment as `outstanding_agents`. */
+      outstanding_shells?: number
       settled?: BackgroundSettledInfo[]
       watermark: number
     }
@@ -1964,6 +1973,13 @@ export interface LiveSessionSnapshot {
    *  mid-episode recover the pending count the one-shot `background_activity`
    *  events won't replay. Absent / omitted when zero. */
   background_outstanding?: number
+  /** The `agent` / `shell` split of `background_outstanding`, so a client
+   *  attaching mid-episode can name the kinds instead of showing the
+   *  unreadable aggregate. Each is absent when zero (and both are absent on a
+   *  backend predating the split); the aggregate above keeps its original
+   *  meaning either way. */
+  background_outstanding_agents?: number
+  background_outstanding_shells?: number
   /** Whether this agent has the `check_user_feedback` tool (fixed at launch).
    *  The frontend gates the feedback bar on this — the agent's real capability —
    *  not the (possibly later-toggled) global setting. Absent → `false`. */

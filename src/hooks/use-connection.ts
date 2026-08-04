@@ -91,6 +91,12 @@ export interface UseConnectionReturn {
    *  backend watcher). Drives the "background tasks running" chip; non-zero
    *  also exempts the connection from the idle sweeps. */
   backgroundOutstanding: number
+  /** The `agent` / `shell` split of `backgroundOutstanding`, letting the chip
+   *  name which kinds its number counted. Both `0` alongside a non-zero
+   *  aggregate means the split is unavailable (pre-split backend), not "none of
+   *  either" — see `resolveBackgroundTaskKinds`. */
+  backgroundOutstandingAgents: number
+  backgroundOutstandingShells: number
   /** Epoch ms while a settled background task's follow-up reply is still being
    *  generated/surfaced (cleared when overlay turns arrive). Drives the chip's
    *  transient "syncing results" state so the gap after the running count
@@ -260,6 +266,10 @@ export function useConnection(contextKey: string): UseConnectionReturn {
   const configStaleDismissed = connection?.configStaleDismissed ?? false
   const isDelegationChild = connection?.isDelegationChild ?? false
   const backgroundOutstanding = connection?.backgroundOutstanding ?? 0
+  const backgroundOutstandingAgents =
+    connection?.backgroundOutstandingAgents ?? 0
+  const backgroundOutstandingShells =
+    connection?.backgroundOutstandingShells ?? 0
   const backgroundSettleSyncingSince =
     connection?.backgroundSettleSyncingSince ?? null
 
@@ -381,6 +391,8 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       configStaleDismissed,
       isDelegationChild,
       backgroundOutstanding,
+      backgroundOutstandingAgents,
+      backgroundOutstandingShells,
       backgroundSettleSyncingSince,
       connect,
       disconnect,
@@ -424,6 +436,8 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       configStaleDismissed,
       isDelegationChild,
       backgroundOutstanding,
+      backgroundOutstandingAgents,
+      backgroundOutstandingShells,
       backgroundSettleSyncingSince,
       connect,
       disconnect,

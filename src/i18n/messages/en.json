@@ -3114,6 +3114,9 @@
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# background task running} other {# background tasks running}}",
+        "runningAgents": "{count, plural, one {# background sub-agent running} other {# background sub-agents running}}",
+        "runningShells": "{count, plural, one {# background shell running} other {# background shells running}}",
+        "runningBoth": "{agents, plural, one {# background sub-agent} other {# background sub-agents}} and {shells, plural, one {# shell} other {# shells}} running",
         "settling": "Syncing background results…",
         "settledFallback": "Background task finished ({status})",
         "cardRunning": "Running in background",

@@ -3114,6 +3114,9 @@
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# Hintergrundaufgabe läuft} other {# Hintergrundaufgaben laufen}}",
+        "runningAgents": "{count, plural, one {# Hintergrund-Subagent läuft} other {# Hintergrund-Subagenten laufen}}",
+        "runningShells": "{count, plural, one {# Hintergrundbefehl läuft} other {# Hintergrundbefehle laufen}}",
+        "runningBoth": "{agents, plural, one {# Hintergrund-Subagent} other {# Hintergrund-Subagenten}} und {shells, plural, one {# Befehl} other {# Befehle}} laufen",
         "settling": "Hintergrundergebnisse werden synchronisiert…",
         "settledFallback": "Hintergrundaufgabe beendet ({status})",
         "cardRunning": "Läuft im Hintergrund",
