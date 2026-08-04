@@ -39,6 +39,17 @@ vi.mock("@/stores/conversation-runtime-store", () => ({
     selector({ conversationIdByExternalId: externalIdMap }),
 }))
 
+// `LiveObservabilityProviders` now also mounts the actions provider, which
+// registers a reconnect backstop. Stubbed here because resolving it for real
+// pulls in the web transport module — an environment detail this file is not
+// about. The reconnect behaviour itself is covered in the actions provider's own
+// test, which drives this callback deliberately.
+vi.mock("@/lib/platform", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/platform")>("@/lib/platform")
+  return { ...actual, onTransportReconnect: () => () => {} }
+})
+
 function dispatch(envelope: EventEnvelope) {
   if (capturedHandlers.length === 0) {
     throw new Error("no provider handler registered")

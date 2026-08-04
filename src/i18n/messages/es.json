@@ -3127,7 +3127,17 @@
         "detailError": "No se pudo cargar el último mensaje.",
         "detailRetry": "Reintentar",
         "detailNothing": "Aún no hay mensajes que mostrar.",
-        "detailOpenInTab": "Abrir la sesión completa"
+        "detailOpenInTab": "Abrir la sesión completa",
+        "actionsLabel": "Acciones del subagente",
+        "cancel": "Detener este subagente",
+        "cancelPending": "Deteniendo…",
+        "cancelFailed": "No se pudo enviar la solicitud de detención. Revisa tu conexión e inténtalo de nuevo.",
+        "confirmCancelTitle": "¿Detener este subagente?",
+        "confirmCancelDescription": "Se detiene donde está y se conserva el trabajo hecho hasta ahora. Puedes volver a lanzarlo después.",
+        "confirmCancelKeepRunning": "Seguir ejecutando",
+        "confirmCancelConfirm": "Detenerlo",
+        "readOnly": "Solo lectura",
+        "readOnlyTooltip": "Los subagentes integrados se ejecutan dentro del propio turno del agente anfitrión, así que codeg solo puede observarlos: no hay nada que detener ni que abrir por separado."
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# tarea en segundo plano en ejecución} other {# tareas en segundo plano en ejecución}}",

@@ -3127,7 +3127,17 @@
         "detailError": "Could not load the latest message.",
         "detailRetry": "Retry",
         "detailNothing": "No messages to show yet.",
-        "detailOpenInTab": "Open full session"
+        "detailOpenInTab": "Open full session",
+        "actionsLabel": "Sub-agent actions",
+        "cancel": "Stop this sub-agent",
+        "cancelPending": "Stopping…",
+        "cancelFailed": "Could not send the stop request. Check your connection and try again.",
+        "confirmCancelTitle": "Stop this sub-agent?",
+        "confirmCancelDescription": "It stops where it is and its work so far is kept. You can dispatch it again afterwards.",
+        "confirmCancelKeepRunning": "Keep running",
+        "confirmCancelConfirm": "Stop it",
+        "readOnly": "View only",
+        "readOnlyTooltip": "Built-in sub-agents run inside the host agent's own turn, so codeg can only observe them — there is nothing to stop or open separately."
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# background task running} other {# background tasks running}}",

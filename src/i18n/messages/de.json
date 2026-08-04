@@ -3127,7 +3127,17 @@
         "detailError": "Die neueste Nachricht konnte nicht geladen werden.",
         "detailRetry": "Erneut versuchen",
         "detailNothing": "Noch keine Nachrichten vorhanden.",
-        "detailOpenInTab": "Vollständige Sitzung öffnen"
+        "detailOpenInTab": "Vollständige Sitzung öffnen",
+        "actionsLabel": "Aktionen für Subagenten",
+        "cancel": "Diesen Subagenten stoppen",
+        "cancelPending": "Wird gestoppt…",
+        "cancelFailed": "Die Stopp-Anfrage konnte nicht gesendet werden. Prüfe die Verbindung und versuche es erneut.",
+        "confirmCancelTitle": "Diesen Subagenten stoppen?",
+        "confirmCancelDescription": "Er hält an der aktuellen Stelle an, die bisherige Arbeit bleibt erhalten. Du kannst ihn danach erneut starten.",
+        "confirmCancelKeepRunning": "Weiterlaufen lassen",
+        "confirmCancelConfirm": "Stoppen",
+        "readOnly": "Nur ansehen",
+        "readOnlyTooltip": "Integrierte Subagenten laufen innerhalb des eigenen Zugs des Host-Agenten, daher kann codeg sie nur beobachten – es gibt nichts zu stoppen oder separat zu öffnen."
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# Hintergrundaufgabe läuft} other {# Hintergrundaufgaben laufen}}",

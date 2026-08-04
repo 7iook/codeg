@@ -34,6 +34,15 @@ vi.mock("@/stores/conversation-runtime-store", () => ({
     selector({ conversationIdByExternalId: externalIdMap }),
 }))
 
+// The actions provider inside `LiveObservabilityProviders` registers a reconnect
+// backstop; stubbing it keeps this file off the web transport module. Its real
+// behaviour lives in `observatory-actions-context.test.tsx`.
+vi.mock("@/lib/platform", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/platform")>("@/lib/platform")
+  return { ...actual, onTransportReconnect: () => () => {} }
+})
+
 const mockGetFolderConversation = vi.fn()
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api")

@@ -3127,7 +3127,17 @@
         "detailError": "최신 메시지를 불러올 수 없습니다.",
         "detailRetry": "다시 시도",
         "detailNothing": "표시할 메시지가 아직 없습니다.",
-        "detailOpenInTab": "전체 세션 열기"
+        "detailOpenInTab": "전체 세션 열기",
+        "actionsLabel": "서브 에이전트 작업",
+        "cancel": "이 서브 에이전트 중지",
+        "cancelPending": "중지 중…",
+        "cancelFailed": "중지 요청을 보내지 못했습니다. 연결을 확인한 뒤 다시 시도하세요.",
+        "confirmCancelTitle": "이 서브 에이전트를 중지할까요?",
+        "confirmCancelDescription": "현재 지점에서 멈추고 지금까지의 작업은 유지됩니다. 나중에 다시 파견할 수 있습니다.",
+        "confirmCancelKeepRunning": "계속 실행",
+        "confirmCancelConfirm": "중지하기",
+        "readOnly": "보기 전용",
+        "readOnlyTooltip": "내장 서브 에이전트는 호스트 에이전트 자신의 턴 안에서 실행되므로 codeg은 관찰만 할 수 있습니다. 중지하거나 따로 열 대상이 없습니다."
       },
       "backgroundTasks": {
         "running": "백그라운드 작업 {count}개 실행 중",

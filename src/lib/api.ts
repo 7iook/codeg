@@ -4091,7 +4091,7 @@ export async function getContinuationAvailability(
  * panel keeps deriving lifecycle from the `delegation_completed` /
  * `delegation_session_update` event stream, and uses this response only to
  * clear the in-flight marker. */
-export async function cancelDelegation( // gate:allow-unwired consumer is task 6.3 (row actions), which needs 6.2's row rendering first; wiring gate 6.6 + the e2e in 7.1 are the release blockers
+export async function cancelDelegation(
   childConversationId: number
 ): Promise<DelegationTaskReport> {
   return getTransport().call("cancel_delegation", {
@@ -4104,7 +4104,7 @@ export async function cancelDelegation( // gate:allow-unwired consumer is task 6
  * a terminal event can be missed: a cancel that answered terminal while no
  * matching event arrived, and a transport reconnect that left rows still shown
  * as running. Never long-polls. */
-export async function getDelegationTaskStatus( // gate:allow-unwired consumer is task 6.3 (reconciliation triggers R7.11-R7.13), blocked on 6.2's row rendering; wiring gate 6.6 + the e2e in 7.1 are the release blockers
+export async function getDelegationTaskStatus(
   childConversationId: number
 ): Promise<DelegationTaskReport> {
   return getTransport().call("get_delegation_task_status", {

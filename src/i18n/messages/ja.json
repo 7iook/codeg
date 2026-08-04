@@ -3127,7 +3127,17 @@
         "detailError": "最新メッセージを読み込めませんでした。",
         "detailRetry": "再試行",
         "detailNothing": "表示できるメッセージはまだありません。",
-        "detailOpenInTab": "セッション全体を開く"
+        "detailOpenInTab": "セッション全体を開く",
+        "actionsLabel": "サブエージェントの操作",
+        "cancel": "このサブエージェントを停止",
+        "cancelPending": "停止中…",
+        "cancelFailed": "停止リクエストを送信できませんでした。接続を確認して再試行してください。",
+        "confirmCancelTitle": "このサブエージェントを停止しますか？",
+        "confirmCancelDescription": "その場で停止し、これまでの作業は保持されます。あとで再度派遣できます。",
+        "confirmCancelKeepRunning": "実行を続ける",
+        "confirmCancelConfirm": "停止する",
+        "readOnly": "閲覧のみ",
+        "readOnlyTooltip": "組み込みサブエージェントはホストエージェント自身のターン内で実行されるため、codeg は観察することしかできません。停止したり個別に開いたりする対象はありません。"
       },
       "backgroundTasks": {
         "running": "{count} 件のバックグラウンドタスクを実行中",

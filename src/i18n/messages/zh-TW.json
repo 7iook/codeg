@@ -3127,7 +3127,17 @@
         "detailError": "無法載入最新訊息。",
         "detailRetry": "重試",
         "detailNothing": "目前沒有可顯示的訊息。",
-        "detailOpenInTab": "開啟完整工作階段"
+        "detailOpenInTab": "開啟完整工作階段",
+        "actionsLabel": "子智慧代理操作",
+        "cancel": "停止這個子智慧代理",
+        "cancelPending": "正在停止…",
+        "cancelFailed": "停止請求未能送出。請檢查連線後重試。",
+        "confirmCancelTitle": "停止這個子智慧代理？",
+        "confirmCancelDescription": "它會就地停下，目前已完成的工作會保留。之後你可以重新派發它。",
+        "confirmCancelKeepRunning": "繼續執行",
+        "confirmCancelConfirm": "停止它",
+        "readOnly": "僅可檢視",
+        "readOnlyTooltip": "內建子智慧代理執行在宿主代理自己的回合內，codeg 只能觀察它們——沒有可停止或單獨開啟的對象。"
       },
       "backgroundTasks": {
         "running": "{count} 個背景任務執行中",

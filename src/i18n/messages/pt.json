@@ -3127,7 +3127,17 @@
         "detailError": "Não foi possível carregar a mensagem mais recente.",
         "detailRetry": "Tentar novamente",
         "detailNothing": "Ainda não há mensagens para mostrar.",
-        "detailOpenInTab": "Abrir a sessão completa"
+        "detailOpenInTab": "Abrir a sessão completa",
+        "actionsLabel": "Ações do subagente",
+        "cancel": "Parar este subagente",
+        "cancelPending": "Parando…",
+        "cancelFailed": "Não foi possível enviar o pedido de parada. Verifique a conexão e tente novamente.",
+        "confirmCancelTitle": "Parar este subagente?",
+        "confirmCancelDescription": "Ele para onde está e o trabalho feito até agora é mantido. Você pode despachá-lo novamente depois.",
+        "confirmCancelKeepRunning": "Continuar executando",
+        "confirmCancelConfirm": "Parar",
+        "readOnly": "Somente visualização",
+        "readOnlyTooltip": "Subagentes integrados rodam dentro do próprio turno do agente anfitrião, então o codeg só pode observá-los — não há nada para parar ou abrir separadamente."
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# tarefa em segundo plano em execução} other {# tarefas em segundo plano em execução}}",

@@ -3127,7 +3127,17 @@
         "detailError": "无法加载最新消息。",
         "detailRetry": "重试",
         "detailNothing": "暂无可显示的消息。",
-        "detailOpenInTab": "打开完整会话"
+        "detailOpenInTab": "打开完整会话",
+        "actionsLabel": "子智能体操作",
+        "cancel": "停止这个子智能体",
+        "cancelPending": "正在停止…",
+        "cancelFailed": "停止请求没能发出。请检查连接后重试。",
+        "confirmCancelTitle": "停止这个子智能体？",
+        "confirmCancelDescription": "它会就地停下，目前已完成的工作会保留。之后你可以重新派发它。",
+        "confirmCancelKeepRunning": "继续运行",
+        "confirmCancelConfirm": "停止它",
+        "readOnly": "仅可查看",
+        "readOnlyTooltip": "内置子智能体运行在宿主智能体自己的回合内，codeg 只能观察它们——没有可停止或单独打开的对象。"
       },
       "backgroundTasks": {
         "running": "{count} 个后台任务运行中",

@@ -31,26 +31,47 @@ import {
   useReducer,
   useRef,
   useState,
+  type ReactNode,
 } from "react"
 import {
+  Ban,
   Bot,
   ChevronRight,
+  Eye,
   ExternalLink,
   Info,
   Loader2,
   RotateCw,
+  TriangleAlert,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
 
 import { AgentIcon } from "@/components/agent-icon"
 import { StatusBadge } from "@/components/message/delegation-status-badge"
 import { SubagentTranscript } from "@/components/message/subagent-transcript"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/instant-collapsible"
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu"
+import { useObservatoryActions } from "@/contexts/observatory-actions-context"
 import { getFolderConversation } from "@/lib/api"
 import { getAgentLabel } from "@/lib/custom-agents"
 import type { SubagentFrame } from "@/lib/subagent-transcript"
@@ -361,6 +382,156 @@ function BuiltinDetail({
   )
 }
 
+/**
+ * Open the delegated child in a full tab (R7.3).
+ *
+ * `openTab` needs a folder id, and the row model does not carry one — only the
+ * child conversation id. The folder is read on demand from the SAME
+ * conversation-detail call the summary uses, rather than by widening the row
+ * model or adding a backend field: the action is rare (one deliberate click) and
+ * the read is already warm whenever the row was expanded first.
+ *
+ * This mirrors `SubAgentSessionDialog`'s Open-in-Tab, which resolves the folder
+ * from `detail.summary` for exactly the same reason.
+ */
+function useOpenChildInTab() {
+  const { openTab } = useTabActions()
+  return useCallback(
+    async (row: ObservedSubAgentRow) => {
+      const childConversationId = row.childConversationId
+      if (childConversationId == null) return
+      try {
+        const detail = await getFolderConversation(childConversationId)
+        const folderId = detail?.summary.folder_id ?? null
+        const agentType: AgentType | null =
+          detail?.summary.agent_type ?? row.agentType
+        if (folderId == null || agentType == null) return
+        openTab(folderId, childConversationId, agentType)
+      } catch {
+        // Nothing is opened and nothing is claimed to have opened. Left silent
+        // deliberately: the row itself is unchanged and still reachable, the
+        // user's next click retries, and a toast for a failed navigation would
+        // be louder than the failure.
+      }
+    },
+    [openTab]
+  )
+}
+
+/**
+ * The row's action menu (R7.5) plus the confirmation gate for cancel.
+ *
+ * Menu contents are derived from the row's capability flags, and an unavailable
+ * action is ABSENT rather than rendered disabled (R7.4-R7.5). That is not a
+ * style preference: `disabled` means "temporarily unavailable", so users retry
+ * it — and "它们是点不动的" (they can't be clicked) is the complaint this whole
+ * feature exists to answer. A built-in SUB's inability to be cancelled is
+ * permanent and physical, so the menu simply does not carry the item and the row
+ * states its read-only nature positively instead.
+ *
+ * Cancel is confirmed. The spec leaves this to implementation, and the case for
+ * it is the surface: the trigger is a context menu over a dense list of similar
+ * rows, so a mis-aimed click is easy, and the cost is the sub-agent's in-flight
+ * turn (tokens already spent, partial work abandoned). Re-dispatching is
+ * possible but not free. The repo's own precedent agrees — `CancelScopeDialog`
+ * confirms the same class of action for the parent connection.
+ */
+function ObservatoryRowMenu({
+  row,
+  children,
+}: {
+  row: ObservedSubAgentRow
+  children: ReactNode
+}) {
+  const t = useTranslations("Folder.chat.subAgentObservatory")
+  const { cancelPending, requestCancel } = useObservatoryActions()
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const openInTab = useOpenChildInTab()
+
+  const childConversationId = row.childConversationId
+  const cancelInFlight =
+    childConversationId != null && cancelPending.has(childConversationId)
+  // The provider guards a second request too, but the menu must not INVITE the
+  // click: a cancel that is accepted visually and dropped silently reads as an
+  // unresponsive UI, which is the same complaint in a new costume.
+  const showCancel = row.canCancel && !cancelInFlight
+  const showOpen = row.canOpenInTab && childConversationId != null
+
+  return (
+    <>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+        <ContextMenuContent
+          data-testid="observatory-row-menu"
+          aria-label={t("actionsLabel")}
+        >
+          {showCancel && (
+            <ContextMenuItem
+              data-testid="observatory-action-cancel"
+              variant="destructive"
+              // Let the menu close and restore focus before the dialog mounts;
+              // opening synchronously races focus restoration and the dialog
+              // dismisses itself. Same reason `automations-page` defers its
+              // delete dialog.
+              onSelect={() => setTimeout(() => setConfirmOpen(true), 0)}
+            >
+              <Ban className="size-3.5" aria-hidden="true" />
+              {t("cancel")}
+            </ContextMenuItem>
+          )}
+          {showOpen && (
+            <ContextMenuItem
+              data-testid="observatory-action-open"
+              onSelect={() => {
+                void openInTab(row)
+              }}
+            >
+              <ExternalLink className="size-3.5" aria-hidden="true" />
+              {t("detailOpenInTab")}
+            </ContextMenuItem>
+          )}
+          {/* A row with no available action gets no items. The absence IS the
+              capability disclosure (R7.5), and the row's own read-only badge
+              states the boundary in positive words (R7.4) — so there is nothing
+              left for an inert menu entry to add, and an entry that looks
+              clickable but is not would recreate exactly the dead-control
+              feeling this requirement removes. */}
+        </ContextMenuContent>
+      </ContextMenu>
+      <AlertDialog
+        open={confirmOpen}
+        // Covers Escape and the overlay press as well as the decline button:
+        // every dismissal path must cancel nothing.
+        onOpenChange={setConfirmOpen}
+      >
+        <AlertDialogContent data-testid="observatory-cancel-confirm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("confirmCancelTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("confirmCancelDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="observatory-cancel-confirm-dismiss">
+              {t("confirmCancelKeepRunning")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="observatory-cancel-confirm-accept"
+              variant="destructive"
+              onClick={() => {
+                if (childConversationId == null) return
+                requestCancel(childConversationId)
+              }}
+            >
+              {t("confirmCancelConfirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  )
+}
+
 function ObservatoryRow({
   row,
   selected,
@@ -377,72 +548,144 @@ function ObservatoryRow({
   getFrames: SubAgentObservatoryListProps["getFrames"]
 }) {
   const t = useTranslations("Folder.chat.subAgentObservatory")
+  const { cancelPending, cancelFailed } = useObservatoryActions()
+
+  const childConversationId = row.childConversationId
+  const cancelInFlight =
+    childConversationId != null && cancelPending.has(childConversationId)
+  const cancelRequestFailed =
+    childConversationId != null && cancelFailed.has(childConversationId)
+  // Read-only is a property of the ROW's capabilities, not of its lifecycle: a
+  // finished delegation can still be opened, so it is not read-only. Only a
+  // built-in SUB — which can neither be stopped nor opened, ever — is.
+  const readOnly = !row.canCancel && !row.canOpenInTab
 
   return (
     <div className="rounded-lg border border-border/60">
-      <button
-        type="button"
-        data-testid="observatory-row"
-        onClick={onSelect}
-        aria-expanded={selected}
-        className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-muted/60"
-      >
-        <div className="min-w-0 flex-1 space-y-1">
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border bg-background text-foreground">
-              {row.agentType ? (
-                <AgentIcon agentType={row.agentType} className="h-3.5 w-3.5" />
-              ) : (
-                <Bot className="h-3 w-3 text-muted-foreground" aria-hidden />
-              )}
-            </span>
-            <span className="min-w-0 truncate text-xs font-semibold text-foreground">
-              {row.agentType ? getAgentLabel(row.agentType) : t("unknownAgent")}
-            </span>
-            {row.taskId && (
-              <span
-                className="shrink-0 font-mono text-[11px] text-muted-foreground"
-                title={row.taskId}
-              >
-                #{row.taskId.slice(0, 8)}
+      <ObservatoryRowMenu row={row}>
+        <button
+          type="button"
+          data-testid="observatory-row"
+          onClick={onSelect}
+          aria-expanded={selected}
+          className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-muted/60"
+        >
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex items-center gap-1.5">
+              <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border bg-background text-foreground">
+                {row.agentType ? (
+                  <AgentIcon
+                    agentType={row.agentType}
+                    className="h-3.5 w-3.5"
+                  />
+                ) : (
+                  <Bot className="h-3 w-3 text-muted-foreground" aria-hidden />
+                )}
               </span>
-            )}
-            <span data-testid="observatory-row-lifecycle" className="shrink-0">
-              {/* `silent` deliberately reads as "no recent activity", never as a
+              <span className="min-w-0 truncate text-xs font-semibold text-foreground">
+                {row.agentType
+                  ? getAgentLabel(row.agentType)
+                  : t("unknownAgent")}
+              </span>
+              {row.taskId && (
+                <span
+                  className="shrink-0 font-mono text-[11px] text-muted-foreground"
+                  title={row.taskId}
+                >
+                  #{row.taskId.slice(0, 8)}
+                </span>
+              )}
+              <span
+                data-testid="observatory-row-lifecycle"
+                className="shrink-0"
+              >
+                {/* `silent` deliberately reads as "no recent activity", never as a
                   successful finish (R3.14) — the badge is neutral and the
                   tooltip says so in words. */}
-              {row.lifecycle === "silent" ? (
+                {row.lifecycle === "silent" ? (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 rounded-full text-xs"
+                    title={t("silentTooltip")}
+                  >
+                    <Info
+                      className="h-3 w-3 text-muted-foreground"
+                      aria-hidden
+                    />
+                    {t("silent")}
+                  </Badge>
+                ) : (
+                  <StatusBadge
+                    status={badgeStatus(row)}
+                    errorCode={row.errorCode ?? undefined}
+                  />
+                )}
+              </span>
+              {/* R7.4: a POSITIVE read-only marker in place of dead controls.
+                  It states what the row is ("View only"), and the tooltip
+                  explains WHY the boundary exists rather than implying the
+                  actions might appear later. */}
+              {readOnly && (
                 <Badge
-                  variant="secondary"
-                  className="gap-1 rounded-full text-xs"
-                  title={t("silentTooltip")}
+                  data-testid="observatory-row-readonly"
+                  variant="outline"
+                  className="shrink-0 gap-1 rounded-full text-xs text-muted-foreground"
+                  title={t("readOnlyTooltip")}
                 >
-                  <Info className="h-3 w-3 text-muted-foreground" aria-hidden />
-                  {t("silent")}
+                  <Eye className="h-3 w-3" aria-hidden="true" />
+                  {t("readOnly")}
                 </Badge>
-              ) : (
-                <StatusBadge
-                  status={badgeStatus(row)}
-                  errorCode={row.errorCode ?? undefined}
-                />
               )}
-            </span>
+              {/* R7.2: the in-flight cancel marker. Distinct from the lifecycle
+                  badge beside it on purpose — it describes the REQUEST, not the
+                  sub-agent, which is still running until the event stream says
+                  otherwise. */}
+              {cancelInFlight && (
+                <span
+                  data-testid="observatory-row-cancel-pending"
+                  className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground"
+                >
+                  <Loader2
+                    className="h-3 w-3 animate-spin"
+                    aria-hidden="true"
+                  />
+                  {t("cancelPending")}
+                </span>
+              )}
+            </div>
+            {row.taskText && (
+              <div className="truncate text-[11px] text-muted-foreground">
+                {row.taskText}
+              </div>
+            )}
+            {conversationLabel && (
+              <div
+                data-testid="observatory-row-conversation"
+                className="truncate text-[11px] text-muted-foreground/70"
+              >
+                {t("inConversation", { name: conversationLabel })}
+              </div>
+            )}
+            {/* R7.10: the REQUEST failed to send. Says so about the request and
+                nothing about the sub-agent, whose lifecycle badge above is
+                untouched — claiming a terminal here would be a lie the stream
+                never told. */}
+            {cancelRequestFailed && (
+              <div
+                data-testid="observatory-row-cancel-failed"
+                role="alert"
+                className="flex items-start gap-1 text-[11px] text-destructive"
+              >
+                <TriangleAlert
+                  className="mt-0.5 h-3 w-3 shrink-0"
+                  aria-hidden="true"
+                />
+                <span>{t("cancelFailed")}</span>
+              </div>
+            )}
           </div>
-          {row.taskText && (
-            <div className="truncate text-[11px] text-muted-foreground">
-              {row.taskText}
-            </div>
-          )}
-          {conversationLabel && (
-            <div
-              data-testid="observatory-row-conversation"
-              className="truncate text-[11px] text-muted-foreground/70"
-            >
-              {t("inConversation", { name: conversationLabel })}
-            </div>
-          )}
-        </div>
-      </button>
+        </button>
+      </ObservatoryRowMenu>
       {selected && (
         <div className="border-t border-border/60">
           {row.kind === "builtin" ? (

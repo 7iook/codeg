@@ -32,6 +32,7 @@ import {
 } from "react"
 
 import type { AgentType, EventEnvelope } from "@/lib/types"
+import type { DelegationTaskStatus } from "@/lib/api"
 import { useAcpActions, useAcpEvent } from "@/contexts/acp-connections-context"
 
 export type DelegationStatus = "running" | "ok" | "err"
@@ -66,6 +67,30 @@ interface DelegationContextValue {
    *  "completed" view has to be kept here) until the cap evicts them or the
    *  workspace unmounts. */
   listBindings(): readonly DelegationBinding[]
+  /**
+   * Install a terminal learned from an AUTHORITATIVE broker read on a binding
+   * the event stream left running (spec R7.13).
+   *
+   * This exists so the reconciliation reads have no state of their own to
+   * overlay: lifecycle keeps exactly ONE writer — this map — whether the
+   * terminal arrived by event or by read. A second store holding "reconciled"
+   * lifecycles would recreate the dual-source-of-truth the design spent a
+   * review round removing, and would need an ordering rule against the events.
+   *
+   * Deliberately narrow, in three ways:
+   *   * It only ever moves a binding OUT of `running`. An already-settled
+   *     binding is left alone — the event stream saw the outcome first and a
+   *     later read cannot improve on it.
+   *   * `running` and `unknown` verdicts are no-ops. `unknown` is what the
+   *     broker answers when it cannot vouch for a task (evicted from its
+   *     completed cache, or an ownership mismatch); treating that as finished
+   *     would report an outcome nobody observed.
+   *   * It cannot resurrect: there is no path from terminal back to running.
+   */
+  applyAuthoritativeStatus(
+    childConversationId: number,
+    status: DelegationTaskStatus
+  ): void
 }
 
 const DelegationContext = createContext<DelegationContextValue | null>(null)
@@ -374,9 +399,55 @@ export function DelegationProvider({ children }: { children: ReactNode }) {
     [byToolUseId]
   )
 
+  const applyAuthoritativeStatus = useCallback(
+    (childConversationId: number, status: DelegationTaskStatus) => {
+      // A verdict that is not terminal teaches us nothing the row does not
+      // already show, so bail before touching state — a no-op that still
+      // re-rendered would make every reconnect churn the whole list.
+      if (
+        status !== "completed" &&
+        status !== "failed" &&
+        status !== "canceled"
+      ) {
+        return
+      }
+      setByToolUseId((prev) => {
+        let target: DelegationBinding | undefined
+        for (const binding of prev.values()) {
+          if (binding.childConversationId === childConversationId) {
+            target = binding
+            break
+          }
+        }
+        // Only a still-running binding is updated: if the stream already
+        // settled it, the stream's outcome is the one that was observed
+        // directly and this read is stale by construction.
+        if (!target || target.status !== "running") return prev
+        const m = new Map(prev)
+        m.set(target.parentToolUseId, {
+          ...target,
+          status: status === "completed" ? "ok" : "err",
+          // `canceled` rides the same stable error code the broker puts on the
+          // event path (`teardown_canceled_child`), so the selector maps both
+          // arrival routes to the same lifecycle rather than reporting a
+          // reconciled cancel as a generic failure.
+          errorCode: status === "completed" ? undefined : status,
+        })
+        markTerminal(target.parentToolUseId)
+        return evictOverCap(m, terminalSeqRef.current)
+      })
+    },
+    [markTerminal]
+  )
+
   return (
     <DelegationContext.Provider
-      value={{ findByParentToolUseId, findByChildConversationId, listBindings }}
+      value={{
+        findByParentToolUseId,
+        findByChildConversationId,
+        listBindings,
+        applyAuthoritativeStatus,
+      }}
     >
       {children}
     </DelegationContext.Provider>

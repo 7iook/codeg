@@ -29,6 +29,9 @@ const observatorySource = read(
   "src/components/chat/sub-agent-observatory-panel.tsx"
 )
 const listSource = read("src/components/chat/sub-agent-observatory-list.tsx")
+const actionsSource = read("src/contexts/observatory-actions-context.tsx")
+const providersSource = read("src/contexts/live-observability-providers.tsx")
+const apiSource = read("src/lib/api.ts")
 
 describe("sub-agent observatory wiring", () => {
   it("is imported and mounted by the conversation panel", () => {
@@ -92,5 +95,38 @@ describe("sub-agent observatory wiring", () => {
     // body must stay re-hostable (sidebar, AuxPanel tab) as wiring rather than a
     // rewrite, which it cannot be if it reaches for the popover itself.
     expect(listSource).not.toContain("ui/popover")
+  })
+
+  it("mounts the actions provider in the workspace-level composition", () => {
+    // Placement is load-bearing, not stylistic: R7.12 requires ONE
+    // authoritative read per still-running row after a reconnect, and a
+    // provider nested per conversation pane would fire one set of reads per open
+    // pane. Mounting it here is what makes the read count a property of the
+    // workspace.
+    expect(providersSource).toContain(
+      'import { ObservatoryActionsProvider } from "@/contexts/observatory-actions-context"'
+    )
+    expect(providersSource).toContain("<ObservatoryActionsProvider>")
+    expect(listSource).toContain("useObservatoryActions()")
+  })
+
+  it("has real production callers for both delegation action APIs", () => {
+    // The E-052 shape: `cancelDelegation` / `getDelegationTaskStatus` shipped
+    // ahead of their consumer and carried `gate:allow-unwired` escape hatches
+    // saying so. Those markers must be GONE, and gone because the calls exist —
+    // not because someone deleted the comment.
+    expect(apiSource).not.toContain("gate:allow-unwired")
+    expect(actionsSource).toContain("cancelDelegation(")
+    expect(actionsSource).toContain("getDelegationTaskStatus(")
+  })
+
+  it("routes reconciliation through the binding map, not a parallel store", () => {
+    // Property 9 is structural: lifecycle keeps exactly one writer. If the
+    // authoritative read ever grew its own lifecycle store for a consumer to
+    // overlay, the dual-source-of-truth the design spent a review round
+    // removing would be back, and the ordering tests would start passing for
+    // the wrong reason.
+    expect(actionsSource).toContain("applyAuthoritativeStatus")
+    expect(actionsSource).toContain("onTransportReconnect(")
   })
 })

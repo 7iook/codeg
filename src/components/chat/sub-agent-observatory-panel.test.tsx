@@ -28,6 +28,19 @@ vi.mock("@/lib/api", async () => {
   }
 })
 
+// Rows carry action affordances now. This file is about the sections and the
+// in-place detail, so the actions surface is held at its neutral resting state
+// (nothing pending, nothing failed) — the actions themselves are covered by
+// `sub-agent-observatory-row-actions.test.tsx` against the row's capability
+// flags, and by the provider's own test against the real providers.
+vi.mock("@/contexts/observatory-actions-context", () => ({
+  useObservatoryActions: () => ({
+    cancelPending: new Set<number>(),
+    cancelFailed: new Set<number>(),
+    requestCancel: vi.fn(),
+  }),
+}))
+
 const mockOpenTab = vi.fn()
 vi.mock("@/stores/tab-store", async () => {
   const actual =

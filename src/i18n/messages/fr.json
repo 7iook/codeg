@@ -3127,7 +3127,17 @@
         "detailError": "Impossible de charger le dernier message.",
         "detailRetry": "Réessayer",
         "detailNothing": "Aucun message à afficher pour le moment.",
-        "detailOpenInTab": "Ouvrir la session complète"
+        "detailOpenInTab": "Ouvrir la session complète",
+        "actionsLabel": "Actions du sous-agent",
+        "cancel": "Arrêter ce sous-agent",
+        "cancelPending": "Arrêt en cours…",
+        "cancelFailed": "La demande d'arrêt n'a pas pu être envoyée. Vérifiez votre connexion puis réessayez.",
+        "confirmCancelTitle": "Arrêter ce sous-agent ?",
+        "confirmCancelDescription": "Il s'arrête là où il en est et le travail déjà réalisé est conservé. Vous pourrez le relancer ensuite.",
+        "confirmCancelKeepRunning": "Le laisser tourner",
+        "confirmCancelConfirm": "L'arrêter",
+        "readOnly": "Consultation seule",
+        "readOnlyTooltip": "Les sous-agents intégrés s'exécutent dans le tour de l'agent hôte lui-même : codeg peut seulement les observer, il n'y a rien à arrêter ni à ouvrir séparément."
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# tâche en arrière-plan en cours} other {# tâches en arrière-plan en cours}}",
