@@ -15,8 +15,9 @@ use crate::acp::delegation::types::DelegationTaskReport;
 use crate::app_error::AppCommandError;
 use crate::app_state::AppState;
 use crate::commands::delegation::{
-    close_delegation_session_core, continue_delegation_core, get_continuation_availability_core,
-    load_delegation_settings, set_delegation_settings_core, DelegationSettings,
+    cancel_delegation_core, close_delegation_session_core, continue_delegation_core,
+    get_continuation_availability_core, get_delegation_task_status_core, load_delegation_settings,
+    set_delegation_settings_core, DelegationSettings,
 };
 
 pub async fn get_delegation_settings(
@@ -113,6 +114,52 @@ pub async fn get_continuation_availability(
     )
     .await?;
     Ok(Json(availability))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelDelegationParams {
+    pub child_conversation_id: i32,
+}
+
+/// User-side cancel (Requirement 8.5 / 8.8). Sits behind the same
+/// `auth::require_token` layer as its delegation siblings — no bespoke auth
+/// path — and answers with the same `DelegationTaskReport` shape, so a refusal
+/// rides the report's stable `error_code` rather than an HTTP error status.
+pub async fn cancel_delegation(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<CancelDelegationParams>,
+) -> Result<Json<DelegationTaskReport>, AppCommandError> {
+    let report = cancel_delegation_core(
+        &state.db.conn,
+        &state.delegation_broker,
+        params.child_conversation_id,
+    )
+    .await?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetDelegationTaskStatusParams {
+    pub child_conversation_id: i32,
+}
+
+/// Authoritative status read for the observatory panel's reconciliation pass
+/// (Requirement 7.11-7.13): used after a cancel returned terminal without a
+/// matching event, and after a transport reconnect for rows still shown
+/// running.
+pub async fn get_delegation_task_status(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<GetDelegationTaskStatusParams>,
+) -> Result<Json<DelegationTaskReport>, AppCommandError> {
+    let report = get_delegation_task_status_core(
+        &state.db.conn,
+        &state.delegation_broker,
+        params.child_conversation_id,
+    )
+    .await?;
+    Ok(Json(report))
 }
 
 #[cfg(test)]
@@ -242,6 +289,60 @@ mod tests {
         .await
         .expect("availability queries never surface an HTTP error");
         assert_eq!(availability, ContinuationAvailability::NotContinuable);
+    }
+
+    /// Requirement 8.5 / 8.8: the cancel route answers an unknown id with the
+    /// same non-disclosing `Unknown` report its siblings use — never an HTTP
+    /// error, and never a hint that the row does or doesn't exist.
+    #[tokio::test]
+    async fn cancel_on_unknown_child_conversation_reports_unknown() {
+        let (state, _dir) = state_for_test().await;
+        let Json(report) = cancel_delegation(
+            Extension(state),
+            Json(CancelDelegationParams {
+                child_conversation_id: 424_242,
+            }),
+        )
+        .await
+        .expect("handler must not surface an HTTP error for an unknown id");
+        assert_eq!(report.status, TaskStatus::Unknown);
+        assert!(report.error_code.is_none());
+    }
+
+    /// Requirement 8.3 through the HTTP seam: a regular root conversation is
+    /// refused with the stable `not_continuable` code.
+    #[tokio::test]
+    async fn cancel_on_root_conversation_is_rejected() {
+        let (state, _dir) = state_for_test().await;
+        let root_id = seed_root_conversation(&state).await;
+        let Json(report) = cancel_delegation(
+            Extension(state),
+            Json(CancelDelegationParams {
+                child_conversation_id: root_id,
+            }),
+        )
+        .await
+        .expect("rejection rides the report shape, not an HTTP error");
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert_eq!(report.error_code.as_deref(), Some("not_continuable"));
+    }
+
+    /// Requirement 7.11-7.13 through the HTTP seam: the reconciliation query
+    /// shares cancel's target resolution, so an unknown id gets the same
+    /// verdict.
+    #[tokio::test]
+    async fn status_on_unknown_child_conversation_reports_unknown() {
+        let (state, _dir) = state_for_test().await;
+        let Json(report) = get_delegation_task_status(
+            Extension(state),
+            Json(GetDelegationTaskStatusParams {
+                child_conversation_id: 424_242,
+            }),
+        )
+        .await
+        .expect("handler must not surface an HTTP error for an unknown id");
+        assert_eq!(report.status, TaskStatus::Unknown);
+        assert!(report.error_code.is_none());
     }
 }
 
