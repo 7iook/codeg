@@ -331,29 +331,33 @@
 
 ### 阶段 6 · listener + companion schema 注入
 
-- [ ] 6. listener 解析 + companion tools/list 注入
-  - [ ] 6.1 `listener.rs:604-633 process(BrokerRequest)` 追加:
-    ```rust
-    let subagent_type = req.input.get("subagent_type")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    ```
-    塞到 `DelegationRequest.subagent_type`
+- [x] 6. listener 解析 + companion tools/list 注入
+
+  **Evidence**
+  - `commit 929d73b0`
+  - `verify: cargo check --tests → EXIT=0; cargo check --no-default-features --bin codeg-mcp → EXIT=0; 六个集成 crate 53 passed (21 新 + 32 回归) EXIT=0; clippy --lib -D warnings 仅 3 处既有 connection.rs steer dead-code`
+  - `files: persona.rs list_personas_at / render_persona_lists / persona_lists_args / decode_persona_lists_arg · companion.rs PERSONA_LISTS_PLACEHOLDER / substitute_persona_lists / CompanionContext::decode_persona_lists · connection.rs collect_persona_lists_args · codeg_mcp.rs --persona-lists · tests/persona_lists_injection.rs (new, 21)`
+  - `AC: 1.2 1.3 (6.1 已在 stage 5 提前落地) + Q2 决策 — 三家人格清单注入 schema · P0-a 空则省 flag · P0-b 占位符不泄漏`
+
+  - [x] 6.1 `listener.rs process(BrokerRequest)` 解析 `subagent_type`(trim + 空串过滤)塞进 `DelegationRequest`
+    - **⏩ 提前落地**:本项在 **stage 5**(`62edeb4f`)已完成 —— sonnet review 轮 2 判定「broker 翻译层再对,listener 不解析就是空气」,故从 stage 6 提到 stage 5 一并修。集成测试见 `tests/listener_subagent_type_wire.rs`(5 test · 走真实 length-prefixed 帧)
     - _Requirements: 1.2, 1.3_
-  - [ ] 6.2 companion `tools/list` handler(附近 `append_custom_agents_to_delegate_enum:436`):渲染 schema 前调 `list_personas_for_all_supported_clis()`(**新工具函数**),把三家人格清单拼进 `<<PERSONA_LISTS>>` 占位符位置
-    - `list_personas_for_all_supported_clis()` 扫:
-      - Kiro:`$KIRO_HOME/agents/*.json`(复用现有 `list_kiro_custom_agents()` 若存在 · 否则新建同 pattern)
-      - Claude:`$HOME/.claude/agents/*.md`(读文件顶部 frontmatter title/description 或前 200 字节 body)
-      - Codex:`$HOME/.codex/agents/*.md`(同上)
-      - 空目录 → `(none defined)`
-    - 格式:`\n\n### Available personas on this host:\n**Kiro (real persona)**:\n- @<name>: <description>\n**Claude Code (best-effort hint)**:\n- @<name>: ...\n**Codex (best-effort hint)**:\n- @<name>: ...\n`
+    - **Evidence**: commit 62edeb4f · verify: `cargo test --test listener_subagent_type_wire` → 5 passed EXIT=0 · files: listener.rs subagent_type 解析 · tests/listener_subagent_type_wire.rs · AC: 1.2 1.3 — present / trimmed / 纯空白 / 缺字段 / 六种非字符串全覆盖
+  - [x] 6.2 三家人格扫描 + 渲染 + 父进程注入 + companion 替换占位符
+    - **架构**:父进程扫目录 + `--persona-lists <base64>` 注入,companion 不碰文件系统(照 `--custom-agents` 既有 posture · companion 的 KIRO_HOME/CLAUDE_CONFIG_DIR/CODEX_HOME 视图不保证与父进程一致)
+    - Kiro 复用既有 `commands::acp::list_kiro_custom_agents`(读 `*.json` 真人格格式);Claude/Codex 新增 `persona::list_personas_at`(读 `*.md` · 照同模块既有 `_at(dir)` 注入约定)
+    - Claude/Codex 清单过 `is_valid_persona_name` 过滤(advertise 一个 broker 会拒的名字是自相矛盾的 UX);**Kiro id 刻意不过滤** —— 同一份清单还驱动 `verify_kiro_selected_agent_exists` 与设置页选择器,在此收窄会让 advertise 的列表与用户可选列表不一致
+    - 渲染超预算时降级为只列 id,并对单条 description 截断,防 argv 超 Windows 上限
     - _Requirements: Q2 决策 · design §Q2 前端改动_
-  - [ ]* 6.3 listener 单测:
-    - `subagent_type = Some(" x ")` → trim 成 `"x"`
-    - `subagent_type = Some("")` / `Some("   ")` / 非字符串类型 → None
-    - _Requirements: 1.3_
-  - [ ]* 6.4 companion 单测:mock 三家 agents/ 目录(tmpdir) → tools/list 返回 schema 含正确 persona 清单;空目录场景 → `(none defined)`
+    - **Evidence**: commit 929d73b0 · verify: `cargo test --test persona_lists_injection` → 21 passed EXIT=0 · files: persona.rs list_personas_at / render_persona_lists / persona_lists_args · connection.rs collect_persona_lists_args · codeg_mcp.rs --persona-lists 解析 · companion.rs substitute_persona_lists · AC: Q2 — 三家清单真达 schema
+  - [x]* 6.3 **P0-a 硬门**:三家人格皆空 → `persona_lists_args` 返回空 Vec,父进程不 push flag
+    - **为什么是 P0**:`codeg_mcp.rs` 对未知 flag 直接 `exit(2)`,既有 flag 全部「空则省略」正是为兼容旧 companion 二进制。无条件 push 会让旧二进制启动即挂 → delegation / ask_user_question / check_user_feedback / get_session_info **全线不可用**,远超人格功能本身
+    - **负向 mutation 实测(主 AI 独立执行)**:改成无条件 push flag → `persona_lists_args_are_empty_when_nothing_to_advertise` 转红;还原后 21/21 回绿
+    - **Evidence**: commit 929d73b0 · verify: mutation → 1 failed / 20 passed;还原 → 21 passed EXIT=0 · files: persona.rs persona_lists_args (`Option<String>` → 空 Vec 把约束编码进返回值,调用点无法忘记) · tests/persona_lists_injection.rs · AC: P0-a
+  - [x]* 6.4 **P0-b 硬门**:无人格时占位符替换成空串(而非跳过替换)
+    - **为什么是 P0**:跳过替换会把字面量 `<<PERSONA_LISTS>>` 发给 LLM,读起来像工具描述的模板 bug
+    - **负向 mutation 实测(主 AI 独立执行)**:把 `substitute_persona_lists` 的 `None` 分支改成 early return → `tools_list_never_leaks_the_placeholder_when_no_personas_exist` 转红,失败消息把泄漏的整段 description 打了出来;还原后 21/21 回绿
+    - **Evidence**: commit 929d73b0 · verify: mutation → 1 failed / 20 passed;还原 → 21 passed EXIT=0 · files: companion.rs substitute_persona_lists (`persona_lists.unwrap_or("")`) · tests/persona_lists_injection.rs · AC: P0-b
 
 ### 阶段 7 · 前端 delegation-card 消费 applied_persona
 
@@ -484,7 +488,7 @@
 2. stage 1-4 的 inline `#[cfg(test)] mod tests`(broker unit tests / persona provider tests)已通过 `cargo check --tests` 类型层验证 · **运行验证待干净 CI/Windows 环境跑一次全量 `cargo test --lib` 补确认**
 3. 登记为收尾(stage 9)遗留验证项 · 不阻塞 stage 5-8 推进
 
-- 2026-08-04 · executor(claude-opus 4.8 1M) · stage 5 complete + sonnet review P0/P1/P2 闭合 · **单 commit** `pending` · spawn launch_option 死接线闭合(P0-1):
+- 2026-08-04 · executor(claude-opus 4.8 1M) · stage 5 complete + sonnet review P0/P1/P2 闭合 · **单 commit** `62edeb4f`(ledger 回填 `d70bcc9a`)· spawn launch_option 死接线闭合(P0-1):
   - **5.1 spawn 签名扩**:`ConnectionSpawner::spawn` 加第 6 参 `launch_option: Option<LaunchOption>` · 同步 4 处 impl:`ConnectionManagerSpawner::spawn`(生产,透传 spawn_child_inner)/ `MockSpawner::spawn`(test-utils)/ `GatedFollowupSpawner::spawn` + `FailingDisconnectSpawner::spawn`(broker test)· **`spawn_for_resume` 签名绝不改**(R7.4 · resume 不重提名人格,4 处 impl 均传 `None` 或不接)
   - **5.2 spawn_child_inner merge**:`build_session_runtime_env` 返回后、`spawn_agent` 前插 `runtime_env.insert(KIRO_AGENT_ENV, name.clone())`(仅 `LaunchOption::KiroPersona`)· **merge-order invariant 内联注释锁死**:必须在 `spawn_agent`→`spawn_agent_connection`→`apply_kiro_env_policy`(connection.rs:287,剥 KIRO_* 旋钮)之前,否则 KIRO_AGENT 被剥 · per-call 覆盖 panel `env_json[KIRO_AGENT]` 语义(LLM 显式 subagent_type 胜过持久默认)也在注释声明 · argv 翻译由 connection.rs `kiro_launch_args_*` 单测独立保障(spawn_child_inner 需真 ConnectionManager,不可单测)
   - **5.3 broker 接线闭合 P0-1**:生产 `self.spawner.spawn(...)` 从 `let _ = launch_option_pending.as_ref()`(死接线 · E-052 假成功)改为把 `launch_option_pending` 真传给 spawn · R3-A2 时机不变(`AppliedPersona::Native` 仍 spawn Ok 后产)· `SpawnCallArgs` 加 `launch_option` 字段 + 新增 `first_prompt_tasks` recorder(观察 Hint 前置 vs Native 不前置)
@@ -504,7 +508,7 @@
   - **硬约束合规**:未改前端 · connection.rs 仅加 1 条 kiro_launch_args 单测(未动生产逻辑,apply_kiro_env_policy 顺序经 manager.rs 注释声明)· spawn_for_resume 签名未动 · merge-order invariant 注释 + broker_persona/kiro_launch_args 单测双锁
   - **Review Findings**:任务文档行号(spawner.rs:85-138 / manager.rs:2960-3010 / listener.rs:604-633 等)因 v0.22→0.23 merge 全部漂移,实际位置经 git grep 定位后执行,内容与真实代码一致,无架构偏离;doc 描述的 merge-order 风险经 connection.rs:1267/1276 核实(kiro_launch_args 读 runtime_env 在 apply_kiro_env_policy 之前,spawn_child_inner 的 insert 天然更早,invariant 成立)
 
-- 2026-08-04 · executor(claude-opus-5 1M) · **review round-2 测试缺口三项闭合** · 单 commit `pending`:
+- 2026-08-04 · executor(claude-opus-5 1M) · **review round-2 测试缺口三项闭合** · 单 commit `f6add7ad`:
   - **缺口 1(critical · merge-order 端到端回归)走路径 (b) + (c)**:抽 pure helper `manager::merge_launch_option_into_runtime_env(runtime_env, launch_option) -> BTreeMap`(行为不变 · `spawn_child_inner` 改为调用它)+ 把 `connection::kiro_launch_args` 从私有提为 `pub`,新建集成 crate `tests/persona_merge_order.rs`(7 test)。**"如果有人破坏 merge,哪条测试会红?"的明确答案**:`launch_option_merge_inserts_kiro_agent_verbatim` / `launch_option_merge_overrides_a_panel_stored_agent` / `launch_option_merge_preserves_unrelated_runtime_env` / `merged_launch_option_translates_to_agent_argv_end_to_end` / `per_call_persona_beats_panel_default_in_argv` —— **负向 mutation 实测**:把 helper 改成 no-op(不 insert)→ 这 5 条转红(`left: None` / `left: []` / `left: ["--agent","panel-default"]`),恢复后 7/7 绿。此前无测试跨越 merge→argv 这一跳(connection.rs 从手搭 env 起步,broker_persona.rs 停在 spawn 边界)。
   - **⚠️ 修正 stage-5 注释的因果措辞(reviewer 与 stage-5 doc 均有偏差)**:`apply_kiro_env_policy(&mut merged_env, runtime_env)` 剥的是**子进程 env(`merged_env: Vec`)**,`runtime_env` 是 `&BTreeMap` 共享借用 —— 它**在类型上无法**unset `kiro_launch_args` 读的东西,所以"merge 必须在 policy 之前否则 KIRO_AGENT 被剥"这个因果不成立(connection.rs 自己的 `kiro_env_policy_strips_codeg_launch_knobs_from_the_child` 正断言 KIRO_AGENT **被剥**,且那是**正确行为**:KIRO_AGENT 是 codeg 侧翻 argv 的旋钮,不是 kiro-cli 读的环境变量)。**真实不变式**:`spawn_agent(runtime_env: BTreeMap)` 按值消费 env,故 merge 必须在**该调用之前**,否则人格根本到不了子进程。manager.rs 注释已按此改写,新 crate 模块 doc 记录了这次纠正。
   - **缺口 2(Claude/Codex Hint 分支)· env 隔离选独立集成 crate + `temp_env` 双层**:新建 `tests/broker_persona_hint.rs`(3 test)。理由:①独立 integration crate 各自独立进程,天然隔离,不会污染 `broker_persona.rs` 的 Native/unsupported 断言;②crate 内再用 `temp_env::async_with_vars`(项目既有 dev-dep,`commands/custom_skills.rs`/`acp.rs` 同款用法)对进程内其他 env 读者上锁 + 作用域退出还原。**未用 serial_test**(项目无此依赖,`temp_env` 已覆盖同一需求)。测试:`claude_code_hint_prepends_preamble_and_forwards_no_launch_option`(`CLAUDE_CONFIG_DIR`)/ `codex_hint_prepends_preamble_and_forwards_no_launch_option`(`CODEX_HOME`)断言 `spawn_args[0].launch_option == None`(Property P3)+ `first_prompt_tasks[0] == "{preamble}\n\n---\n\n{task}"`(R5.1);`claude_code_unresolvable_persona_fails_the_delegation` 钉失败边(R3 F3:persona 不存在 → delegation Failed 且 spawn_args 为空,绝不静默降级)。**负向 mutation 实测**:把期望 preamble 改成 `MUTATION-CHECK` → 2 条 happy path 转红且 `left` 显示真读到 tempdir 里的 persona 内容(证明 env override 真生效,不是恒绿)。
@@ -521,3 +525,29 @@
   - **可测性重构说明(行为不变)**:①`merge_launch_option_into_runtime_env` 从 `spawn_child_inner` 内联逻辑抽出(原先只能靠真起 agent 进程观察);②`kiro_launch_args` 私有 → `pub`。两者都因本机 `cargo test --lib` 崩 `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)`(Tauri native DLL 缺导出符号 · 环境级),集成 crate 只 link public API 才能真跑。`KIRO_AGENT_ENV` 保持 `pub(crate)` 未放宽 —— 测试改用字面量 `"KIRO_AGENT"`,顺带成为对 wire 名的独立断言。
   - **硬约束合规**:未改 requirements/design.md · `spawn_for_resume` 签名未动 · 未改前端 · 仅在本 tasks.md 追加本条 Update Log
   - **Review Findings**:任务文档缺口 1 的判据("merge 必须在 `apply_kiro_env_policy` 之前,否则 KIRO_AGENT 被剥")与真实代码矛盾,已按上文修正为"必须在 `spawn_agent` 按值消费 env 之前",并据此设计可被 mutation 打红的测试;缺口 2/3 的事实(env 变量名 `CLAUDE_CONFIG_DIR`/`CODEX_HOME` 及非空过滤+home fallback、listener 解析位置 listener.rs:683、Hint 前置格式 broker.rs:3354)经 git grep 逐条核实无误。无其他架构偏离。
+
+- 2026-08-04 · sonnet reviewer · **review round 3 — APPROVED**(0 critical / 0 important / 0 minor · prev_round_closed 5/5 · ready_for_stage_6: YES):
+  - 五条轮-2 finding 全判 CLOSED,且**独立复跑了 merge-order 的负向 mutation**(注掉 insert → 5 failed / 2 passed / EXIT=101;还原 → 7/7 EXIT=0),与主 AI 的实测逐条一致 —— 三方交叉验证同一结论
+  - listener 生产链逐跳追出:`companion.rs:494`(arguments → BrokerRequest.input)→ `transport.rs:339`(length-prefixed frame)→ `listener.rs:200`(Call arm)→ `:683`(解析)→ `:690`(真 broker),确认测试走 `write_frame`/`serve_one` 真路径未绕过
+  - Hint 分支联跑两 crate 8 passed 无 env 串扰
+  - tasks.md 8 个锚点抽查全中 · 5 个 commit hash `git rev-parse` 全解 · lint 0 finding
+  - 全仓扫描确认错误因果无第四处副本把它当现行约束
+  - 7-Phase 全 PASS(Domain-Model 项 N/A:本仓无 `docs/domain/*-model.md`)
+
+- 2026-08-04 · 主 AI · **锚点漂移自查与修正** · commit `a31b8a12`:
+  - 在预验 reviewer 该抽查什么时发现:`1b94d228` 回填的 persona.rs 行号锚点,在下一个 commit(`c8a18884`,主 AI 自己给 persona.rs 加了 7 行 doc)就**全部 +7 偏移失效** —— 13 个锚点写完一个 commit 就过期
+  - **为什么比没锚点更糟**:读者会信它,点过去落在空白 doc 行上,且没有任何信号提示这个数字只是旧了
+  - 两层修法:① `git grep -n` 重新实测全部 13 个值并**读回文件抽验 3 个**(resolve_preamble_at @336 / provider_for @656 / AppliedPersona @105 全部落在声明行)② 记法从 `file:line (symbol)` 改成 **`symbol @ file:line`**,符号名承载语义、行号只作提示,下次再漂锚点仍可用而不是无声撒谎
+  - 顺带二次踩到 `tasks-md-lint.py` 的 `AC:` **600 字符窗口**限制(`files:` 行写长会把 `AC:` 挤出窗口报 R1 error)→ 父任务 evidence 压缩、细锚点下移到子任务
+
+- 2026-08-04 · 主 AI 接手收尾 · **stage 6 complete** · commit `929d73b0`(5 files · +1021/-2):
+  - **背景**:stage 6 executor 连续三次进程级故障(两次 stream stall 600s + 一次 API `INVALID_MODEL_ID`),第三次已走到「mutation 探针已还原、diffstat 与 mutation 前一致、正在复验」。主 AI 核对磁盘状态确认工作完好(4 文件 +493 行 + 21 测试的新 crate)后接手收尾,未重做
+  - **架构**:父进程扫三家 `agents/` 目录 + `--persona-lists <base64 URL_SAFE_NO_PAD>` 注入,companion 不碰文件系统。依据是 `CompanionContext.custom_agents` 的既有 doc(「the parent passes ... at injection time」)+ companion 的 KIRO_HOME/CLAUDE_CONFIG_DIR/CODEX_HOME 视图不保证与父进程一致
+  - **两个 P0 门经主 AI 独立负向 mutation 验证**(不采信自报):
+    - P0-a:改成无条件 push flag → `persona_lists_args_are_empty_when_nothing_to_advertise` 转红
+    - P0-b:`None` 分支改成 early return → `tools_list_never_leaks_the_placeholder_when_no_personas_exist` 转红,失败消息把泄漏的整段 description 打了出来
+    - 两次均还原并复验 21/21 回绿 · 探针零残留(`git grep MUTATION PROBE` 空)
+  - **一次自造事故与修复**:主 AI 做 P0-b mutation 后用 `git checkout -- companion.rs` 还原,**把 executor 未提交的 62 行 stage-6 改动一并撤了**(`git checkout --` 是整文件回 HEAD,未提交改动一并消失;正确做法是只反向编辑自己加的那几行)。按测试文件保留的精确期望 + 其余三文件的引用重建三块(`PERSONA_LISTS_PLACEHOLDER` / `substitute_persona_lists` / `CompanionContext.persona_lists`),重建后 53/53 全绿即为等价性证据
+  - **wiring gate 的一次真实拦截与结构性修复**:gate 报 `decode_persona_lists_arg` 「只有 1 处非生产调用点」。核实后发现 codegraph **确实索引了 `src/bin/codeg_mcp.rs`**(`decode_persona_lists` 的 caller 正是 `main (codeg_mcp.rs:199)`),但 gate 把 `bin/` 归入非生产路径。试过两种 marker 布局均无效(gate 要求 marker 在**定义行本身**,而 rustfmt 会把 `{ // comment` 的注释拆到下一行 —— hook 与 rustfmt 的结构性冲突)。**最终没有绕 gate,而是改善接线结构**:在 lib 侧加 `CompanionContext::decode_persona_lists`,binary 退化为纯 argv shim,调用链变成 `main → CompanionContext::decode_persona_lists → decode_persona_lists_arg`,中间那跳在 lib 内,gate 自然放行。副产品:decode 步骤变得可测、binary 更薄
+  - **验证**:cargo check --tests EXIT=0 · codeg-mcp bin EXIT=0 · 六个集成 crate **53 passed**(21 新 + 32 回归零退化)· clippy --lib -D warnings 仅 3 处既有 connection.rs steer dead-code(已确认存在于 `f6add7ad^`)· rustfmt 按 Triage A 修代码并重新 staged,格式化后重跑 53/53 仍绿,未用 `GATE_SKIP=1`
+  - **6.1 的归属说明**:原计划属 stage 6 的 listener 解析,在 stage 5(`62edeb4f`)已提前落地 —— sonnet review 轮 2 指出「broker 翻译层再对,listener 不解析就是空气」
