@@ -45,7 +45,7 @@ import {
 import { ConversationShell } from "@/components/chat/conversation-shell"
 import { SessionConfigStaleBanner } from "@/components/chat/session-config-stale-banner"
 import { BackgroundTasksChip } from "@/components/chat/background-tasks-chip"
-import { SubAgentObservatoryChip } from "@/components/chat/sub-agent-observatory-chip"
+import { SubAgentObservatoryPanel } from "@/components/chat/sub-agent-observatory-panel"
 import { CancelScopeDialog } from "@/components/chat/cancel-scope-dialog"
 import { FeedbackNotesDisplay } from "@/components/chat/feedback-notes-display"
 import { FeedbackDialog } from "@/components/chat/feedback-dialog"
@@ -1731,14 +1731,16 @@ const ConversationTabView = memo(function ConversationTabView({
         <>
           <SessionConfigStaleBanner contextKey={tabId} />
           <BackgroundTasksChip contextKey={tabId} />
-          {/* Resident sub-agent chip (R5.9 fixes this order: config-stale first
-              — it asks for an action — then the two count strips, whose pools
-              are disjoint and must not be read as one number).
+          {/* Resident sub-agent chip + its panel (R5.9 fixes this order:
+              config-stale first — it asks for an action — then the two count
+              strips, whose pools are disjoint and must not be read as one
+              number). The chip is the popover's anchor, so the panel opens
+              directly beneath it.
               `dbConversationId` is the DB conversation id, the same id space as
               the backend's `SessionState.conversation_id`, which is what row
               attribution compares against. NOT `tabId`: that is a different id
               space and using it here silently mislabels every row. */}
-          <SubAgentObservatoryChip conversationId={dbConversationId} />
+          <SubAgentObservatoryPanel conversationId={dbConversationId} />
           {/* The stop button's sub-agent disclosure (R4.1). Mounted here rather
               than beside the button so it survives composer remounts mid-click;
               it renders nothing until a cascade would actually kill something. */}

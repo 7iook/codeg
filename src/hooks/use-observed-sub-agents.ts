@@ -41,14 +41,32 @@ import {
 import { useConversationRuntimeStore } from "@/stores/conversation-runtime-store"
 
 /**
- * Re-evaluation interval. Same order as the selector's 15s silence threshold:
- * fine enough that a sub-agent going quiet is reflected within a few seconds,
- * coarse enough to be irrelevant to render cost (one pass over a bounded list).
- *
- * Task 6.2 takes ownership of the panel-open cadence (R6.5-R6.6); this interval
- * is the panel-CLOSED one R6.7 requires and remains the chip's own.
+ * Re-evaluation interval while the panel is CLOSED (R6.7). Same order as the
+ * selector's 15s silence threshold: fine enough that a sub-agent going quiet is
+ * reflected within a few seconds, coarse enough to be irrelevant to render cost
+ * (one pass over a bounded list).
  */
 export const OBSERVED_SUB_AGENTS_TICK_MS = 5_000
+
+/**
+ * Re-evaluation interval while the panel is OPEN (R6.5). Finer than the closed
+ * cadence because the user is looking straight at the rows: a sub-agent whose
+ * last frame just aged past the threshold should read `silent` while they are
+ * still watching, not on whichever tick happens next.
+ *
+ * Both cadences are driven by the ONE timer below. The panel does not start a
+ * competing interval of its own, so there is a single scheduler for the silence
+ * clock and no way for two of them to disagree about `now`.
+ */
+export const OBSERVED_SUB_AGENTS_PANEL_TICK_MS = 2_000
+
+export interface ObservedSubAgentsOptions {
+  /** Set by the panel body while it is mounted. Selects the faster cadence;
+   *  the stop-clock itself is structural — the panel body unmounts with the
+   *  popover, taking its interval with it (R6.6), while the chip's own
+   *  instance keeps ticking at the closed cadence (R6.7). */
+  panelOpen?: boolean
+}
 
 export interface ObservedSubAgentsSnapshot {
   /** Normalized rows, ordered by the selector. */
@@ -69,7 +87,8 @@ export interface ObservedSubAgentsSnapshot {
  *   workspace-wide per R5.1.
  */
 export function useObservedSubAgents(
-  currentConversationId: number | null
+  currentConversationId: number | null,
+  options?: ObservedSubAgentsOptions
 ): ObservedSubAgentsSnapshot {
   const { listBindings } = useDelegation()
   const subagentStore = useSubagentTranscriptStore()
@@ -101,12 +120,21 @@ export function useObservedSubAgents(
   // computed snapshot: keying the effect on the result would make the timer
   // that produces the change depend on the change it produces.
   const hasObservable = delegations.length > 0 || subagents.length > 0
+  // Only a built-in SUB has a time-derived lifecycle, so it is the only reason
+  // the OPEN panel needs the faster clock (R6.5 scopes its re-evaluation to
+  // "there are built-in SUB entries" for exactly this reason). With delegations
+  // alone, status arrives by event and the faster cadence would buy nothing.
+  const hasBuiltin = subagents.length > 0
+  const intervalMs =
+    options?.panelOpen && hasBuiltin
+      ? OBSERVED_SUB_AGENTS_PANEL_TICK_MS
+      : OBSERVED_SUB_AGENTS_TICK_MS
 
   useEffect(() => {
     if (!hasObservable) return
-    const timer = setInterval(advance, OBSERVED_SUB_AGENTS_TICK_MS)
+    const timer = setInterval(advance, intervalMs)
     return () => clearInterval(timer)
-  }, [hasObservable, advance])
+  }, [hasObservable, intervalMs, advance])
 
   // `now` is read here, once per evaluation, and handed to the selector so the
   // silence decision stays a pure function of its inputs.

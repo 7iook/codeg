@@ -3110,7 +3110,24 @@
       },
       "subAgentObservatory": {
         "running": "{count, plural, one {# sous-agent en cours} other {# sous-agents en cours}}",
-        "observable": "{count, plural, one {# sous-agent} other {# sous-agents}}"
+        "observable": "{count, plural, one {# sous-agent} other {# sous-agents}}",
+        "panelTitle": "Sous-agents",
+        "unknownAgent": "Sous-agent",
+        "silent": "Aucune activité récente",
+        "silentTooltip": "Aucun nouveau message récemment. Cela ne signifie pas qu'il a terminé : les sous-agents intégrés ne signalent aucune fin d'exécution.",
+        "sectionCurrent": "Cette conversation",
+        "sectionOther": "{count, plural, one {# dans une autre conversation} other {# dans d'autres conversations}}",
+        "sectionUnattributed": "Conversation inconnue",
+        "sectionCompleted": "Terminés",
+        "inConversation": "dans {name}",
+        "untitledConversation": "conversation n° {id}",
+        "empty": "Aucun sous-agent à afficher pour le moment.",
+        "capacityNotice": "{count, plural, one {# sous-agent plus ancien de cet espace de travail n'est plus conservé.} other {# sous-agents plus anciens de cet espace de travail ne sont plus conservés.}}",
+        "detailLoading": "Chargement du dernier message…",
+        "detailError": "Impossible de charger le dernier message.",
+        "detailRetry": "Réessayer",
+        "detailNothing": "Aucun message à afficher pour le moment.",
+        "detailOpenInTab": "Ouvrir la session complète"
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# tâche en arrière-plan en cours} other {# tâches en arrière-plan en cours}}",

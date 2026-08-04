@@ -3110,7 +3110,24 @@
       },
       "subAgentObservatory": {
         "running": "{count, plural, one {# Subagent läuft} other {# Subagenten laufen}}",
-        "observable": "{count, plural, one {# Subagent} other {# Subagenten}}"
+        "observable": "{count, plural, one {# Subagent} other {# Subagenten}}",
+        "panelTitle": "Subagenten",
+        "unknownAgent": "Subagent",
+        "silent": "Keine kürzliche Aktivität",
+        "silentTooltip": "Kürzlich keine neuen Nachrichten. Das bedeutet nicht, dass er fertig ist – integrierte Subagenten melden kein Abschlusssignal.",
+        "sectionCurrent": "Diese Unterhaltung",
+        "sectionOther": "{count, plural, one {# in einer anderen Unterhaltung} other {# in anderen Unterhaltungen}}",
+        "sectionUnattributed": "Unterhaltung unbekannt",
+        "sectionCompleted": "Beendet",
+        "inConversation": "in {name}",
+        "untitledConversation": "Unterhaltung #{id}",
+        "empty": "Noch keine Subagenten vorhanden.",
+        "capacityNotice": "{count, plural, one {# früherer Subagent in diesem Arbeitsbereich wird nicht mehr aufbewahrt.} other {# frühere Subagenten in diesem Arbeitsbereich werden nicht mehr aufbewahrt.}}",
+        "detailLoading": "Neueste Nachricht wird geladen …",
+        "detailError": "Die neueste Nachricht konnte nicht geladen werden.",
+        "detailRetry": "Erneut versuchen",
+        "detailNothing": "Noch keine Nachrichten vorhanden.",
+        "detailOpenInTab": "Vollständige Sitzung öffnen"
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# Hintergrundaufgabe läuft} other {# Hintergrundaufgaben laufen}}",

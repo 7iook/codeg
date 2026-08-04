@@ -3110,7 +3110,24 @@
       },
       "subAgentObservatory": {
         "running": "{count, plural, one {# sub-agent running} other {# sub-agents running}}",
-        "observable": "{count, plural, one {# sub-agent} other {# sub-agents}}"
+        "observable": "{count, plural, one {# sub-agent} other {# sub-agents}}",
+        "panelTitle": "Sub-agents",
+        "unknownAgent": "Sub-agent",
+        "silent": "No recent activity",
+        "silentTooltip": "No new messages recently. This does not mean it finished — built-in sub-agents report no completion signal.",
+        "sectionCurrent": "This conversation",
+        "sectionOther": "{count, plural, one {# in another conversation} other {# in other conversations}}",
+        "sectionUnattributed": "Conversation unknown",
+        "sectionCompleted": "Finished",
+        "inConversation": "in {name}",
+        "untitledConversation": "conversation #{id}",
+        "empty": "No sub-agents to show yet.",
+        "capacityNotice": "{count, plural, one {# earlier sub-agent across this workspace is no longer retained.} other {# earlier sub-agents across this workspace are no longer retained.}}",
+        "detailLoading": "Loading latest message…",
+        "detailError": "Could not load the latest message.",
+        "detailRetry": "Retry",
+        "detailNothing": "No messages to show yet.",
+        "detailOpenInTab": "Open full session"
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# background task running} other {# background tasks running}}",

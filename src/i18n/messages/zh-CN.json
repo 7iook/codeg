@@ -3110,7 +3110,24 @@
       },
       "subAgentObservatory": {
         "running": "{count} 个子智能体运行中",
-        "observable": "{count} 个子智能体"
+        "observable": "{count} 个子智能体",
+        "panelTitle": "子智能体",
+        "unknownAgent": "子智能体",
+        "silent": "近期无活动",
+        "silentTooltip": "近期没有新消息。这不代表它已结束 —— 内置子智能体不会上报完成信号。",
+        "sectionCurrent": "当前会话",
+        "sectionOther": "其他会话中的 {count} 个",
+        "sectionUnattributed": "会话未知",
+        "sectionCompleted": "已结束",
+        "inConversation": "位于 {name}",
+        "untitledConversation": "会话 #{id}",
+        "empty": "暂无可显示的子智能体。",
+        "capacityNotice": "本工作区中有 {count} 个较早的子智能体已不再保留。",
+        "detailLoading": "正在加载最新消息…",
+        "detailError": "无法加载最新消息。",
+        "detailRetry": "重试",
+        "detailNothing": "暂无可显示的消息。",
+        "detailOpenInTab": "打开完整会话"
       },
       "backgroundTasks": {
         "running": "{count} 个后台任务运行中",

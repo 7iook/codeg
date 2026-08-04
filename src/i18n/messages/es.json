@@ -3110,7 +3110,24 @@
       },
       "subAgentObservatory": {
         "running": "{count, plural, one {# subagente en ejecución} other {# subagentes en ejecución}}",
-        "observable": "{count, plural, one {# subagente} other {# subagentes}}"
+        "observable": "{count, plural, one {# subagente} other {# subagentes}}",
+        "panelTitle": "Subagentes",
+        "unknownAgent": "Subagente",
+        "silent": "Sin actividad reciente",
+        "silentTooltip": "Sin mensajes nuevos recientemente. Esto no significa que haya terminado: los subagentes integrados no informan ninguna señal de finalización.",
+        "sectionCurrent": "Esta conversación",
+        "sectionOther": "{count, plural, one {# en otra conversación} other {# en otras conversaciones}}",
+        "sectionUnattributed": "Conversación desconocida",
+        "sectionCompleted": "Finalizados",
+        "inConversation": "en {name}",
+        "untitledConversation": "conversación n.º {id}",
+        "empty": "Aún no hay subagentes que mostrar.",
+        "capacityNotice": "{count, plural, one {# subagente anterior de este espacio de trabajo ya no se conserva.} other {# subagentes anteriores de este espacio de trabajo ya no se conservan.}}",
+        "detailLoading": "Cargando el último mensaje…",
+        "detailError": "No se pudo cargar el último mensaje.",
+        "detailRetry": "Reintentar",
+        "detailNothing": "Aún no hay mensajes que mostrar.",
+        "detailOpenInTab": "Abrir la sesión completa"
       },
       "backgroundTasks": {
         "running": "{count, plural, one {# tarea en segundo plano en ejecución} other {# tareas en segundo plano en ejecución}}",
