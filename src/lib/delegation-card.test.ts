@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest"
 
 import { ALL_AGENT_TYPES } from "@/lib/types"
 import {
+  parseAppliedPersona,
   parseDelegateTaskId,
   parseDelegationMeta,
   parseInput,
   parseToolOutput,
+  truncatePersonaName,
 } from "./delegation-card"
 
 describe("parseInput wrapper peeling", () => {
@@ -84,7 +86,11 @@ describe("codex live-wire result envelope", () => {
         structuredContent: runningAck,
       })
     )
-    expect(parsed).toEqual({ kind: "ack", childConversationId: 2781 })
+    expect(parsed).toEqual({
+      kind: "ack",
+      childConversationId: 2781,
+      appliedPersona: null,
+    })
   })
 
   // Note: this one already passed pre-fix via the `task_id=<id>` text scan —
@@ -106,6 +112,7 @@ describe("codex live-wire result envelope", () => {
       text: "mcp server disconnected",
       isError: true,
       childConversationId: null,
+      appliedPersona: null,
     })
   })
 
@@ -123,6 +130,7 @@ describe("codex live-wire result envelope", () => {
         "\n```",
       isError: false,
       childConversationId: null,
+      appliedPersona: null,
     })
     expect(parseDelegateTaskId(childOutput, null)).toBeNull()
   })
@@ -173,5 +181,199 @@ describe("parseDelegationMeta task fields", () => {
     })
     expect(parsed?.task).toBeNull()
     expect(parsed?.taskId).toBeNull()
+  })
+})
+
+describe("parseAppliedPersona", () => {
+  // Mirrors Rust's `#[serde(tag = "kind", rename_all = "snake_case")]` on
+  // `AppliedPersona` (acp/delegation/persona.rs). A drift in either direction
+  // silently kills the label, so pin the three wire literals.
+  it("reads the native variant", () => {
+    expect(
+      parseAppliedPersona({ kind: "native", name: "plan-reality-recon" })
+    ).toEqual({ kind: "native", name: "plan-reality-recon" })
+  })
+
+  it("reads the hint variant", () => {
+    expect(
+      parseAppliedPersona({ kind: "hint", name: "code-reviewer" })
+    ).toEqual({ kind: "hint", name: "code-reviewer" })
+  })
+
+  it("reads the ignored_unsupported_cli variant", () => {
+    expect(
+      parseAppliedPersona({ kind: "ignored_unsupported_cli", name: "whatever" })
+    ).toEqual({ kind: "ignored_unsupported_cli", name: "whatever" })
+  })
+
+  it.each([
+    ["null", null],
+    ["undefined (legacy backend omits the field)", undefined],
+    ["an array", [{ kind: "native", name: "x" }]],
+    ["a string", "native"],
+    ["a number", 7],
+    ["an unknown kind", { kind: "failed", name: "x" }],
+    ["a non-string kind", { kind: 1, name: "x" }],
+    ["a missing name", { kind: "native" }],
+    ["an empty name", { kind: "native", name: "" }],
+    ["a non-string name", { kind: "native", name: { nested: true } }],
+  ])("returns null for %s", (_label, raw) => {
+    expect(parseAppliedPersona(raw)).toBeNull()
+  })
+})
+
+describe("applied_persona on the parsed tool output", () => {
+  /**
+   * The load-bearing timing case (backend R3-A2): the broker commits
+   * `Native` / `IgnoredUnsupportedCli` the moment `spawn` returns Ok, which is
+   * still the RUNNING ack — the card is on screen from that point, so the
+   * persona must ride the `ack` variant, not just `outcome`.
+   */
+  it("carries the persona on a running ack, not only on a terminal outcome", () => {
+    const parsed = parseToolOutput(
+      JSON.stringify({
+        content: [{ type: "text", text: "Delegation successful." }],
+        structuredContent: {
+          status: "running",
+          child_conversation_id: 51,
+          task_id: "t-1",
+          applied_persona: { kind: "native", name: "plan-reality-recon" },
+        },
+      })
+    )
+    expect(parsed).toEqual({
+      kind: "ack",
+      childConversationId: 51,
+      appliedPersona: { kind: "native", name: "plan-reality-recon" },
+    })
+  })
+
+  it("carries a hint persona on the terminal completed report", () => {
+    // `Hint` is only promoted after the first-turn send is accepted, so the
+    // terminal report — not the ack — is where it surfaces.
+    const parsed = parseToolOutput(
+      JSON.stringify({
+        status: "completed",
+        child_conversation_id: 9,
+        text: "done",
+        applied_persona: { kind: "hint", name: "code-reviewer" },
+      })
+    )
+    expect(parsed).toMatchObject({
+      kind: "outcome",
+      isError: false,
+      appliedPersona: { kind: "hint", name: "code-reviewer" },
+    })
+  })
+
+  it("keeps a persona committed before a later failure", () => {
+    // A spawn that succeeded and then failed downstream has already committed
+    // `Native`; the error card may legitimately show it.
+    const parsed = parseToolOutput(
+      JSON.stringify({
+        status: "failed",
+        error_code: "subagent_error",
+        message: "child crashed",
+        applied_persona: { kind: "native", name: "executor" },
+      })
+    )
+    expect(parsed).toMatchObject({
+      kind: "outcome",
+      isError: true,
+      appliedPersona: { kind: "native", name: "executor" },
+    })
+  })
+
+  it("yields a null persona for a legacy report without the field", () => {
+    // `skip_serializing_if = "Option::is_none"` means old backends omit it
+    // entirely — must parse, not crash.
+    const parsed = parseToolOutput(
+      JSON.stringify({ status: "completed", text: "done" })
+    )
+    expect(parsed).toMatchObject({ kind: "outcome", appliedPersona: null })
+  })
+
+  it("yields a null persona for the legacy synchronous outcome shape", () => {
+    const parsed = parseToolOutput(JSON.stringify({ kind: "ok", text: "done" }))
+    expect(parsed).toMatchObject({ kind: "outcome", appliedPersona: null })
+  })
+
+  it("drops a malformed persona instead of rendering a partial one", () => {
+    const parsed = parseToolOutput(
+      JSON.stringify({
+        status: "running",
+        applied_persona: { kind: "definitely-not-a-variant", name: "x" },
+      })
+    )
+    expect(parsed).toEqual({
+      kind: "ack",
+      childConversationId: null,
+      appliedPersona: null,
+    })
+  })
+})
+
+describe("parseInput subagent_type (request, never the effect)", () => {
+  it("surfaces the nominated persona for the failure-card hint", () => {
+    const parsed = parseInput(
+      JSON.stringify({
+        agent_type: "kiro",
+        task: "review",
+        subagent_type: "plan-reality-recon",
+      })
+    )
+    expect(parsed.subagentType).toBe("plan-reality-recon")
+  })
+
+  it("keeps it null when absent or empty", () => {
+    expect(
+      parseInput(JSON.stringify({ agent_type: "kiro", task: "x" })).subagentType
+    ).toBeNull()
+    expect(
+      parseInput(JSON.stringify({ agent_type: "kiro", subagent_type: "" }))
+        .subagentType
+    ).toBeNull()
+    expect(
+      parseInput(JSON.stringify({ agent_type: "kiro", subagent_type: 7 }))
+        .subagentType
+    ).toBeNull()
+  })
+})
+
+describe("truncatePersonaName (32 grapheme clusters)", () => {
+  it("leaves a name at or under the limit untouched", () => {
+    expect(truncatePersonaName("plan-reality-recon")).toBe("plan-reality-recon")
+    expect(truncatePersonaName("a".repeat(32))).toBe("a".repeat(32))
+  })
+
+  it("truncates an over-long ASCII name with an ellipsis", () => {
+    expect(truncatePersonaName("a".repeat(33))).toBe("a".repeat(32) + "…")
+  })
+
+  // `IgnoredUnsupportedCli` short-circuits BEFORE the ASCII name-grammar check
+  // (backend R3-F1), so a non-ASCII name really can reach the UI. Counting
+  // UTF-16 code units here would cut a CJK name at half its visible length and
+  // could split a surrogate pair into a replacement char.
+  it("counts CJK characters as one unit each", () => {
+    const name = "计".repeat(40)
+    expect(truncatePersonaName(name)).toBe("计".repeat(32) + "…")
+  })
+
+  it("does not split a multi-code-unit emoji", () => {
+    const name = "🤖".repeat(40)
+    const out = truncatePersonaName(name)
+    expect(out).toBe("🤖".repeat(32) + "…")
+    expect(out).not.toContain("�")
+  })
+
+  it("keeps a ZWJ emoji family together when Intl.Segmenter is available", () => {
+    // One grapheme cluster, 7 code points. Under the Segmenter path this stays
+    // whole; the code-point fallback would count it as several.
+    const family = "👨‍👩‍👧‍👦"
+    expect(truncatePersonaName(family + "x", 2)).toBe(family + "x")
+  })
+
+  it("honors an explicit lower limit", () => {
+    expect(truncatePersonaName("abcdef", 3)).toBe("abc…")
   })
 })

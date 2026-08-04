@@ -25,6 +25,10 @@ import { CollapsedOverlayChip } from "@/components/chat/collapsed-overlay-chip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { StatusBadge } from "@/components/message/delegation-status-badge"
+import {
+  PersonaLabel,
+  RequestedPersonaNote,
+} from "@/components/message/persona-label"
 import { SubAgentSessionDialog } from "@/components/message/sub-agent-session-dialog"
 import {
   useDelegationCardModel,
@@ -123,6 +127,8 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
     errorCode,
     childConversationId,
     childConnectionId,
+    appliedPersona,
+    requestedPersona,
   } = useDelegationCardModel(source)
 
   // Unlike the inline DelegatedSubThread (which falls through to the generic
@@ -147,6 +153,7 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
         <span className="min-w-0 truncate text-xs font-semibold text-foreground">
           {agentType ? getAgentLabel(agentType) : t("unknownAgent")}
         </span>
+        <PersonaLabel persona={appliedPersona} className="text-[11px]" />
         {taskId && (
           <span
             className="shrink-0 font-mono text-[11px] text-muted-foreground"
@@ -159,6 +166,13 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
       </div>
       {task && (
         <div className="truncate text-[11px] text-muted-foreground">{task}</div>
+      )}
+      {/* Failure only — mirrors the inline card so the two never disagree. */}
+      {status === "err" && (
+        <RequestedPersonaNote
+          requestedPersona={requestedPersona}
+          className="text-[11px]"
+        />
       )}
     </div>
   )

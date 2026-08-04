@@ -361,22 +361,27 @@
 
 ### 阶段 7 · 前端 delegation-card 消费 applied_persona
 
-- [ ] 7. 前端 UI(R2 A4 + R3 F2 后的三态 · 消费 outcome 不消费 raw_input)
-  - [ ] 7.1 `src/lib/delegation-card.ts:199-241 parseInput` 拆成两部分:
+- [x] 7. 前端 UI(R2 A4 + R3 F2 后的三态 · 消费 outcome 不消费 raw_input)
+  - **Evidence**: commit pending · verify: `npx tsc --noEmit` → EXIT=0 · `npx vitest run`(4 文件)→ 100 passed EXIT=0 · files: `delegation-card.ts` / `use-delegation-card-model.ts` / `persona-label.tsx` / `delegated-sub-thread.tsx` / `sub-agent-overlay.tsx` · AC: 5.2 5.3 5.4 5.5 5.6 R3-F2 — 三态标签两处 UI 一致;缺席不 fallback raw_input
+  - [x] 7.1 `parseInput` 拆成两部分:
     - `parseInput()` 只抽 `subagent_type` 作为 **requested 指示器**
-    - **新加 `parseOutcome()`** 从 `DelegationSuccess.applied_persona` 抽 `AppliedPersona` 状态
+    - **新加 `parseAppliedPersona()`** 从 `applied_persona` 抽 `AppliedPersona` 三态(方法名与 tasks 原稿 `parseOutcome()` 不同:实测 `interpretReport()` 已在解 `DelegationTaskReport`,同一 `obj` 里多抽一字段即可,新开 `parseOutcome()` 会造第二条解析链路)
     - _Requirements: 5.2, R3-F2_
-  - [ ] 7.2 渲染层(`delegation-card.tsx` 或对应组件):
+    - **Evidence**: commit pending · verify: `npx vitest run src/lib/delegation-card.test.ts` → 51 passed EXIT=0 · files: `AppliedPersona @ delegation-card.ts:65` / `parseAppliedPersona @ :85` / `subagentType: requested @ :348` · AC: 5.2 R3-F2 — 三态 serde 字面量对齐 persona.rs `tag="kind" snake_case`;非法输入 10 例全 → null
+  - [x] 7.2 渲染层(`persona-label.tsx` 新增 · 被 inline 卡与 overlay 共用):
     - `applied_persona == Native{name}` → `<Agent Label> · @<name>` primary 样式
     - `applied_persona == Hint{name}` → `<Agent Label> · @<name> (best-effort)` 弱化标记
     - `applied_persona == IgnoredUnsupportedCli{name}` → `<Agent Label> · @<name> (ignored — CLI unsupported)` 灰化
     - 失败(`DelegationOutcome::Err`)+ `raw_input.subagent_type` 存在 → 现有 error 卡片 + 追加一行 `requested: @<subagent_type>` (R3 F2 不引入新 outcome 字段)
     - `applied_persona` 缺席 + 无错误 → 不显示副标签,不 fallback 到 raw_input
     - _Requirements: 5.3, 5.4, 5.5_
-  - [ ] 7.3 名称显示上限 32 grapheme(超出 `…` + tooltip / copy),用 Intl.Segmenter 处理 CJK/emoji
+    - **Evidence**: commit pending · verify: `npx vitest run`(3 渲染文件)→ 49 passed EXIT=0 · files: `PersonaLabel @ persona-label.tsx:27` / `RequestedPersonaNote @ :76` / `delegated-sub-thread.tsx:113,132` / `sub-agent-overlay.tsx:156,172` · AC: 5.3 5.4 5.5 — 两处 UI 共用同一组件
+  - [x] 7.3 名称显示上限 32 grapheme(超出 `…` + tooltip / copy),用 Intl.Segmenter 处理 CJK/emoji
     - _Requirements: 5.6_
-  - [ ]* 7.4 前端单元测试(vitest):四态 applied_persona 分别渲染的结果 · legacy 无 applied_persona 的兼容显示 · 失败卡片 requested indicator · 32 grapheme 截断
+    - **Evidence**: commit pending · verify: `npx vitest run src/lib/delegation-card.test.ts` → EXIT=0 · files: `PERSONA_NAME_DISPLAY_LIMIT @ delegation-card.ts:101` / `truncatePersonaName @ :132` · AC: 5.6 — tsconfig lib 为 ES2020 无 Segmenter 类型,故运行时探测 + code-point 退化;全名留在 `title`
+  - [x]* 7.4 前端单元测试(vitest):三态 applied_persona 分别渲染 · legacy 无 applied_persona 的兼容显示 · 失败卡片 requested indicator · 32 grapheme 截断
     - _Requirements: 5.2-5.6_
+    - **Evidence**: commit pending · verify: `npx vitest run`(4 文件)→ 100 passed EXIT=0 · files: `delegation-card.test.ts` / `persona-label.test.tsx` / `delegated-sub-thread.test.tsx` / `sub-agent-overlay.test.tsx` · AC: 5.2-5.6 — 负向 mutation 双验:①fallback raw_input → 4 条红 ②去掉 ack 的 appliedPersona → 3 条红
 
 ### 阶段 8 · e2e 验证 + process-death 观察
 
@@ -551,3 +556,18 @@
   - **wiring gate 的一次真实拦截与结构性修复**:gate 报 `decode_persona_lists_arg` 「只有 1 处非生产调用点」。核实后发现 codegraph **确实索引了 `src/bin/codeg_mcp.rs`**(`decode_persona_lists` 的 caller 正是 `main (codeg_mcp.rs:199)`),但 gate 把 `bin/` 归入非生产路径。试过两种 marker 布局均无效(gate 要求 marker 在**定义行本身**,而 rustfmt 会把 `{ // comment` 的注释拆到下一行 —— hook 与 rustfmt 的结构性冲突)。**最终没有绕 gate,而是改善接线结构**:在 lib 侧加 `CompanionContext::decode_persona_lists`,binary 退化为纯 argv shim,调用链变成 `main → CompanionContext::decode_persona_lists → decode_persona_lists_arg`,中间那跳在 lib 内,gate 自然放行。副产品:decode 步骤变得可测、binary 更薄
   - **验证**:cargo check --tests EXIT=0 · codeg-mcp bin EXIT=0 · 六个集成 crate **53 passed**(21 新 + 32 回归零退化)· clippy --lib -D warnings 仅 3 处既有 connection.rs steer dead-code(已确认存在于 `f6add7ad^`)· rustfmt 按 Triage A 修代码并重新 staged,格式化后重跑 53/53 仍绿,未用 `GATE_SKIP=1`
   - **6.1 的归属说明**:原计划属 stage 6 的 listener 解析,在 stage 5(`62edeb4f`)已提前落地 —— sonnet review 轮 2 指出「broker 翻译层再对,listener 不解析就是空气」
+
+- 2026-08-04 · executor SUB · **stage 7 complete**(前端消费 `applied_persona` · 8 files + 1 新组件 + 1 新测试):
+  - **落地形态与 tasks 原稿有两处偏离(均已实测,非照抄下派稿)**:
+    - ① **7.1 不新开 `parseOutcome()`**。实测 `interpretReport()`(`delegation-card.ts`)已在解 `DelegationTaskReport`,`applied_persona` 就在同一个 `obj` 里 —— 新开一条解析链路等于给同一份 wire 数据造第二个入口。改为在 `interpretReport()` 内多抽一字段 + 一个纯 defensive 的 `parseAppliedPersona()`
+    - ② **7.2 渲染层不是各组件分别解析**。`parseToolOutput` 全仓只有一个生产消费者 `use-delegation-card-model.ts`,其 doc 明写「同一 model 驱动 inline 卡与 overlay,两处不得不一致」。因此字段加在 `DelegationCardModel` 上,并抽出**共用组件** `persona-label.tsx` 给两处挂载 —— 若各组件自行解析,等于重新引入这个 hook 当初要消除的病灶
+  - **`ack` 与 `outcome` 两个 variant 都带 `appliedPersona`(时机决策的直接后果)**:后端 R3-A2 让 `Native`/`IgnoredUnsupportedCli` 在 spawn-Ok 即落地,那一刻 report 还是 `status:"running"` 的 ack;卡片从 ack 起就在屏上,只挂 `outcome` 会让人格标签等到终态才出现。`Hint` 相反(首轮 send-Ok 才提升),落在终态报文
+  - **自核实 4 点结论**:serde 形状 `#[serde(tag="kind", rename_all="snake_case")]` → `native`/`hint`/`ignored_unsupported_cli` 三态各带 `name`,与 `applied_persona_serde_round_trips_three_variants` 的断言一致;渲染消费者 = `delegated-sub-thread.tsx` + `sub-agent-overlay.tsx`(经 hook 中枢);tsconfig `lib: ["ES2020"...]` **不含** Segmenter 类型 → 运行时特性探测 + code-point 退化,不动全局 lib;全仓无既有 grapheme 截断 util 可复用
+  - **32 grapheme 截断是真需求不是装饰**:`IgnoredUnsupportedCli` 在 broker 里**早于** `is_valid_persona_name` 短路返回(R3-F1 顺序),所以它的 `name` 从未过 ASCII 语法检查 —— CJK / emoji / 超长名真能到 UI。按 UTF-16 计数会把 CJK 名截到可见长度的一半、还可能劈开代理对成 `�`。已按真实多字节字符测(CJK / emoji / ZWJ 家族)
+  - **负向 mutation 双验**:① 把「缺席 + 无错误」改成 fallback `raw_input.subagent_type` → **4 条红**(inline 卡与 overlay 各 2:「无效果不显示标签」+「失败卡只显示 requested 不显示生效标签」),证明 R2-A4 被测试真正锁住 ② 去掉 `ack` variant 的 `appliedPersona` → **3 条红**(parse 层 1 + 两处 UI 各 1),证明上面那条时机约束被锁住。两次均已还原并复验回绿
+  - **验证**:`npx tsc --noEmit` EXIT=0 · 相关 4 个测试文件 **100 passed** EXIT=0 · 改动文件 eslint 0 finding · prettier `--check` 对 9 个改动文件全过(首轮 5 文件格式不合已 `--write` 修正后重跑绿)
+  - **全量 vitest 的 5 条既有红**(`message-input` ×3 / `conversation-detail-panel-steering` ×1 / `delegation-multi-turn-timeline` ×1)**经 stash 基线实测确认为本轮之前既存**:把本轮 9 个改动文件全部 stash 后单跑这 3 个文件,同样 5 failed / 32 passed,与带改动时逐条同名。非本轮引入,未处理
+  - **硬约束合规**:未改后端(`src-tauri/` 零改动)· 未把 `raw_input` 当生效状态(仅失败卡 requested 行读它)· 未跑 `pnpm eslint .`(全仓 8554 条既有 CRLF prettier 噪音)
+  - **未纳入本轮的一处后端观察(不阻塞 stage 7,交主 AI 判断)**:`running_report()`(`broker.rs:1760` 附近,`get_delegation_status` 对**运行中**任务的返回)硬编码 `applied_persona: None`,未从 `task.applied_persona_intent` 取。影响面:仅当卡片改从 `get_delegation_status` 轮询取人格时才会显示丢失;当前 UI 走的是 `delegate_to_agent` 的 ack/终态报文,两条路径都带人格,故本轮 UI 不受影响。若 stage 8 e2e 发现运行中轮询丢标签,再回填一行即可
+  - **i18n**:新增 `personaBestEffort` / `personaIgnoredUnsupported` / `personaRequested` 三键,10 个 locale 全部补齐(en/zh-CN/zh-TW/ja/ko/es/de/fr/pt/ar)
+  - **未纳入提交**:`docs/specs/README.md` 的一行改动(subagent-observatory 行序/status)非本轮产出,保持 unstaged 未提交

@@ -36,6 +36,106 @@ export type ParsedInput = {
   agentType: AgentType | null
   task: string | null
   workingDir: string | null
+  /** The persona the caller *nominated* (`raw_input.subagent_type`) — the
+   *  REQUEST, not the effect. Only ever rendered as a "requested: @x" hint on
+   *  a failure card (Requirement 5.4). Never a fallback for the effective
+   *  persona: the effect lives on the outcome-level `applied_persona`
+   *  (Requirement 5.5 / R2-A4), and a nominated name may have been rejected,
+   *  downgraded, or silently ignored. */
+  subagentType: string | null
+}
+
+/**
+ * What the broker ACTUALLY applied for a delegation — the outcome-level
+ * mirror of Rust's `AppliedPersona` (`acp/delegation/persona.rs`, serialized
+ * `#[serde(tag = "kind", rename_all = "snake_case")]`):
+ *
+ *   `{"kind":"native","name":"plan-reality-recon"}`
+ *   `{"kind":"hint","name":"code-reviewer"}`
+ *   `{"kind":"ignored_unsupported_cli","name":"whatever"}`
+ *
+ * There is deliberately NO `failed` variant: persona resolution / spawn / send
+ * failures travel the existing `DelegationOutcome::Err` channel instead, so the
+ * failure wire contract never grew a new field (Requirement 5.1 / R3-F2).
+ *
+ * Absent (`null`) means "no persona took effect" — either none was nominated,
+ * or the round failed before the broker could commit one. It NEVER means "look
+ * at the request instead".
+ */
+export type AppliedPersona =
+  | { kind: "native"; name: string }
+  | { kind: "hint"; name: string }
+  | { kind: "ignored_unsupported_cli"; name: string }
+
+const APPLIED_PERSONA_KINDS: ReadonlySet<string> = new Set([
+  "native",
+  "hint",
+  "ignored_unsupported_cli",
+])
+
+/**
+ * Defensively read an `applied_persona` value off a broker report.
+ *
+ * Returns null for every shape that isn't a fully-formed persona — a legacy
+ * backend omits the field entirely (`skip_serializing_if = "Option::is_none"`),
+ * and a future variant this frontend doesn't know must degrade to "no label"
+ * rather than render `@undefined`. An unknown `kind` is therefore dropped, not
+ * partially trusted.
+ */
+export function parseAppliedPersona(raw: unknown): AppliedPersona | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+  const obj = raw as Record<string, unknown>
+  const kind = obj.kind
+  const name = obj.name
+  if (typeof kind !== "string" || !APPLIED_PERSONA_KINDS.has(kind)) return null
+  if (typeof name !== "string" || !name) return null
+  return { kind, name } as AppliedPersona
+}
+
+/** Max persona-name length the card displays, in grapheme clusters
+ *  (Requirement 5.6). Distinct from the 64-CHARACTER wire-level grammar cap in
+ *  `is_valid_persona_name` — that bounds what may be *requested*; this bounds
+ *  what is *drawn*. Keep them separate: `IgnoredUnsupportedCli` short-circuits
+ *  BEFORE the grammar check (R3-F1), so a name reaching this function may be
+ *  arbitrary UTF-8 (CJK, emoji, ZWJ sequences) of any length. */
+export const PERSONA_NAME_DISPLAY_LIMIT = 32
+
+/** Split into grapheme clusters when the runtime provides `Intl.Segmenter`,
+ *  else fall back to code points. `tsconfig` targets ES2020, whose lib has no
+ *  `Intl.Segmenter` typings, so it is feature-detected through a narrow local
+ *  shape instead of widening the project's lib. Code-point fallback can split a
+ *  ZWJ emoji, which is a cosmetic degradation, never a crash. */
+type SegmenterCtor = new (
+  locales?: string | string[],
+  options?: { granularity?: "grapheme" | "word" | "sentence" }
+) => { segment(input: string): Iterable<{ segment: string }> }
+
+function splitGraphemes(value: string): string[] {
+  const ctor = (Intl as unknown as { Segmenter?: SegmenterCtor }).Segmenter
+  if (typeof ctor === "function") {
+    try {
+      const segmenter = new ctor(undefined, { granularity: "grapheme" })
+      return Array.from(segmenter.segment(value), (s) => s.segment)
+    } catch {
+      // Fall through to the code-point path on an unexpected ICU failure.
+    }
+  }
+  return Array.from(value)
+}
+
+/**
+ * Truncate a persona name for display at [`PERSONA_NAME_DISPLAY_LIMIT`]
+ * grapheme clusters, appending `…` on overflow (Requirement 5.6). The caller is
+ * responsible for keeping the FULL name reachable (tooltip / copy) — this
+ * returns display text only.
+ */
+export function truncatePersonaName(
+  name: string,
+  limit: number = PERSONA_NAME_DISPLAY_LIMIT
+): string {
+  const graphemes = splitGraphemes(name)
+  if (graphemes.length <= limit) return name
+  return graphemes.slice(0, limit).join("") + "…"
 }
 
 // Derived from the canonical `ALL_AGENT_TYPES` so a newly added agent is
@@ -116,6 +216,7 @@ const EMPTY_PARSED_INPUT: ParsedInput = {
   agentType: null,
   task: null,
   workingDir: null,
+  subagentType: null,
 }
 
 // Wrapper keys that hosts use to nest the actual tool arguments. JSON-RPC
@@ -236,10 +337,15 @@ export function parseInput(raw: string | null | undefined): ParsedInput {
     return EMPTY_PARSED_INPUT
   }
   const at = typeof obj.agent_type === "string" ? obj.agent_type : null
+  const requested =
+    typeof obj.subagent_type === "string" && obj.subagent_type
+      ? obj.subagent_type
+      : null
   return {
     agentType: at && KNOWN_AGENT_TYPES.has(at) ? (at as AgentType) : null,
     task: typeof obj.task === "string" ? obj.task : null,
     workingDir: typeof obj.working_dir === "string" ? obj.working_dir : null,
+    subagentType: requested,
   }
 }
 
@@ -257,14 +363,27 @@ export function parseInput(raw: string | null | undefined): ParsedInput {
  * Returning `ack` — rather than letting the raw ack JSON fall through as an
  * "outcome" — is what stops the card from painting the ack as the result and
  * from prematurely flipping the status badge to "ok".
+ *
+ * Both variants carry `appliedPersona`, deliberately: the broker commits
+ * `Native` / `IgnoredUnsupportedCli` as soon as `spawn` returns Ok, which is
+ * still inside the RUNNING ack (`running_ack`, broker.rs) — so hanging the
+ * persona off `outcome` alone would hide the label until the child reached a
+ * terminal state, while the card is on screen from the ack onward. (`Hint` is
+ * the reverse: it is promoted only after the first-turn send succeeds, so it
+ * shows up on the terminal report, not the ack.)
  */
 export type ParsedToolOutput =
-  | { kind: "ack"; childConversationId: number | null }
+  | {
+      kind: "ack"
+      childConversationId: number | null
+      appliedPersona: AppliedPersona | null
+    }
   | {
       kind: "outcome"
       text: string
       isError: boolean
       childConversationId: number | null
+      appliedPersona: AppliedPersona | null
     }
 
 function readChildConversationId(obj: Record<string, unknown>): number | null {
@@ -283,19 +402,24 @@ function interpretReport(
   obj: Record<string, unknown>
 ): ParsedToolOutput | null {
   const childConversationId = readChildConversationId(obj)
+  // Present on the running ack (Native / IgnoredUnsupportedCli) AND on the
+  // terminal report (all three variants). A legacy backend omits the field
+  // entirely, which parses to null.
+  const appliedPersona = parseAppliedPersona(obj.applied_persona)
   const status = typeof obj.status === "string" ? obj.status : null
   if (status) {
     switch (status) {
       case "running":
       case "unknown":
         // No terminal result to show on the card — it's an ack.
-        return { kind: "ack", childConversationId }
+        return { kind: "ack", childConversationId, appliedPersona }
       case "completed":
         return {
           kind: "outcome",
           text: typeof obj.text === "string" ? obj.text : "",
           isError: false,
           childConversationId,
+          appliedPersona,
         }
       case "failed":
       case "canceled": {
@@ -306,13 +430,14 @@ function interpretReport(
           text: message || code || "Delegation failed.",
           isError: true,
           childConversationId,
+          appliedPersona,
         }
       }
       default:
-        return { kind: "ack", childConversationId }
+        return { kind: "ack", childConversationId, appliedPersona }
     }
   }
-  // Legacy synchronous outcome shape.
+  // Legacy synchronous outcome shape — predates `applied_persona` entirely.
   const kind = typeof obj.kind === "string" ? obj.kind : null
   if (kind === "ok") {
     return {
@@ -320,6 +445,7 @@ function interpretReport(
       text: typeof obj.text === "string" ? obj.text : "",
       isError: false,
       childConversationId,
+      appliedPersona,
     }
   }
   if (kind === "err") {
@@ -330,6 +456,7 @@ function interpretReport(
       text: message || code || "Delegation failed.",
       isError: true,
       childConversationId,
+      appliedPersona,
     }
   }
   return null
@@ -421,6 +548,7 @@ export function parseToolOutput(
         text: String(v),
         isError: forceError,
         childConversationId: null,
+        appliedPersona: null,
       }
     }
   } catch {
@@ -433,6 +561,7 @@ export function parseToolOutput(
       text: trimmed,
       isError: forceError,
       childConversationId: null,
+      appliedPersona: null,
     }
   }
 
@@ -481,6 +610,11 @@ export function parseToolOutput(
           text,
           isError: obj.isError === true || forceError,
           childConversationId: inner ? readChildConversationId(inner) : null,
+          // Same source as the child id: an uninterpretable `structuredContent`
+          // may still carry a well-formed persona.
+          appliedPersona: inner
+            ? parseAppliedPersona(inner.applied_persona)
+            : null,
         }
       }
     }
@@ -502,6 +636,7 @@ export function parseToolOutput(
       text: peel.hostError,
       isError: true,
       childConversationId: null,
+      appliedPersona: null,
     }
   }
 
@@ -511,6 +646,7 @@ export function parseToolOutput(
     text: "```json\n" + JSON.stringify(obj, null, 2) + "\n```",
     isError: forceError,
     childConversationId: null,
+    appliedPersona: null,
   }
 }
 

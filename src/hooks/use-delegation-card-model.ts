@@ -29,6 +29,7 @@ import {
   parseInput,
   parseToolOutput,
   resolveDelegationStatus,
+  type AppliedPersona,
   type DelegationCardStatus,
   type ParsedToolOutput,
 } from "@/lib/delegation-card"
@@ -53,6 +54,16 @@ export interface DelegationCardModel {
   errorCode: string | undefined
   childConversationId: number | null
   childConnectionId: string | null
+  /** What the broker ACTUALLY applied, read off the outcome-level
+   *  `applied_persona`. Non-null from the running ack onward for the native /
+   *  ignored paths; `hint` lands once the first-turn send is accepted. Null
+   *  means no persona took effect — render NO secondary label rather than
+   *  falling back to `requestedPersona` (Requirement 5.5 / R2-A4). */
+  appliedPersona: AppliedPersona | null
+  /** The persona the caller NOMINATED (`raw_input.subagent_type`). Display-only,
+   *  and only on a failure card, where it explains what was asked for
+   *  (Requirement 5.4). Never a stand-in for `appliedPersona`. */
+  requestedPersona: string | null
   /** False when there's no live binding and the input parsed to neither an
    *  agent type nor a task — nothing useful to draw. Callers render null. */
   hasModel: boolean
@@ -150,6 +161,12 @@ export function useDelegationCardModel(
     errorCode,
     childConversationId,
     childConnectionId,
+    // Effect, not request: sourced ONLY from the broker's outcome-level field.
+    // The error path is read too — a spawn that succeeded before a later
+    // failure has already committed `Native`, so an error card can legitimately
+    // carry a persona.
+    appliedPersona: toolOutput?.appliedPersona ?? null,
+    requestedPersona: parsed.subagentType,
     // Broker-stamped meta alone is proof enough of a delegation — the
     // persisted Cursor shape has empty raw_input and no live binding.
     hasModel: Boolean(binding || parsed.agentType || parsed.task || parsedMeta),

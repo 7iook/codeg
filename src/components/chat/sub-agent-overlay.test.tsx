@@ -232,3 +232,129 @@ describe("SubAgentOverlay", () => {
     expect(screen.queryByText(/^#/)).not.toBeInTheDocument()
   })
 })
+
+describe("SubAgentOverlay persona label", () => {
+  beforeEach(() => {
+    bindings = {}
+    mockedHook.mockReset()
+    mockedHook.mockImplementation((id: string) => ({
+      binding: bindings[id],
+      detail: null,
+      loading: false,
+      error: null,
+    }))
+  })
+
+  function outputWith(report: Record<string, unknown>): string {
+    return JSON.stringify({
+      content: [{ type: "text", text: "Delegation successful." }],
+      structuredContent: report,
+    })
+  }
+
+  /**
+   * The overlay and the inline card share `useDelegationCardModel` precisely so
+   * they can never disagree about a sub-agent. The persona is part of that
+   * shared model, so it must surface here too — a label that only appeared
+   * inline would reintroduce the divergence the hook exists to prevent.
+   */
+  it("shows the effective persona on the expanded row", () => {
+    renderWithIntl(
+      <SubAgentOverlay
+        defaultExpanded
+        overlayKey="k-persona"
+        delegations={[
+          {
+            parentToolUseId: "pt-1",
+            input: JSON.stringify({ agent_type: "kiro", task: "review" }),
+            output: outputWith({
+              status: "running",
+              child_conversation_id: 99,
+              applied_persona: { kind: "native", name: "plan-reality-recon" },
+            }),
+          },
+        ]}
+      />
+    )
+    expect(screen.getByTestId("delegation-persona-label")).toHaveTextContent(
+      "· @plan-reality-recon"
+    )
+  })
+
+  it("marks a hint persona best-effort on the row", () => {
+    renderWithIntl(
+      <SubAgentOverlay
+        defaultExpanded
+        overlayKey="k-hint"
+        delegations={[
+          {
+            parentToolUseId: "pt-1",
+            input: JSON.stringify({
+              agent_type: "claude_code",
+              task: "review",
+            }),
+            output: outputWith({
+              status: "completed",
+              text: "done",
+              applied_persona: { kind: "hint", name: "code-reviewer" },
+            }),
+          },
+        ]}
+      />
+    )
+    expect(screen.getByTestId("delegation-persona-label")).toHaveTextContent(
+      "· @code-reviewer (best-effort)"
+    )
+  })
+
+  it("shows no persona label when a request produced no effect", () => {
+    renderWithIntl(
+      <SubAgentOverlay
+        defaultExpanded
+        overlayKey="k-none"
+        delegations={[
+          {
+            parentToolUseId: "pt-1",
+            input: JSON.stringify({
+              agent_type: "kiro",
+              task: "review",
+              subagent_type: "plan-reality-recon",
+            }),
+            output: outputWith({ status: "completed", text: "done" }),
+          },
+        ]}
+      />
+    )
+    expect(screen.queryByTestId("delegation-persona-label")).toBeNull()
+    expect(screen.queryByText(/plan-reality-recon/)).toBeNull()
+  })
+
+  it("names the requested persona on a failed row", () => {
+    renderWithIntl(
+      <SubAgentOverlay
+        defaultExpanded
+        overlayKey="k-failed"
+        delegations={[
+          {
+            parentToolUseId: "pt-1",
+            input: JSON.stringify({
+              agent_type: "kiro",
+              task: "review",
+              subagent_type: "plan-reality-recon",
+            }),
+            errorText: JSON.stringify({
+              status: "failed",
+              error_code: "invalid_persona",
+              message: "persona name violates grammar",
+            }),
+            state: "output-error",
+          },
+        ]}
+      />
+    )
+    expect(
+      screen.getByTestId("delegation-requested-persona")
+    ).toHaveTextContent("requested: @plan-reality-recon")
+    expect(screen.queryByTestId("delegation-persona-label")).toBeNull()
+  })
+})
