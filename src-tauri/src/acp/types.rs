@@ -406,10 +406,10 @@ pub enum AcpEvent {
     /// `continue_with_session` or the user-side entry) reached a terminal
     /// state. Session-addressed — it replaces the tool-scoped
     /// `DelegationCompleted`, which is emitted ONLY for the original turn (a
-    /// tool call completes exactly once; Requirement 2.8a). Consumers treat
-    /// this as an increment NOTIFICATION and re-query the delegation status
-    /// as the authoritative source; `turn_version` orders events (drop lower
-    /// than last applied, re-query on gaps — Requirements 8.3/8.4).
+    /// tool call completes exactly once; Requirement 2.8a). `turn_version`
+    /// orders events (drop lower than last applied, re-query on gaps —
+    /// Requirements 8.3/8.4); `get_delegation_status` remains the source a
+    /// consumer polls for the FULL report (child text, token usage, persona).
     DelegationSessionUpdate {
         parent_connection_id: String,
         child_conversation_id: i32,
@@ -421,6 +421,23 @@ pub enum AcpEvent {
         turn_version: u64,
         /// Who dispatched the settled turn (`parent_agent` / `user`).
         origin: crate::acp::delegation::broker::TurnOrigin,
+        /// The settled turn's OUTCOME — the same wire-stable summary
+        /// `DelegationCompleted` carries, for the same reason it carries one.
+        ///
+        /// This event is the terminal announcement for EVERY outcome of a
+        /// continued round: the natural settle in `complete_call` AND the
+        /// cancel/failure teardown (`teardown_canceled_child`'s
+        /// `turn_version > 1` arm). Without the outcome on the event, a
+        /// consumer can only infer one from the event's arrival — which
+        /// reported canceled and failed continuations as successfully
+        /// completed, a terminal that no later authoritative read could
+        /// correct (a wrong terminal is still terminal).
+        ///
+        /// `#[serde(default)]` keeps an older backend's payload
+        /// deserializable; absent then means "outcome unknown", and a consumer
+        /// must leave the row running and re-query rather than guess.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<DelegationResultSummary>,
     },
     /// A human submitted a prompt from the Codeg conversation UI (desktop or
     /// web). Synthetic, notification-only event: it mutates no `SessionState`

@@ -72,8 +72,12 @@ export interface ObservedSubAgentRow {
    *  delegations, which are attributed by conversation id directly. */
   sessionId: string | null
   agentType: AgentType | null
-  /** Never blank: falls back to {@link UNKNOWN_AGENT_LABEL} so a row can always
-   *  be rendered and identified. */
+  /** Non-blank internal identifier, NOT display text — nothing renders this.
+   *  The panel localizes at the render site instead
+   *  (`sub-agent-observatory-list.tsx:586`: `getAgentLabel(row.agentType)` when
+   *  a type exists, `t("unknownAgent")` otherwise). Rendering this field would
+   *  bypass both the custom-agent display registry and i18n. See
+   *  {@link UNKNOWN_AGENT_LABEL}. */
   agentLabel: string
   /** What was delegated, when known. `null` for entries whose producer never
    *  carried the text (identity-less hosts, built-ins without a prompt frame). */
@@ -123,9 +127,22 @@ export interface ObservedSubAgentsInput {
  */
 export const DEFAULT_SILENCE_THRESHOLD_MS = 15_000
 
-/** Neutral stand-in when a row has no agent type (always a built-in: Claude's
- *  Task tool announces no agent identity). Never blank — a blank cell reads as
- *  a rendering bug. */
+/**
+ * Internal, non-UI default for {@link ObservedSubAgentRow.agentLabel} when a row
+ * has no agent type (always a built-in: Claude's Task tool announces no agent
+ * identity).
+ *
+ * NOT user-facing, and deliberately not localized. Display text for that case is
+ * the `unknownAgent` message key, resolved at the render site
+ * (`sub-agent-observatory-list.tsx:586`) — which is also where a known type
+ * becomes `getAgentLabel(agentType)`. Keeping the fallback here as a plain
+ * string means this module stays pure (no `next-intl` dependency, no locale in
+ * its inputs) and the row model carries data rather than presentation.
+ *
+ * Consequence to preserve: `agentLabel` must stay out of JSX. If a future caller
+ * renders it, an English string will leak into every locale — localize at the
+ * render site instead.
+ */
 export const UNKNOWN_AGENT_LABEL = "sub-agent"
 
 const TERMINAL_LIFECYCLES: ReadonlySet<ObservedLifecycle> = new Set([
@@ -241,6 +258,7 @@ function rowFromDelegation(
     conversationId,
     sessionId: null,
     agentType,
+    // Internal identifier only — the panel localizes at the render site.
     agentLabel: agentType ?? UNKNOWN_AGENT_LABEL,
     taskText: nonEmptyString(binding?.task),
     errorCode,
@@ -282,6 +300,7 @@ function rowFromSubagent(
     // Claude's Task tool announces no agent identity, so this is always the
     // neutral placeholder rather than a guess at the host agent.
     agentType: null,
+    // Internal identifier only; the panel renders `t("unknownAgent")` here.
     agentLabel: UNKNOWN_AGENT_LABEL,
     taskText: null,
     errorCode: null,

@@ -90,9 +90,14 @@ pub trait DelegationEventEmitter: Send + Sync {
     /// settled CONTINUED turn (turn_version > 1). Replaces the suppressed
     /// second `DelegationCompleted` (Requirement 2.8a): the payload is
     /// session-addressed — `(task_id, turn_id, turn_version, origin)` plus
-    /// routing ids — and consumers re-query `get_delegation_status` /
-    /// the availability endpoint as the authoritative source (Requirement
-    /// 8.4: the event is an increment notification, not a state carrier).
+    /// routing ids — and carries the settled turn's `result`, the same
+    /// wire-stable summary the completion path carries.
+    ///
+    /// The outcome rides the event because this event announces the terminal of
+    /// EVERY continued round, success and cancel/failure alike; a consumer that
+    /// had to infer the outcome from the event's arrival reported canceled and
+    /// failed continuations as completed. `get_delegation_status` stays the
+    /// source for the FULL report (child text, usage, persona).
     ///
     /// `child_connection_id` is the fan-out fallback: USER-originated
     /// continuations carry the synthetic `USER_ENTRY_CONNECTION_ID` as
@@ -110,6 +115,7 @@ pub trait DelegationEventEmitter: Send + Sync {
         turn_id: &str,
         turn_version: u64,
         origin: TurnOrigin,
+        result: DelegationResultSummary,
     );
 }
 
@@ -150,6 +156,7 @@ impl DelegationEventEmitter for NoopEventEmitter {
     ) {
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn emit_session_update(
         &self,
         _parent_connection_id: &str,
@@ -159,6 +166,7 @@ impl DelegationEventEmitter for NoopEventEmitter {
         _turn_id: &str,
         _turn_version: u64,
         _origin: TurnOrigin,
+        _result: DelegationResultSummary,
     ) {
     }
 }
@@ -257,6 +265,7 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
         turn_id: &str,
         turn_version: u64,
         origin: TurnOrigin,
+        result: DelegationResultSummary,
     ) {
         // Prefer the parent's stream (parent-agent-originated turns), fall
         // back to the CHILD's own stream: user-originated turns carry a
@@ -289,6 +298,7 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
                 turn_id: turn_id.to_string(),
                 turn_version,
                 origin,
+                result: Some(result),
             },
         )
         .await;
@@ -343,6 +353,7 @@ pub mod mock {
         pub turn_id: String,
         pub turn_version: u64,
         pub origin: TurnOrigin,
+        pub result: DelegationResultSummary,
     }
 
     impl MockEventEmitter {
@@ -423,6 +434,7 @@ pub mod mock {
             });
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn emit_session_update(
             &self,
             parent_connection_id: &str,
@@ -432,6 +444,7 @@ pub mod mock {
             turn_id: &str,
             turn_version: u64,
             origin: TurnOrigin,
+            result: DelegationResultSummary,
         ) {
             self.session_updates.lock().await.push(SessionUpdateCall {
                 parent_connection_id: parent_connection_id.to_string(),
@@ -441,6 +454,7 @@ pub mod mock {
                 turn_id: turn_id.to_string(),
                 turn_version,
                 origin,
+                result,
             });
         }
     }

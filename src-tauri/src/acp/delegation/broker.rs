@@ -4085,8 +4085,15 @@ impl DelegationBroker {
             // T4.3 (Requirements 2.8 / 8.2): a CONTINUED turn's terminal is
             // announced by the session-scoped update carrying
             // (task_id, turn_id, turn_version, origin) — the replacement for
-            // the suppressed completion above.
-            self.emit_session_update_for_settled_turn(&task).await;
+            // the suppressed completion above. It carries the SAME outcome
+            // summary that completion would have, projected from the same
+            // `outcome` + `duration_ms`, so the two terminal routes describe a
+            // settled turn identically and no consumer has to guess.
+            self.emit_session_update_for_settled_turn(
+                &task,
+                outcome_to_summary(&outcome, duration_ms),
+            )
+            .await;
             self.result_notify.notify_waiters();
         }
     }
@@ -4228,7 +4235,20 @@ impl DelegationBroker {
     /// defensive case of a continued turn without a recorded turn id. Unlike
     /// the completed/started emits this is NOT gated on a real tool_use_id:
     /// the event is session-addressed (task_id), not tool-call-addressed.
-    async fn emit_session_update_for_settled_turn(&self, task: &RunningTask) {
+    ///
+    /// `result` is the settled turn's outcome, projected onto the same
+    /// wire-stable summary `DelegationCompleted` carries. It is a REQUIRED
+    /// argument rather than something the consumer re-queries, because this
+    /// event announces the terminal of every continued round — success and
+    /// cancel/failure alike — and a consumer forced to infer the outcome from
+    /// the event's arrival reported canceled/failed continuations as
+    /// completed. Both call sites already hold the outcome, so nothing has to
+    /// be looked up to supply it.
+    async fn emit_session_update_for_settled_turn(
+        &self,
+        task: &RunningTask,
+        result: DelegationResultSummary,
+    ) {
         if task.turn_version <= 1 {
             return;
         }
@@ -4252,6 +4272,7 @@ impl DelegationBroker {
                 turn_id,
                 task.turn_version,
                 task.origin,
+                result,
             )
             .await;
     }
@@ -4768,7 +4789,17 @@ impl DelegationBroker {
             )
             .await;
         } else {
-            self.emit_session_update_for_settled_turn(task).await;
+            // Same terminal, session-addressed — and carrying the same
+            // `canceled` code the completion above would have, so a consumer
+            // reports a canceled continuation as canceled instead of inferring
+            // success from the mere arrival of the event.
+            self.emit_session_update_for_settled_turn(
+                task,
+                DelegationResultSummary::Err {
+                    error_code: "canceled".to_string(),
+                },
+            )
+            .await;
         }
         if cancel_turn {
             let _ = self.spawner.cancel(&task.child_connection_id).await;
@@ -7347,6 +7378,14 @@ mod tests {
         assert_eq!(u.origin, TurnOrigin::User);
         assert_eq!(u.child_conversation_id, 42);
         assert_eq!(u.parent_connection_id, "parent-conn");
+        // The settled turn's OUTCOME rides the event. Without it a consumer
+        // cannot tell a successful continuation from a failed or canceled one
+        // and has to guess (the frontend guessed "ok" for every outcome).
+        assert!(
+            matches!(&u.result, DelegationResultSummary::Ok { .. }),
+            "a successfully settled continuation must carry an Ok summary, got {:?}",
+            u.result
+        );
         let inner = broker.pending.inner.lock().await;
         let s = inner.sessions.get(&task_id).expect("session exists");
         assert_eq!(
@@ -7391,6 +7430,15 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].turn_version, 2);
         assert_eq!(updates[0].origin, TurnOrigin::ParentAgent);
+        // The CANCEL outcome must ride the event with the same stable
+        // `canceled` code the turn-1 completion path carries, so a consumer
+        // reports a canceled continuation as canceled rather than completed.
+        match &updates[0].result {
+            DelegationResultSummary::Err { error_code } => {
+                assert_eq!(error_code, "canceled");
+            }
+            other => panic!("canceled continuation must carry Err{{canceled}}, got {other:?}"),
+        }
     }
 
     /// Requirement 2.4: continuing a task whose turn is still running is
@@ -13587,6 +13635,9 @@ mod tests {
                 "turn-su",
                 2,
                 TurnOrigin::User,
+                DelegationResultSummary::Err {
+                    error_code: "canceled".to_string(),
+                },
             )
             .await;
 
@@ -13603,6 +13654,7 @@ mod tests {
                 turn_id,
                 turn_version,
                 origin,
+                result,
             } => {
                 assert_eq!(parent_connection_id, "parent-conn");
                 assert_eq!(*child_conversation_id, 42);
@@ -13610,6 +13662,14 @@ mod tests {
                 assert_eq!(turn_id, "turn-su");
                 assert_eq!(*turn_version, 2);
                 assert_eq!(*origin, TurnOrigin::User);
+                // The settled turn's outcome travels WITH the announcement, so
+                // a consumer never has to infer one from its arrival.
+                assert_eq!(
+                    result.as_ref(),
+                    Some(&DelegationResultSummary::Err {
+                        error_code: "canceled".to_string()
+                    })
+                );
             }
             other => panic!("expected DelegationSessionUpdate, got {other:?}"),
         }
@@ -13625,11 +13685,14 @@ mod tests {
         ));
 
         // Wire-shape pin: snake_case tag + origin as `user` (the TS mirror in
-        // src/lib/types.ts binds to exactly this JSON).
+        // src/lib/types.ts binds to exactly this JSON), plus the outcome the
+        // consumer reads instead of guessing one.
         let json = serde_json::to_value(&bus_envelope.payload).unwrap();
         assert_eq!(json["type"], "delegation_session_update");
         assert_eq!(json["origin"], "user");
         assert_eq!(json["turn_version"], 2);
+        assert_eq!(json["result"]["kind"], "err");
+        assert_eq!(json["result"]["error_code"], "canceled");
     }
 
     #[tokio::test]
@@ -13671,6 +13734,10 @@ mod tests {
                 "turn-fb",
                 3,
                 TurnOrigin::User,
+                DelegationResultSummary::Ok {
+                    duration_ms: 5,
+                    text_preview: None,
+                },
             )
             .await;
 

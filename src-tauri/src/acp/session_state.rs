@@ -1178,8 +1178,12 @@ impl SessionState {
                 // UserPromptSent 是纯通知事件，仅供 chat-channel 推送消费。
                 // TurnRetrying 与 Claude 的 api_retry 一样是前端瞬态提示（重试横幅），
                 // 不进快照——回合边界会清除它。
-                // DelegationSessionUpdate 是纯通知（Requirement 8.4：查询才是
-                // 状态真源），消费方收到后回查 delegation status，不进快照。
+                // DelegationSessionUpdate 不进快照：它是**会话寻址**（task_id）而非
+                // 工具调用寻址，而 active_delegations 以 parent_tool_use_id 为键、
+                // 只装初轮在跑的委派——续聊轮压根不在其中，没有可改的条目。
+                // 事件本身携带该轮的 result（消费方据此判定终态，不再靠"事件到了"
+                // 猜成功）；get_delegation_status 仍是完整报告（子会话正文 / 用量 /
+                // persona）的真源。
             }
         }
         self.last_activity_at = Utc::now();

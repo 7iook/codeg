@@ -17,8 +17,9 @@
  * The division of responsibility this file exists to keep is R7.7-R7.10:
  *
  *   * The EVENT STREAM owns lifecycle. `DelegationProvider` flips a binding's
- *     status on `delegation_completed` / `delegation_session_update`, and the
- *     selector derives lifecycle from that alone.
+ *     status on `delegation_completed` / `delegation_session_update` — reading
+ *     the outcome each event CARRIES, never inferring one from its arrival —
+ *     and the selector derives lifecycle from that alone.
  *   * The CANCEL RESPONSE owns nothing but the in-flight marker. It reports
  *     whether the REQUEST was accepted; it never writes a lifecycle. That is
  *     what makes the displayed lifecycle independent of response ordering

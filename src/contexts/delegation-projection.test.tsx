@@ -42,6 +42,11 @@ function ProjectionProbe() {
           .map((b) => `${b.parentToolUseId}:${b.parentConversationId ?? "-"}`)
           .join(",")}
       </div>
+      <div data-testid="error-codes">
+        {bindings
+          .map((b) => `${b.parentToolUseId}:${b.errorCode ?? "-"}`)
+          .join(",")}
+      </div>
     </div>
   )
 }
@@ -68,6 +73,7 @@ function started(
     child_connection_id: `c-${parentToolUseId}`,
     child_conversation_id: 100,
     agent_type: "codex",
+    task_id: `task-${parentToolUseId}`,
     ...overrides,
   } as unknown as EventEnvelope
 }
@@ -84,6 +90,32 @@ function completed(
     child_conversation_id: 100,
     agent_type: "codex",
     result,
+  } as unknown as EventEnvelope
+}
+
+/**
+ * `delegation_session_update` — the terminal announcement for a CONTINUED
+ * round (turn_version > 1), which the broker sends INSTEAD of a second
+ * `delegation_completed` (Requirement 2.8a). It is session-addressed, and it
+ * carries the settled turn's real outcome, so the consumer never has to guess
+ * one. Default here is the CANCEL shape, because that is the outcome the
+ * consumer used to report as a success.
+ */
+function sessionUpdate(
+  taskId: string,
+  result: Record<string, unknown> = { kind: "err", error_code: "canceled" },
+  overrides: Record<string, unknown> = {}
+): EventEnvelope {
+  return {
+    type: "delegation_session_update",
+    parent_connection_id: "p1",
+    child_conversation_id: 100,
+    task_id: taskId,
+    turn_id: "turn-2",
+    turn_version: 2,
+    origin: "user",
+    result,
+    ...overrides,
   } as unknown as EventEnvelope
 }
 
@@ -237,5 +269,133 @@ describe("DelegationProvider read-only projection", () => {
     expect(ids).toContain("pt-0")
     expect(ids).toContain("pt-1")
     expect(ids).not.toContain("pt-2")
+  })
+})
+
+/**
+ * A CONTINUED round's terminal arrives as `delegation_session_update`, and it
+ * is the terminal for EVERY outcome of that round — natural settle
+ * (`broker.rs` complete_call) and cancel/failure alike
+ * (`teardown_canceled_child`, whose `turn_version > 1` arm emits this event
+ * instead of a completion).
+ *
+ * The consumer therefore must not derive the outcome from the fact that the
+ * event arrived: doing so reported a canceled or failed continuation as
+ * "completed", and — because a wrong terminal is still terminal — the
+ * reconciliation read could not correct it afterwards
+ * (`applyAuthoritativeStatus` only moves bindings that are still running).
+ * The event carries the settled turn's real result, so the binding mirrors it.
+ */
+describe("continued-round terminal (delegation_session_update)", () => {
+  beforeEach(() => {
+    capturedHandler = null
+    mockAttach.mockReset()
+    mockDetach.mockReset()
+  })
+
+  function renderProjection() {
+    return render(
+      <DelegationProvider>
+        <ProjectionProbe />
+      </DelegationProvider>
+    )
+  }
+
+  it("a_canceled_continued_round_shows_canceled_not_completed", async () => {
+    renderProjection()
+    await awaitHandlerCaptured()
+
+    dispatch(started("pt-1"))
+    // The continuation re-announces its start (broker.rs:5572) before settling.
+    dispatch(started("pt-1"))
+    dispatch(
+      sessionUpdate("task-pt-1", { kind: "err", error_code: "canceled" })
+    )
+
+    expect(screen.getByTestId("statuses").textContent).toBe("pt-1:err")
+    // The stable `canceled` code is what the selector reads to render "canceled"
+    // rather than a generic failure.
+    expect(screen.getByTestId("error-codes").textContent).toBe("pt-1:canceled")
+  })
+
+  it("a_failed_continued_round_shows_failed", async () => {
+    renderProjection()
+    await awaitHandlerCaptured()
+
+    dispatch(started("pt-1"))
+    dispatch(sessionUpdate("task-pt-1", { kind: "err", error_code: "timeout" }))
+
+    expect(screen.getByTestId("statuses").textContent).toBe("pt-1:err")
+    expect(screen.getByTestId("error-codes").textContent).toBe("pt-1:timeout")
+  })
+
+  it("a_successful_continued_round_still_shows_completed", async () => {
+    renderProjection()
+    await awaitHandlerCaptured()
+
+    dispatch(started("pt-1"))
+    dispatch(sessionUpdate("task-pt-1", { kind: "ok", duration_ms: 12 }))
+
+    expect(screen.getByTestId("statuses").textContent).toBe("pt-1:ok")
+    expect(screen.getByTestId("error-codes").textContent).toBe("pt-1:-")
+  })
+
+  it("settles_the_row_so_a_re_announced_start_cannot_leave_it_running_forever", async () => {
+    // The regression the old unconditional flip-to-ok existed to prevent: a
+    // continuation re-announces `delegation_started`, which resets the row to
+    // running. SOMETHING terminal must land afterwards, or the row spins
+    // forever. Consuming the update settles it — now with the true outcome.
+    renderProjection()
+    await awaitHandlerCaptured()
+
+    dispatch(started("pt-1"))
+    dispatch(completed("pt-1"))
+    expect(screen.getByTestId("statuses").textContent).toBe("pt-1:ok")
+
+    // Continuation dispatched: the row legitimately goes back to running.
+    dispatch(started("pt-1"))
+    expect(screen.getByTestId("statuses").textContent).toBe("pt-1:running")
+
+    // ...and settles again on the continued round's terminal.
+    dispatch(sessionUpdate("task-pt-1", { kind: "ok", duration_ms: 3 }))
+    expect(screen.getByTestId("statuses").textContent).toBe("pt-1:ok")
+  })
+
+  it("matches_the_binding_by_child_conversation_id_when_the_task_id_is_absent", async () => {
+    // Older backend / a binding seeded without a task id: the event is still
+    // child-addressed, so the fallback match must keep working.
+    renderProjection()
+    await awaitHandlerCaptured()
+
+    dispatch(started("pt-1", { task_id: undefined }))
+    dispatch(
+      sessionUpdate("task-unrelated", { kind: "err", error_code: "canceled" })
+    )
+
+    expect(screen.getByTestId("statuses").textContent).toBe("pt-1:err")
+    expect(screen.getByTestId("error-codes").textContent).toBe("pt-1:canceled")
+  })
+
+  it("an_update_with_no_result_leaves_the_row_running_for_reconciliation", async () => {
+    // Older backend that predates the outcome field: guessing is exactly the
+    // defect, so the row stays running and the authoritative read supplies the
+    // terminal (R7.13) rather than the consumer inventing one.
+    renderProjection()
+    await awaitHandlerCaptured()
+
+    dispatch(started("pt-1"))
+    // Built without the field at all — a default parameter would substitute
+    // one and make this assertion vacuous.
+    dispatch({
+      type: "delegation_session_update",
+      parent_connection_id: "p1",
+      child_conversation_id: 100,
+      task_id: "task-pt-1",
+      turn_id: "turn-2",
+      turn_version: 2,
+      origin: "user",
+    } as unknown as EventEnvelope)
+
+    expect(screen.getByTestId("statuses").textContent).toBe("pt-1:running")
   })
 })

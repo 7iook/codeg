@@ -1684,10 +1684,9 @@ export type AcpEvent =
    * `continue_with_session` or the user-side entry) reached a terminal state.
    * Session-addressed — replaces the tool-scoped `delegation_completed`,
    * which fires only for the original turn (a tool call completes exactly
-   * once). Pure notification: consumers re-query the delegation status /
-   * continuation availability as the authoritative source. `turn_version`
-   * orders events — drop anything lower than the last applied version and
-   * re-query on gaps.
+   * once). `turn_version` orders events — drop anything lower than the last
+   * applied version and re-query on gaps. `get_delegation_status` remains the
+   * source for the FULL report (child text, usage, persona).
    */
   | {
       type: "delegation_session_update"
@@ -1701,6 +1700,22 @@ export type AcpEvent =
       turn_version: number
       /** Who dispatched the settled turn. */
       origin: "parent_agent" | "user"
+      /**
+       * The settled turn's OUTCOME — same summary `delegation_completed`
+       * carries, and carried here for the same reason.
+       *
+       * This event is the terminal announcement for EVERY outcome of a
+       * continued round: the broker emits it both on a natural settle and on
+       * the cancel/failure teardown. A consumer that inferred the outcome from
+       * the event's arrival reported canceled and failed continuations as
+       * completed — and since a wrong terminal is still terminal, the
+       * authoritative reconciliation read could not undo it.
+       *
+       * Optional for older-backend tolerance. Absent means OUTCOME UNKNOWN:
+       * leave the row running and let the authoritative read settle it, never
+       * guess a terminal.
+       */
+      result?: DelegationResultSummary | null
     }
   /**
    * The user's submitted prompt, broadcast on the connection stream so OTHER

@@ -80,7 +80,12 @@ interface DelegationContextValue {
    * Deliberately narrow, in three ways:
    *   * It only ever moves a binding OUT of `running`. An already-settled
    *     binding is left alone — the event stream saw the outcome first and a
-   *     later read cannot improve on it.
+   *     later read cannot improve on it. This guard needs NO exception for a
+   *     wrong event-sourced terminal: every terminal the stream installs is now
+   *     read from an outcome the producer put on the event, so "settled" implies
+   *     "settled correctly". (It did not, while a continued round's terminal was
+   *     guessed — but the fix belongs on that write path, not in a read that
+   *     would then be allowed to overwrite observed outcomes.)
    *   * `running` and `unknown` verdicts are no-ops. `unknown` is what the
    *     broker answers when it cannot vouch for a task (evicted from its
    *     completed cache, or an ownership mismatch); treating that as finished
@@ -269,12 +274,25 @@ export function DelegationProvider({ children }: { children: ReactNode }) {
         // Terminal announcement for a CONTINUED round (turn_version > 1) —
         // the broker suppresses the second `delegation_completed` against the
         // already-terminal tool call (Requirement 2.8a) and sends this
-        // session-addressed replacement instead. Without consuming it the
-        // card would flip to "running" on the continuation's re-announced
-        // `delegation_started` and never settle back. The event carries no
-        // outcome (pure notification; the authoritative result comes from
-        // `get_delegation_status`), so flip to "ok" and let the detail views
-        // re-query, mirroring the completed path's detach scheduling.
+        // session-addressed replacement instead. Consuming it is what settles
+        // the row: without a terminal here the card would flip to "running" on
+        // the continuation's re-announced `delegation_started` and never settle
+        // back.
+        //
+        // The outcome is taken from the event, never inferred from its arrival.
+        // The broker emits this for EVERY continued-round terminal — the
+        // natural settle AND the cancel/failure teardown — so treating the
+        // arrival itself as success reported canceled and failed continuations
+        // as completed. That terminal then stuck: `applyAuthoritativeStatus`
+        // only moves bindings that are still `running`, by design, so no later
+        // read could correct a wrong terminal. Reading the real result keeps
+        // lifecycle event-sourced AND honest, and leaves that guard intact.
+        //
+        // An event with NO result is an older backend: the honest answer is
+        // "outcome unknown", so the row stays running and the reconciliation
+        // read (R7.13) supplies the terminal. A guess would be the same defect.
+        const result = envelope.result
+        if (!result) return
         let settled: DelegationBinding | undefined
         for (const b of byToolUseIdRef.current.values()) {
           if (
@@ -292,7 +310,20 @@ export function DelegationProvider({ children }: { children: ReactNode }) {
           const existing = prev.get(parentToolUseId)
           if (!existing || existing.status !== "running") return prev
           const m = new Map(prev)
-          m.set(parentToolUseId, { ...existing, status: "ok" })
+          m.set(
+            parentToolUseId,
+            result.kind === "ok"
+              ? { ...existing, status: "ok", errorCode: undefined }
+              : {
+                  ...existing,
+                  status: "err",
+                  // The broker puts the same stable code here as on the
+                  // completion path (`canceled` for a cancel), so the selector
+                  // maps both terminal routes to the same lifecycle rather
+                  // than reporting a cancel as a generic failure.
+                  errorCode: result.error_code,
+                }
+          )
           markTerminal(parentToolUseId)
           return evictOverCap(m, terminalSeqRef.current)
         })
