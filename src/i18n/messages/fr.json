@@ -2982,6 +2982,11 @@
           "polledTimes": "Interrogée {count} fois",
           "runningInBackground": "Arrière-plan",
           "launchNote": "En cours d'exécution en arrière-plan · {id}"
+        },
+        "codexScript": {
+          "outputMissing": "Codex a tronqué la sortie du script et supprimé le séparateur de cette commande ; aucune sortie n'a donc pu lui être attribuée.",
+          "sharedWith": "Contient aussi la sortie de {commands} — codex en a tronqué les séparateurs.",
+          "truncated": "tronqué"
         }
       },
       "messageNav": {

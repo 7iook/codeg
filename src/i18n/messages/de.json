@@ -2982,6 +2982,11 @@
           "polledTimes": "{count}-mal abgefragt",
           "runningInBackground": "Hintergrund",
           "launchNote": "Läuft im Hintergrund · {id}"
+        },
+        "codexScript": {
+          "outputMissing": "Codex hat die Skriptausgabe gekürzt und dabei das Trennzeichen dieses Befehls entfernt, sodass ihm keine Ausgabe zugeordnet werden konnte.",
+          "sharedWith": "Enthält auch die Ausgabe von {commands} – codex hat deren Trennzeichen abgeschnitten.",
+          "truncated": "gekürzt"
         }
       },
       "messageNav": {

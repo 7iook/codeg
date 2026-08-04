@@ -2982,6 +2982,11 @@
           "polledTimes": "{count} 回ポーリング",
           "runningInBackground": "バックグラウンド",
           "launchNote": "バックグラウンドで実行中 · {id}"
+        },
+        "codexScript": {
+          "outputMissing": "codex がスクリプト出力を切り詰めた際にこのコマンドの区切り行が失われたため、出力を割り当てられませんでした。",
+          "sharedWith": "この範囲には {commands} の出力も含まれます — 区切り行が codex により切り捨てられました。",
+          "truncated": "切り詰め済み"
         }
       },
       "messageNav": {

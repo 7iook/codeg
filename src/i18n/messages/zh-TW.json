@@ -2982,6 +2982,11 @@
           "polledTimes": "輪詢 {count} 次",
           "runningInBackground": "背景執行",
           "launchNote": "已在背景執行 · {id}"
+        },
+        "codexScript": {
+          "outputMissing": "codex 截斷指令碼輸出時捨棄了這個命令的分隔行，因此沒有輸出可歸屬給它。",
+          "sharedWith": "本段還包含 {commands} 的輸出——它們的分隔行已被 codex 截斷捨棄。",
+          "truncated": "已截斷"
         }
       },
       "messageNav": {

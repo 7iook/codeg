@@ -2982,6 +2982,11 @@
           "polledTimes": "轮询 {count} 次",
           "runningInBackground": "后台运行",
           "launchNote": "已在后台运行 · {id}"
+        },
+        "codexScript": {
+          "outputMissing": "codex 截断脚本输出时丢掉了这条命令的分隔行，因此没有输出可以归属给它。",
+          "sharedWith": "本段还包含 {commands} 的输出——它们的分隔行被 codex 截断丢弃了。",
+          "truncated": "已截断"
         }
       },
       "messageNav": {
