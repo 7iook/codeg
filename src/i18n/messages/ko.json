@@ -2983,6 +2983,11 @@
           "polledTimes": "{count}회 폴링",
           "runningInBackground": "백그라운드",
           "launchNote": "백그라운드에서 실행 중 · {id}"
+        },
+        "codexScript": {
+          "outputMissing": "codex가 스크립트 출력을 잘라내면서 이 명령의 구분선이 사라져 출력을 귀속시킬 수 없습니다.",
+          "sharedWith": "이 구간에는 {commands}의 출력도 포함됩니다 — 구분선이 codex에 의해 잘렸습니다.",
+          "truncated": "잘림"
         }
       },
       "messageNav": {

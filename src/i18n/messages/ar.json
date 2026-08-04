@@ -2983,6 +2983,11 @@
           "polledTimes": "تم الاستعلام {count} مرة",
           "runningInBackground": "في الخلفية",
           "launchNote": "قيد التشغيل في الخلفية · {id}"
+        },
+        "codexScript": {
+          "outputMissing": "اقتطع codex مُخرَج النص البرمجي وأزال الفاصل الخاص بهذا الأمر، لذا تعذّر نسب أي مُخرَج إليه.",
+          "sharedWith": "يحتوي هذا المقطع أيضًا على مُخرَج {commands} — إذ اقتطع codex الفواصل الخاصة بها.",
+          "truncated": "مقتطع"
         }
       },
       "messageNav": {

@@ -2983,6 +2983,11 @@
           "polledTimes": "Consultada {count} veces",
           "runningInBackground": "Segundo plano",
           "launchNote": "Ejecutándose en segundo plano · {id}"
+        },
+        "codexScript": {
+          "outputMissing": "Codex truncó la salida del script y eliminó el separador de este comando, por lo que no se le pudo atribuir ninguna salida.",
+          "sharedWith": "También contiene la salida de {commands}: codex truncó sus separadores.",
+          "truncated": "truncado"
         }
       },
       "messageNav": {
