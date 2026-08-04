@@ -3108,6 +3108,10 @@
         "compacted": "コンテキストを圧縮しました",
         "compactedTokens": "コンテキストを圧縮 · {before} → {after} トークン"
       },
+      "subAgentObservatory": {
+        "running": "{count} 個のサブエージェントを実行中",
+        "observable": "サブエージェント {count} 個"
+      },
       "backgroundTasks": {
         "running": "{count} 件のバックグラウンドタスクを実行中",
         "settling": "バックグラウンド結果を同期中…",

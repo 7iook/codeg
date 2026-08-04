@@ -277,6 +277,12 @@ struct RunningTask {
     child_connection_id: String,
     child_conversation_id: i32,
     parent_connection_id: String,
+    /// The parent's CONVERSATION row id (persistent ownership key, mirroring
+    /// [`SessionEntry::parent_conversation_id`]). Carried here so every
+    /// terminal path that hands the drained task around by value — cancel
+    /// teardown, settle, early-complete — can put it on the emitted
+    /// `DelegationCompleted` without a session lookup.
+    parent_conversation_id: i32,
     parent_tool_use_id: String,
     /// Target agent — surfaced in status reports.
     agent_type: AgentType,
@@ -3574,6 +3580,7 @@ impl DelegationBroker {
         // mode, carrying the real `parent_connection_id`.
         self.emit_started_if_real(
             &req.parent_connection_id,
+            req.parent_conversation_id,
             &req.parent_tool_use_id,
             &child_connection_id,
             child_conversation_id,
@@ -3740,6 +3747,7 @@ impl DelegationBroker {
                             child_connection_id: child_connection_id.clone(),
                             child_conversation_id,
                             parent_connection_id: req.parent_connection_id.clone(),
+                            parent_conversation_id: req.parent_conversation_id,
                             parent_tool_use_id: req.parent_tool_use_id.clone(),
                             agent_type: req.agent_type,
                             task_preview: task_preview.clone(),
@@ -3773,6 +3781,7 @@ impl DelegationBroker {
             Disposition::ChildTerminal(outcome) => {
                 self.finalize_delegation(
                     &req.parent_connection_id,
+                    req.parent_conversation_id,
                     &req.parent_tool_use_id,
                     &child_connection_id,
                     child_conversation_id,
@@ -3816,6 +3825,7 @@ impl DelegationBroker {
                 .await;
                 self.emit_completed_if_real(
                     &req.parent_connection_id,
+                    req.parent_conversation_id,
                     &req.parent_tool_use_id,
                     &child_connection_id,
                     child_conversation_id,
@@ -3894,6 +3904,7 @@ impl DelegationBroker {
                     .await;
                     self.emit_completed_if_real(
                         &req.parent_connection_id,
+                        req.parent_conversation_id,
                         &req.parent_tool_use_id,
                         &child_connection_id,
                         child_conversation_id,
@@ -3999,6 +4010,7 @@ impl DelegationBroker {
             }
             self.finalize_delegation(
                 &task.parent_connection_id,
+                task.parent_conversation_id,
                 &task.parent_tool_use_id,
                 &task.child_connection_id,
                 task.child_conversation_id,
@@ -4036,6 +4048,7 @@ impl DelegationBroker {
     async fn finalize_delegation(
         &self,
         parent_connection_id: &str,
+        parent_conversation_id: i32,
         parent_tool_use_id: &str,
         child_connection_id: &str,
         child_conversation_id: i32,
@@ -4073,6 +4086,7 @@ impl DelegationBroker {
         if emit_completion {
             self.emit_completed_if_real(
                 parent_connection_id,
+                parent_conversation_id,
                 parent_tool_use_id,
                 child_connection_id,
                 child_conversation_id,
@@ -4124,6 +4138,7 @@ impl DelegationBroker {
     async fn emit_started_if_real(
         &self,
         parent_connection_id: &str,
+        parent_conversation_id: i32,
         parent_tool_use_id: &str,
         child_connection_id: &str,
         child_conversation_id: i32,
@@ -4137,6 +4152,7 @@ impl DelegationBroker {
         self.event_emitter
             .emit_started(
                 parent_connection_id,
+                parent_conversation_id,
                 parent_tool_use_id,
                 child_connection_id,
                 child_conversation_id,
@@ -4187,9 +4203,11 @@ impl DelegationBroker {
     /// Synthetic ids (the `"delegation-<uuid>"` UUID fallback) map to no
     /// live UI binding, so the emit would be wasted noise — same skip
     /// criterion as `write_meta_if_real`.
+    #[allow(clippy::too_many_arguments)]
     async fn emit_completed_if_real(
         &self,
         parent_connection_id: &str,
+        parent_conversation_id: i32,
         parent_tool_use_id: &str,
         child_connection_id: &str,
         child_conversation_id: i32,
@@ -4202,6 +4220,7 @@ impl DelegationBroker {
         self.event_emitter
             .emit_completed(
                 parent_connection_id,
+                parent_conversation_id,
                 parent_tool_use_id,
                 child_connection_id,
                 child_conversation_id,
@@ -4680,6 +4699,7 @@ impl DelegationBroker {
         if task.turn_version <= 1 {
             self.emit_completed_if_real(
                 &task.parent_connection_id,
+                task.parent_conversation_id,
                 &task.parent_tool_use_id,
                 &task.child_connection_id,
                 task.child_conversation_id,
@@ -4970,6 +4990,11 @@ impl DelegationBroker {
             prior_status: TaskStatus,
             prior_conn: Option<String>,
             child_conversation_id: i32,
+            /// The session's OWNING parent conversation id. Read under the same
+            /// lock as the ownership check so the re-announced
+            /// `DelegationStarted` carries the identical value the live path
+            /// does — a continuation must not make a task look unattributed.
+            parent_conversation_id: i32,
             agent_type: AgentType,
             parent_tool_use_id: String,
             folder_id: Option<i32>,
@@ -5055,6 +5080,7 @@ impl DelegationBroker {
                 prior_status,
                 prior_conn,
                 child_conversation_id: s.child_conversation_id,
+                parent_conversation_id: s.parent_conversation_id,
                 agent_type: s.agent_type,
                 parent_tool_use_id: s.parent_tool_use_id.clone(),
                 folder_id: s.folder_id,
@@ -5387,6 +5413,7 @@ impl DelegationBroker {
                         child_connection_id: conn_id.clone(),
                         child_conversation_id: plan.child_conversation_id,
                         parent_connection_id: parent_connection_id.to_string(),
+                        parent_conversation_id: plan.parent_conversation_id,
                         parent_tool_use_id: plan.parent_tool_use_id.clone(),
                         agent_type: plan.agent_type,
                         task_preview: truncate_on_char_boundary(&message, TASK_PREVIEW_CAP),
@@ -5454,6 +5481,7 @@ impl DelegationBroker {
         .await;
         self.emit_started_if_real(
             parent_connection_id,
+            plan.parent_conversation_id,
             &plan.parent_tool_use_id,
             &conn_id,
             plan.child_conversation_id,
@@ -13158,12 +13186,21 @@ mod tests {
                 parent_tool_use_id,
                 child_connection_id,
                 child_conversation_id,
+                parent_conversation_id,
                 result,
                 ..
             } => {
                 assert_eq!(parent_tool_use_id, "pt-fanout");
                 assert_eq!(child_connection_id, "child-conn-real");
                 assert_eq!(*child_conversation_id, 77);
+                // Producer parity with DelegationStarted (R2.5-R2.8): the
+                // terminal event carries the PARENT's conversation id for the
+                // same reason it carries `agent_type` — a frontend that missed
+                // the start (late mount / reconnect / snapshot replay of only
+                // the completion) synthesizes the binding from this event
+                // alone, and without this it lands unattributed. 1 is the
+                // parent's conversation, never the child's (77).
+                assert_eq!(*parent_conversation_id, 1);
                 match result {
                     DelegationResultSummary::Err { error_code } => {
                         assert_eq!(error_code, "canceled");
@@ -13262,6 +13299,7 @@ mod tests {
         match &envelope.payload {
             AcpEvent::DelegationStarted {
                 parent_connection_id,
+                parent_conversation_id,
                 parent_tool_use_id,
                 child_connection_id,
                 child_conversation_id,
@@ -13271,6 +13309,10 @@ mod tests {
             } => {
                 assert_eq!(parent_connection_id, "parent-conn");
                 assert_eq!(parent_tool_use_id, "pt-started");
+                // The parent's conversation id rides the event so the frontend
+                // can attribute the delegation to its own conversation without
+                // a DB query (it cannot compare a connection id to one).
+                assert_eq!(*parent_conversation_id, 1);
                 assert_eq!(child_connection_id, "child-conn-started");
                 assert_eq!(*child_conversation_id, 88);
                 assert_eq!(*agent_type, AgentType::ClaudeCode);

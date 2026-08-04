@@ -39,6 +39,9 @@ function BindingProbe({ parentToolUseId }: { parentToolUseId: string }) {
       <div data-testid="status">{binding.status}</div>
       <div data-testid="error-code">{binding.errorCode ?? "-"}</div>
       <div data-testid="agent">{binding.agentType}</div>
+      <div data-testid="parent-conversation">
+        {binding.parentConversationId ?? "none"}
+      </div>
     </div>
   )
 }
@@ -190,6 +193,54 @@ describe("DelegationProvider", () => {
     // must take the agent_type the completion now carries — not a hardcoded
     // default — so the card shows the correct agent icon/label.
     expect(screen.getByTestId("agent")).toHaveTextContent("codex")
+  })
+
+  it("attributes a synthesized binding to the completion's parent_conversation_id", async () => {
+    // Producer-parity lock (R2.5-R2.8): `delegation_completed` carries the
+    // parent conversation id for the SAME reason it carries `agent_type` —
+    // a frontend that missed the start event (late mount / reconnect /
+    // snapshot replay that re-delivered only the completion) must still
+    // attribute the row to the conversation it belongs to. Hardcoding
+    // `null` here made every completion-only flow unattributed, so the
+    // completed partition could not show its scope (R4.5 / R4.9).
+    renderProvider()
+    await awaitHandlerCaptured()
+
+    dispatch({
+      type: "delegation_completed",
+      parent_connection_id: "p1",
+      parent_tool_use_id: "pt-1",
+      child_connection_id: "c1",
+      child_conversation_id: 99,
+      parent_conversation_id: 42,
+      agent_type: "codex",
+      result: { kind: "ok", duration_ms: 100 },
+    } as unknown as EventEnvelope)
+
+    expect(screen.getByTestId("status")).toHaveTextContent("ok")
+    // 42 is the PARENT's conversation, never the child's (99) — deriving it
+    // from `child_conversation_id` would attribute the row to the wrong
+    // conversation, which is worse than showing it unattributed.
+    expect(screen.getByTestId("parent-conversation")).toHaveTextContent("42")
+  })
+
+  it("leaves a synthesized binding unattributed when the completion carries no parent_conversation_id", async () => {
+    // Older-backend tolerance: absent must stay `null` (unattributed), NOT
+    // be back-derived from `child_conversation_id`.
+    renderProvider()
+    await awaitHandlerCaptured()
+
+    dispatch({
+      type: "delegation_completed",
+      parent_connection_id: "p1",
+      parent_tool_use_id: "pt-1",
+      child_connection_id: "c1",
+      child_conversation_id: 99,
+      agent_type: "codex",
+      result: { kind: "ok", duration_ms: 100 },
+    } as unknown as EventEnvelope)
+
+    expect(screen.getByTestId("parent-conversation")).toHaveTextContent("none")
   })
 
   it("cancels a pending detach when delegation_started replays for the same parent_tool_use_id", async () => {

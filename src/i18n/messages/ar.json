@@ -3108,6 +3108,10 @@
         "compacted": "تم ضغط السياق",
         "compactedTokens": "تم ضغط السياق · {before} → {after} رمز"
       },
+      "subAgentObservatory": {
+        "running": "{count, plural, one {وكيل فرعي واحد قيد التشغيل} two {وكيلان فرعيان قيد التشغيل} few {# وكلاء فرعيين قيد التشغيل} other {# وكيلًا فرعيًا قيد التشغيل}}",
+        "observable": "{count, plural, one {وكيل فرعي واحد} two {وكيلان فرعيان} few {# وكلاء فرعيين} other {# وكيلًا فرعيًا}}"
+      },
       "backgroundTasks": {
         "running": "{count, plural, one {مهمة خلفية واحدة قيد التشغيل} two {مهمتا خلفية قيد التشغيل} few {# مهام خلفية قيد التشغيل} other {# مهمة خلفية قيد التشغيل}}",
         "settling": "جارٍ مزامنة نتائج الخلفية…",

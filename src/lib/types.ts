@@ -645,9 +645,7 @@ export function compareAgentType(a: AgentType, b: AgentType): number {
   return a.localeCompare(b)
 }
 
-export const ALL_AGENT_TYPES: BuiltinAgentType[] = [
-  ...BUILTIN_AGENT_ROSTER,
-]
+export const ALL_AGENT_TYPES: BuiltinAgentType[] = [...BUILTIN_AGENT_ROSTER]
 
 export const MODEL_PROVIDER_AGENT_TYPES: BuiltinAgentType[] = [
   "claude_code",
@@ -1632,6 +1630,14 @@ export type AcpEvent =
       parent_tool_use_id: string
       child_connection_id: string
       child_conversation_id: number
+      /** The PARENT's conversation id — the same value the broker's ownership
+       *  check compares against. Carried so the observatory selector can
+       *  attribute each delegation to its conversation without a DB query
+       *  (`parent_connection_id` is a different identifier system: the
+       *  frontend's own context key is a `tabId`). Optional for
+       *  older-backend tolerance; absent means UNATTRIBUTED, never a guessed
+       *  fallback (it is NOT `child_conversation_id`). */
+      parent_conversation_id?: number | null
       agent_type: AgentType
       /** Bounded preview of the delegated task text. Labels the card on
        *  hosts whose parent tool call never carries the arguments in
@@ -1655,6 +1661,13 @@ export type AcpEvent =
        *  `delegation_started` event (mounted mid-flight, reconnect, or
        *  snapshot replay) can bind the correct agent instead of a default. */
       agent_type: AgentType
+      /** The PARENT's conversation id, carried for the same reason as
+       *  `agent_type`: a frontend synthesizing the binding from the completion
+       *  ALONE must still attribute it to the right conversation, or the
+       *  terminal row shows up unattributed. Optional for older-backend
+       *  tolerance; absent means UNATTRIBUTED and is never back-derived from
+       *  `child_conversation_id`. */
+      parent_conversation_id?: number | null
       result: DelegationResultSummary
     }
   /**

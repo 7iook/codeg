@@ -3108,6 +3108,10 @@
         "compacted": "컨텍스트 압축 완료",
         "compactedTokens": "컨텍스트 압축 완료 · {before} → {after} 토큰"
       },
+      "subAgentObservatory": {
+        "running": "서브 에이전트 {count}개 실행 중",
+        "observable": "서브 에이전트 {count}개"
+      },
       "backgroundTasks": {
         "running": "백그라운드 작업 {count}개 실행 중",
         "settling": "백그라운드 결과 동기화 중…",

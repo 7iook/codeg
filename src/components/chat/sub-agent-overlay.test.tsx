@@ -64,6 +64,7 @@ function bindingOf(overrides: Partial<DelegationBinding>): DelegationBinding {
     status: "running",
     task: null,
     taskId: null,
+    parentConversationId: null,
     ...overrides,
   }
 }

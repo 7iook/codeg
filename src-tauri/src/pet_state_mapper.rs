@@ -872,6 +872,7 @@ mod tests {
             parent,
             AcpEvent::DelegationStarted {
                 parent_connection_id: parent.into(),
+                parent_conversation_id: 1,
                 parent_tool_use_id: "tu-1".into(),
                 child_connection_id: child.into(),
                 child_conversation_id: 1,
@@ -890,6 +891,7 @@ mod tests {
                 parent_tool_use_id: "tu-1".into(),
                 child_connection_id: child.into(),
                 child_conversation_id: 1,
+                parent_conversation_id: 1,
                 agent_type: crate::models::agent::AgentType::Codex,
                 result: crate::acp::types::DelegationResultSummary::Ok {
                     duration_ms: 0,

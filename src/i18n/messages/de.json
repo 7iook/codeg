@@ -3108,6 +3108,10 @@
         "compacted": "Kontext komprimiert",
         "compactedTokens": "Kontext komprimiert · {before} → {after} Tokens"
       },
+      "subAgentObservatory": {
+        "running": "{count, plural, one {# Subagent läuft} other {# Subagenten laufen}}",
+        "observable": "{count, plural, one {# Subagent} other {# Subagenten}}"
+      },
       "backgroundTasks": {
         "running": "{count, plural, one {# Hintergrundaufgabe läuft} other {# Hintergrundaufgaben laufen}}",
         "settling": "Hintergrundergebnisse werden synchronisiert…",

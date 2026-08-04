@@ -2792,6 +2792,7 @@ mod tests {
     fn delegation_started(parent_tool_use_id: &str, child_conv: i32) -> AcpEvent {
         AcpEvent::DelegationStarted {
             parent_connection_id: "conn-test".into(),
+            parent_conversation_id: 1,
             parent_tool_use_id: parent_tool_use_id.into(),
             child_connection_id: "child-conn-1".into(),
             child_conversation_id: child_conv,
@@ -2807,6 +2808,7 @@ mod tests {
             parent_tool_use_id: parent_tool_use_id.into(),
             child_connection_id: "child-conn-1".into(),
             child_conversation_id: child_conv,
+            parent_conversation_id: 1,
             agent_type: AgentType::Codex,
             result: DelegationResultSummary::Ok {
                 duration_ms: 1,

@@ -37,6 +37,13 @@ export interface SnapshotPatch {
   // eventSeq race window allows an old connection's snapshot to overwrite
   // a freshly-started replacement at the same contextKey.
   connectionId: string
+  /** The snapshot's own conversation id. Consumed at the attach call sites to
+   *  fill the seeded `delegation_started` envelopes' `parent_conversation_id`
+   *  (see `seedDelegationsFromSnapshot`) — `ActiveDelegationState` does not
+   *  carry it, but it hangs off the SAME snapshot, which is what makes the
+   *  replay path produce the identical value the live broker event does.
+   *  `null` when the connection has no conversation yet. */
+  conversationId: number | null
   status: ConnectionStatus
   sessionId: string | null
   modes: SessionModeStateInfo | null
@@ -109,6 +116,7 @@ export function denormalizeSnapshot(wire: LiveSessionSnapshot): SnapshotPatch {
 
   return {
     connectionId: wire.connection_id,
+    conversationId: wire.conversation_id ?? null,
     status: wire.status,
     sessionId: wire.external_id,
     modes: wire.modes,

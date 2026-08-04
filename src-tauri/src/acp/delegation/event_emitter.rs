@@ -61,6 +61,7 @@ pub trait DelegationEventEmitter: Send + Sync {
     async fn emit_started(
         &self,
         parent_connection_id: &str,
+        parent_conversation_id: i32,
         parent_tool_use_id: &str,
         child_connection_id: &str,
         child_conversation_id: i32,
@@ -69,9 +70,15 @@ pub trait DelegationEventEmitter: Send + Sync {
         task_id: &str,
     );
 
+    /// `parent_conversation_id` mirrors `emit_started`: the terminal event is
+    /// the ONLY event a frontend that missed the start receives, so it must
+    /// carry the parent's conversation id or the synthesized binding lands
+    /// unattributed.
+    #[allow(clippy::too_many_arguments)]
     async fn emit_completed(
         &self,
         parent_connection_id: &str,
+        parent_conversation_id: i32,
         parent_tool_use_id: &str,
         child_connection_id: &str,
         child_conversation_id: i32,
@@ -120,6 +127,7 @@ impl DelegationEventEmitter for NoopEventEmitter {
     async fn emit_started(
         &self,
         _parent_connection_id: &str,
+        _parent_conversation_id: i32,
         _parent_tool_use_id: &str,
         _child_connection_id: &str,
         _child_conversation_id: i32,
@@ -129,9 +137,11 @@ impl DelegationEventEmitter for NoopEventEmitter {
     ) {
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn emit_completed(
         &self,
         _parent_connection_id: &str,
+        _parent_conversation_id: i32,
         _parent_tool_use_id: &str,
         _child_connection_id: &str,
         _child_conversation_id: i32,
@@ -172,6 +182,7 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
     async fn emit_started(
         &self,
         parent_connection_id: &str,
+        parent_conversation_id: i32,
         parent_tool_use_id: &str,
         child_connection_id: &str,
         child_conversation_id: i32,
@@ -191,6 +202,7 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
             &emitter,
             AcpEvent::DelegationStarted {
                 parent_connection_id: parent_connection_id.to_string(),
+                parent_conversation_id,
                 parent_tool_use_id: parent_tool_use_id.to_string(),
                 child_connection_id: child_connection_id.to_string(),
                 child_conversation_id,
@@ -202,9 +214,11 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
         .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn emit_completed(
         &self,
         parent_connection_id: &str,
+        parent_conversation_id: i32,
         parent_tool_use_id: &str,
         child_connection_id: &str,
         child_conversation_id: i32,
@@ -223,6 +237,7 @@ impl DelegationEventEmitter for ConnectionManagerEventEmitter {
             &emitter,
             AcpEvent::DelegationCompleted {
                 parent_connection_id: parent_connection_id.to_string(),
+                parent_conversation_id,
                 parent_tool_use_id: parent_tool_use_id.to_string(),
                 child_connection_id: child_connection_id.to_string(),
                 child_conversation_id,
@@ -299,6 +314,7 @@ pub mod mock {
     #[derive(Debug, Clone)]
     pub struct EmitCall {
         pub parent_connection_id: String,
+        pub parent_conversation_id: i32,
         pub parent_tool_use_id: String,
         pub child_connection_id: String,
         pub child_conversation_id: i32,
@@ -309,6 +325,7 @@ pub mod mock {
     #[derive(Debug, Clone)]
     pub struct EmitStartedCall {
         pub parent_connection_id: String,
+        pub parent_conversation_id: i32,
         pub parent_tool_use_id: String,
         pub child_connection_id: String,
         pub child_conversation_id: i32,
@@ -364,6 +381,7 @@ pub mod mock {
         async fn emit_started(
             &self,
             parent_connection_id: &str,
+            parent_conversation_id: i32,
             parent_tool_use_id: &str,
             child_connection_id: &str,
             child_conversation_id: i32,
@@ -373,6 +391,7 @@ pub mod mock {
         ) {
             self.started_calls.lock().await.push(EmitStartedCall {
                 parent_connection_id: parent_connection_id.to_string(),
+                parent_conversation_id,
                 parent_tool_use_id: parent_tool_use_id.to_string(),
                 child_connection_id: child_connection_id.to_string(),
                 child_conversation_id,
@@ -382,9 +401,11 @@ pub mod mock {
             });
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn emit_completed(
             &self,
             parent_connection_id: &str,
+            parent_conversation_id: i32,
             parent_tool_use_id: &str,
             child_connection_id: &str,
             child_conversation_id: i32,
@@ -393,6 +414,7 @@ pub mod mock {
         ) {
             self.calls.lock().await.push(EmitCall {
                 parent_connection_id: parent_connection_id.to_string(),
+                parent_conversation_id,
                 parent_tool_use_id: parent_tool_use_id.to_string(),
                 child_connection_id: child_connection_id.to_string(),
                 child_conversation_id,

@@ -3108,6 +3108,10 @@
         "compacted": "Context compacted",
         "compactedTokens": "Context compacted · {before} → {after} tokens"
       },
+      "subAgentObservatory": {
+        "running": "{count, plural, one {# sub-agent running} other {# sub-agents running}}",
+        "observable": "{count, plural, one {# sub-agent} other {# sub-agents}}"
+      },
       "backgroundTasks": {
         "running": "{count, plural, one {# background task running} other {# background tasks running}}",
         "settling": "Syncing background results…",

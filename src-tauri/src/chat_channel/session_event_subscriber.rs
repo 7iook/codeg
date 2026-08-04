@@ -1238,6 +1238,7 @@ mod async_relay_dedup_tests {
                 parent_tool_use_id: "tc-1".into(),
                 child_connection_id: "child".into(),
                 child_conversation_id: 5,
+                parent_conversation_id: 1,
                 agent_type: AgentType::Codex,
                 result: DelegationResultSummary::Ok {
                     duration_ms: 3,

@@ -26,6 +26,28 @@ export interface SubagentFrame {
   blocks: ContentBlock[]
 }
 
+/**
+ * One tracked built-in sub-agent, as exposed by the provider's read-only
+ * projection (the per-capsule renderer still subscribes to frames alone).
+ *
+ * `sessionId` is the RAW `session_id` off the event — deliberately not resolved
+ * to a `conversation_id` here. The external-id → conversation mapping can be
+ * established AFTER the first frame arrives (startup, reconnect, out-of-order
+ * delivery); resolving once at ingest would freeze such an entry as
+ * unattributed forever. Resolution belongs to each evaluation of the row-model
+ * selector, against the mapping snapshot it is handed.
+ */
+export interface SubagentTrackedEntry {
+  parentToolUseId: string
+  /** Raw external session id from the event; `null` if it carried none. */
+  sessionId: string | null
+  /** `Date.now()` of the most recent ACCEPTED frame. The only activity
+   *  evidence available — the event stream carries no termination signal — so
+   *  the selector compares it against `now` to derive running vs silent. */
+  lastFrameAt: number
+  frames: readonly SubagentFrame[]
+}
+
 export interface SubagentTranscriptView {
   /** The prompt the sub-agent was launched with, when it arrived. */
   taskPrompt: string | null

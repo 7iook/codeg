@@ -3108,6 +3108,10 @@
         "compacted": "上下文已压缩",
         "compactedTokens": "上下文已压缩 · {before} → {after} tokens"
       },
+      "subAgentObservatory": {
+        "running": "{count} 个子智能体运行中",
+        "observable": "{count} 个子智能体"
+      },
       "backgroundTasks": {
         "running": "{count} 个后台任务运行中",
         "settling": "正在同步后台结果…",

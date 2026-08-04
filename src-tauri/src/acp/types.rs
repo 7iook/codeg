@@ -336,6 +336,16 @@ pub enum AcpEvent {
         parent_tool_use_id: String,
         child_connection_id: String,
         child_conversation_id: i32,
+        /// The PARENT's conversation id — the same value the broker's ownership
+        /// check compares against (`broker.rs` D5 `owned`). Carried so a
+        /// frontend observing many delegations can attribute each to its own
+        /// conversation WITHOUT a DB query: `parent_connection_id` is a
+        /// different identifier system (the frontend's own context key is a
+        /// `tabId`), so it cannot be compared against a conversation id.
+        /// `#[serde(default)]` on the frontend side keeps an older backend's
+        /// payload deserializable; absent then means "unattributed", never a
+        /// guessed fallback.
+        parent_conversation_id: i32,
         agent_type: crate::models::agent::AgentType,
         /// Bounded preview of the delegated task text (broker's
         /// `TASK_PREVIEW_CAP`). Lets the live card show WHAT was delegated even
@@ -360,6 +370,16 @@ pub enum AcpEvent {
         /// can synthesize the binding with the correct agent instead of a
         /// hardcoded default. Mirrors `DelegationStarted.agent_type`.
         agent_type: crate::models::agent::AgentType,
+        /// The PARENT's conversation id — carried for exactly the same reason
+        /// as `agent_type` above: a frontend synthesizing the binding from the
+        /// completion ALONE (missed start / reconnect / snapshot replay of only
+        /// the terminal) must still attribute the delegation to the
+        /// conversation it belongs to, or the terminal row shows up
+        /// unattributed. Mirrors `DelegationStarted.parent_conversation_id`;
+        /// `#[serde(default)]` on the frontend side keeps an older backend's
+        /// payload deserializable, and absent then means "unattributed", never
+        /// a value derived from `child_conversation_id`.
+        parent_conversation_id: i32,
         result: DelegationResultSummary,
     },
     /// A CONTINUED delegation turn (turn_version > 1, dispatched via

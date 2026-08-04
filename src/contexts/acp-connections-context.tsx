@@ -3819,12 +3819,17 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     (
       connectionId: string,
       activeDelegations: ActiveDelegationState[],
-      eventSeq: number
+      eventSeq: number,
+      // The snapshot's own conversation id — the seeded envelopes'
+      // `parent_conversation_id`, so replay attributes each delegation exactly
+      // as the live broker event does.
+      parentConversationId: number | null
     ) => {
       const envelopes = buildDelegationSeedEnvelopes(
         connectionId,
         activeDelegations,
-        eventSeq
+        eventSeq,
+        parentConversationId
       )
       for (const envelope of envelopes) {
         for (const ref of eventSubscribersRef.current) {
@@ -3914,7 +3919,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           seedDelegationsFromSnapshot(
             patch.connectionId,
             patch.activeDelegations,
-            patch.eventSeq
+            patch.eventSeq,
+            patch.conversationId
           )
         },
         onReplay: (events) => {
@@ -4287,7 +4293,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         seedDelegationsFromSnapshot(
           patch.connectionId,
           patch.activeDelegations,
-          patch.eventSeq
+          patch.eventSeq,
+          patch.conversationId
         )
       }
       reverseMapRef.current.set(connectionId, contextKey)
@@ -4611,7 +4618,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             seedDelegationsFromSnapshot(
               snapshotPatch.connectionId,
               snapshotPatch.activeDelegations,
-              snapshotPatch.eventSeq
+              snapshotPatch.eventSeq,
+              snapshotPatch.conversationId
             )
           }
 

@@ -80,4 +80,39 @@ describe("buildDelegationSeedEnvelopes", () => {
   it("returns an empty array for no delegations", () => {
     expect(buildDelegationSeedEnvelopes("p", [], 0)).toEqual([])
   })
+
+  it("fills parent_conversation_id from the snapshot's own conversation id", () => {
+    // R2.6 — the replay producer must yield the SAME attribution value the
+    // live broker event does. `ActiveDelegationState` has no such field, but
+    // the snapshot it travels in does; taking it from there is the same move
+    // already used for `parent_connection_id`.
+    const env = buildDelegationSeedEnvelopes(
+      "parent-conn",
+      [dele({ parent_tool_use_id: "pt-1" })],
+      1,
+      77
+    )
+    expect(env[0]).toMatchObject({
+      parent_connection_id: "parent-conn",
+      parent_conversation_id: 77,
+    })
+  })
+
+  it("leaves parent_conversation_id absent when the snapshot has none", () => {
+    // R2.8 — no conversation id on the snapshot → the entry is unattributed.
+    // It must NOT fall back to `child_conversation_id` (a different
+    // conversation) or to the connection id (a different id system).
+    const env = buildDelegationSeedEnvelopes(
+      "parent-conn",
+      [dele({ parent_tool_use_id: "pt-1", child_conversation_id: 99 })],
+      1,
+      null
+    )
+    expect(env[0]).toMatchObject({ parent_conversation_id: null })
+    const seeded = env[0] as Extract<
+      (typeof env)[number],
+      { type: "delegation_started" }
+    >
+    expect(seeded.parent_conversation_id).not.toBe(99)
+  })
 })
