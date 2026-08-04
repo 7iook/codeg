@@ -1930,22 +1930,72 @@ enum StatusClass {
     NotInMemory,
 }
 
+/// Ownership (D5): prefer the persistent parent conversation id; fall back to
+/// the connection id only when the caller has no conversation context. Shared by
+/// every parent-scoped read/write path so the LLM channel (real connection id)
+/// and the user-side channel (synthetic `USER_ENTRY_CONNECTION_ID` + persisted
+/// conversation id) agree on what "owned" means. Comparing the connection id
+/// alone made every user-side call resolve to `Unknown`, because that synthetic
+/// marker never matches a spawned task's real connection.
+/// `task_parent_connection_id` is the connection recorded on the task itself
+/// (running set or completed cache); the conversation id is read from the
+/// SESSION registry, which is the only layer that persists it (`SessionEntry`).
+/// A task with no session entry can only be matched by connection id.
+fn owned_by(
+    inner: &PendingInner,
+    task_id: &str,
+    task_parent_connection_id: &str,
+    caller_parent_conversation_id: Option<i32>,
+    caller_parent_connection_id: &str,
+) -> bool {
+    match caller_parent_conversation_id {
+        Some(pc) => inner
+            .sessions
+            .get(task_id)
+            .is_some_and(|s| s.parent_conversation_id == pc),
+        None => task_parent_connection_id == caller_parent_connection_id,
+    }
+}
+
 /// Classify one task id against the in-memory maps while the pending lock is
 /// held. Mirrors the single-task resolution order — completed cache (parent
 /// scoped) → running set (parent scoped) → not-in-memory — and yields a
 /// cross-parent hit as `unknown` so a task owned by another parent never leaks.
-fn classify_locked(inner: &PendingInner, parent_connection_id: &str, task_id: &str) -> StatusClass {
+/// Ownership follows [`owned_by`] (D5), so a user-side query carrying only the
+/// conversation id resolves the same tasks the owning LLM connection would.
+fn classify_locked(
+    inner: &PendingInner,
+    parent_connection_id: &str,
+    parent_conversation_id: Option<i32>,
+    task_id: &str,
+) -> StatusClass {
     if let Some(c) = inner.completed.get(task_id) {
-        if c.parent_connection_id == parent_connection_id {
+        if owned_by(
+            inner,
+            task_id,
+            &c.parent_connection_id,
+            parent_conversation_id,
+            parent_connection_id,
+        ) {
             return StatusClass::Settled(completed_report(task_id, c));
         }
         return StatusClass::Settled(unknown_report(task_id));
     }
     match inner.running.get(task_id) {
-        Some(r) if r.parent_connection_id == parent_connection_id => StatusClass::Running {
-            report: running_report(task_id, r),
-            child_connection_id: r.child_connection_id.clone(),
-        },
+        Some(r)
+            if owned_by(
+                inner,
+                task_id,
+                &r.parent_connection_id,
+                parent_conversation_id,
+                parent_connection_id,
+            ) =>
+        {
+            StatusClass::Running {
+                report: running_report(task_id, r),
+                child_connection_id: r.child_connection_id.clone(),
+            }
+        }
         Some(_) => StatusClass::Settled(unknown_report(task_id)),
         None => StatusClass::NotInMemory,
     }
@@ -4782,7 +4832,9 @@ impl DelegationBroker {
                 let inner = self.pending.inner.lock().await;
                 task_ids
                     .iter()
-                    .map(|id| classify_locked(&inner, parent_connection_id, id))
+                    .map(|id| {
+                        classify_locked(&inner, parent_connection_id, parent_conversation_id, id)
+                    })
                     .collect()
             };
             let running_count = classes
@@ -4906,14 +4958,41 @@ impl DelegationBroker {
     ) -> DelegationTaskReport {
         let drained = {
             let mut inner = self.pending.inner.lock().await;
-            if let Some(c) = inner.completed.get(task_id) {
-                if c.parent_connection_id == parent_connection_id {
+            // Ownership is resolved from immutable snapshots first: `owned_by`
+            // reads the SESSION map, so holding a borrow into `completed` /
+            // `running` across the call would alias `inner`.
+            let session_conv = inner
+                .sessions
+                .get(task_id)
+                .map(|s| s.parent_conversation_id);
+            let completed_conn = inner
+                .completed
+                .get(task_id)
+                .map(|c| c.parent_connection_id.clone());
+            if let Some(conn) = completed_conn {
+                let owned = match parent_conversation_id {
+                    Some(pc) => session_conv == Some(pc),
+                    None => conn == parent_connection_id,
+                };
+                if owned {
+                    let c = inner.completed.get(task_id).expect("just checked");
                     return completed_report(task_id, c);
                 }
                 return unknown_report(task_id);
             }
-            match inner.running.get(task_id) {
-                Some(r) if r.parent_connection_id == parent_connection_id => {
+            let running_conn = inner
+                .running
+                .get(task_id)
+                .map(|r| r.parent_connection_id.clone());
+            match running_conn {
+                Some(conn) => {
+                    let owned = match parent_conversation_id {
+                        Some(pc) => session_conv == Some(pc),
+                        None => conn == parent_connection_id,
+                    };
+                    if !owned {
+                        return unknown_report(task_id);
+                    }
                     drain_and_record_canceled(
                         &mut inner,
                         vec![task_id.to_string()],
@@ -4921,7 +5000,6 @@ impl DelegationBroker {
                     )
                     .pop()
                 }
-                Some(_) => return unknown_report(task_id),
                 None => None,
             }
         };
@@ -6407,6 +6485,115 @@ mod tests {
             mock.disconnects.lock().await.as_slice(),
             &["c-cancel-drop"],
             "a cancel-coded outcome must still tear the child down"
+        );
+    }
+
+    /// D5 ownership must accept the USER-side caller, whose `parent_connection_id`
+    /// is the synthetic `USER_ENTRY_CONNECTION_ID` (it never resolves to a real
+    /// connection). Before this fix the cancel path compared ONLY the connection
+    /// id, so every user-initiated cancel of an LLM-spawned task returned
+    /// `Unknown` while a broker-mocked unit test stayed green. Mirrors
+    /// `continue_delegation`'s ownership rule.
+    #[tokio::test]
+    async fn user_entry_cancel_is_owned_via_parent_conversation_id() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-1".into())).await;
+        mock.queue_send(Ok(60)).await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        // Spawned by the LLM: the running task carries the REAL parent connection.
+        let ack = broker.start_delegation(request(1, "pt-user-cancel")).await;
+        let task_id = ack.task_id.expect("running task carries an id");
+
+        // The user-side entry has no connection context, so it passes the
+        // synthetic marker plus the persistent parent conversation id.
+        let report = broker
+            .cancel_task_by_id(
+                crate::commands::delegation::USER_ENTRY_CONNECTION_ID,
+                Some(1),
+                &task_id,
+            )
+            .await;
+
+        assert_eq!(
+            report.status,
+            TaskStatus::Canceled,
+            "user-side cancel with a matching parent_conversation_id must be owned"
+        );
+        let inner = broker.pending.inner.lock().await;
+        let s = inner.sessions.get(&task_id).expect("session exists");
+        assert_eq!(s.status, TaskStatus::Canceled);
+        assert!(
+            s.child_connection_id.is_none(),
+            "cancel must clear the session's connection"
+        );
+    }
+
+    /// Widening ownership to the conversation id must not become "any
+    /// conversation id passes": a foreign parent conversation is still rejected.
+    #[tokio::test]
+    async fn user_entry_cancel_rejects_foreign_parent_conversation_id() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-2".into())).await;
+        mock.queue_send(Ok(61)).await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let ack = broker.start_delegation(request(1, "pt-foreign")).await;
+        let task_id = ack.task_id.expect("running task carries an id");
+
+        let report = broker
+            .cancel_task_by_id(
+                crate::commands::delegation::USER_ENTRY_CONNECTION_ID,
+                Some(999),
+                &task_id,
+            )
+            .await;
+
+        assert_eq!(
+            report.status,
+            TaskStatus::Unknown,
+            "a foreign parent_conversation_id must not leak the task's existence"
+        );
+        let inner = broker.pending.inner.lock().await;
+        assert!(
+            inner.running.contains_key(&task_id),
+            "the task must remain running and untouched"
+        );
+    }
+
+    /// `get_tasks_status` carries `parent_conversation_id` in its signature but
+    /// forwarded only the connection id to `classify_locked` — the same
+    /// "parameter present, unused" shape as the cancel path. The user-side
+    /// reconciliation query (spec R7.11-R7.13) reads through here.
+    #[tokio::test]
+    async fn user_entry_status_is_owned_via_parent_conversation_id() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-3".into())).await;
+        mock.queue_send(Ok(62)).await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let ack = broker.start_delegation(request(1, "pt-user-status")).await;
+        let task_id = ack.task_id.expect("running task carries an id");
+
+        let report = broker
+            .get_task_status(
+                crate::commands::delegation::USER_ENTRY_CONNECTION_ID,
+                Some(1),
+                &task_id,
+                StatusWait::Immediate,
+            )
+            .await;
+
+        assert_eq!(
+            report.status,
+            TaskStatus::Running,
+            "user-side status query with a matching parent_conversation_id must resolve"
         );
     }
 

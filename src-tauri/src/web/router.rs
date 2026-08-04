@@ -78,6 +78,14 @@ pub fn build_router(
             post(handlers::delegation::get_continuation_availability),
         )
         .route(
+            "/cancel_delegation",
+            post(handlers::delegation::cancel_delegation),
+        )
+        .route(
+            "/get_delegation_task_status",
+            post(handlers::delegation::get_delegation_task_status),
+        )
+        .route(
             "/get_feedback_settings",
             post(handlers::feedback::get_feedback_settings),
         )

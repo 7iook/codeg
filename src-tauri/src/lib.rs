@@ -1124,6 +1124,8 @@ mod tauri_app {
                 delegation_commands::continue_delegation,
                 delegation_commands::close_delegation_session,
                 delegation_commands::get_continuation_availability,
+                delegation_commands::cancel_delegation,
+                delegation_commands::get_delegation_task_status,
                 feedback_commands::get_feedback_settings,
                 feedback_commands::set_feedback_settings,
                 feedback_commands::submit_session_feedback,

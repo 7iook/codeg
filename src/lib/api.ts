@@ -4081,6 +4081,37 @@ export async function getContinuationAvailability(
   })
 }
 
+/** Cancel a delegated child session: stops the sub-agent and tears its child
+ * connection down. Idempotent — cancelling an already-terminal task returns
+ * that task's existing terminal report rather than failing, so a double-click
+ * can't manufacture an error.
+ *
+ * The returned report tells you whether the REQUEST was accepted; it is NOT
+ * the row's lifecycle source of truth. Per spec R7.7-R7.10 the observatory
+ * panel keeps deriving lifecycle from the `delegation_completed` /
+ * `delegation_session_update` event stream, and uses this response only to
+ * clear the in-flight marker. */
+export async function cancelDelegation( // gate:allow-unwired consumer is task 6.3 (row actions), which needs 6.2's row rendering first; wiring gate 6.6 + the e2e in 7.1 are the release blockers
+  childConversationId: number
+): Promise<DelegationTaskReport> {
+  return getTransport().call("cancel_delegation", {
+    childConversationId,
+  })
+}
+
+/** Re-read one delegation's AUTHORITATIVE status straight from the broker.
+ * This is the reconciliation read (spec R7.11-R7.13) for the two windows where
+ * a terminal event can be missed: a cancel that answered terminal while no
+ * matching event arrived, and a transport reconnect that left rows still shown
+ * as running. Never long-polls. */
+export async function getDelegationTaskStatus( // gate:allow-unwired consumer is task 6.3 (reconciliation triggers R7.11-R7.13), blocked on 6.2's row rendering; wiring gate 6.6 + the e2e in 7.1 are the release blockers
+  childConversationId: number
+): Promise<DelegationTaskReport> {
+  return getTransport().call("get_delegation_task_status", {
+    childConversationId,
+  })
+}
+
 // ─── Live feedback settings + submit ───────────────────────────────────
 
 /** Mirror of Rust `FeedbackSettings`. */

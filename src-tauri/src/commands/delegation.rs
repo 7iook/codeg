@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acp::delegation::broker::TurnOrigin;
 use crate::acp::delegation::broker::{
-    ContinuationAvailability, DelegationBroker, DelegationConfig,
+    ContinuationAvailability, DelegationBroker, DelegationConfig, StatusWait,
 };
 use crate::acp::delegation::types::{
     AgentDelegationDefaults, DelegationError, DelegationOutcome, DelegationTaskReport, TaskStatus,
@@ -373,6 +373,74 @@ pub async fn get_continuation_availability_core(
     }
 }
 
+/// User-side cancel (Requirement 8): locate the broker task by the child
+/// CONVERSATION id and stop it under the same task id the parent AI holds.
+/// Same target resolution and same three refusal shapes as
+/// [`continue_delegation_core`], so every user-side channel answers a bad id
+/// identically.
+///
+/// The broker's ownership check (D5) runs on `parent_conversation_id`; the
+/// synthetic [`USER_ENTRY_CONNECTION_ID`] never resolves to a real ACP
+/// connection, so passing the resolved parent conversation id is what makes a
+/// user-initiated cancel of an LLM-spawned task addressable at all. Cancel is
+/// naturally idempotent here: a task that already went terminal returns its
+/// existing terminal report rather than an error, so a double-click can't
+/// manufacture a failure.
+pub async fn cancel_delegation_core(
+    conn: &DatabaseConnection,
+    broker: &DelegationBroker,
+    child_conversation_id: i32,
+) -> Result<DelegationTaskReport, AppCommandError> {
+    match resolve_delegation_target(conn, child_conversation_id).await? {
+        DelegationTarget::NotFound => Ok(unknown_target_report()),
+        DelegationTarget::NotASubsession => Ok(not_a_subsession_report(child_conversation_id)),
+        DelegationTarget::Target {
+            task_id,
+            parent_conversation_id,
+        } => Ok(broker
+            .cancel_task_by_id(
+                USER_ENTRY_CONNECTION_ID,
+                Some(parent_conversation_id),
+                &task_id,
+            )
+            .await),
+    }
+}
+
+/// User-side authoritative status read (Requirement 7.11-7.13): re-read one
+/// delegation's status straight from the broker so the observatory panel can
+/// reconcile a row whose terminal event never arrived (cancel answered
+/// terminal but no `delegation_completed` landed) or that is still shown
+/// running after a transport reconnect.
+///
+/// Never blocks — [`StatusWait::Immediate`] returns the current snapshot. A
+/// reconciliation pass is a UI-driven read that must answer promptly; the
+/// long-poll modes exist for the LLM channel, which is waiting on a result.
+/// Reads through the same ownership rule as cancel (that is why the D5 fix
+/// covered `classify_locked` in the same delivery), so the panel and the
+/// cancel button agree on which tasks are addressable.
+pub async fn get_delegation_task_status_core(
+    conn: &DatabaseConnection,
+    broker: &DelegationBroker,
+    child_conversation_id: i32,
+) -> Result<DelegationTaskReport, AppCommandError> {
+    match resolve_delegation_target(conn, child_conversation_id).await? {
+        DelegationTarget::NotFound => Ok(unknown_target_report()),
+        DelegationTarget::NotASubsession => Ok(not_a_subsession_report(child_conversation_id)),
+        DelegationTarget::Target {
+            task_id,
+            parent_conversation_id,
+        } => Ok(broker
+            .get_task_status(
+                USER_ENTRY_CONNECTION_ID,
+                Some(parent_conversation_id),
+                &task_id,
+                StatusWait::Immediate,
+            )
+            .await),
+    }
+}
+
 // -------- Tauri commands -----------------------------------------------------
 
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
@@ -466,6 +534,40 @@ pub async fn get_continuation_availability(
     #[cfg(feature = "tauri-runtime")]
     {
         get_continuation_availability_core(&db.conn, broker.inner(), child_conversation_id).await
+    }
+    #[cfg(not(feature = "tauri-runtime"))]
+    {
+        let _ = child_conversation_id;
+        Err(AppCommandError::configuration_invalid("tauri-only command"))
+    }
+}
+
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn cancel_delegation(
+    #[cfg(feature = "tauri-runtime")] db: tauri::State<'_, crate::db::AppDatabase>,
+    #[cfg(feature = "tauri-runtime")] broker: tauri::State<'_, Arc<DelegationBroker>>,
+    child_conversation_id: i32,
+) -> Result<DelegationTaskReport, AppCommandError> {
+    #[cfg(feature = "tauri-runtime")]
+    {
+        cancel_delegation_core(&db.conn, broker.inner(), child_conversation_id).await
+    }
+    #[cfg(not(feature = "tauri-runtime"))]
+    {
+        let _ = child_conversation_id;
+        Err(AppCommandError::configuration_invalid("tauri-only command"))
+    }
+}
+
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn get_delegation_task_status(
+    #[cfg(feature = "tauri-runtime")] db: tauri::State<'_, crate::db::AppDatabase>,
+    #[cfg(feature = "tauri-runtime")] broker: tauri::State<'_, Arc<DelegationBroker>>,
+    child_conversation_id: i32,
+) -> Result<DelegationTaskReport, AppCommandError> {
+    #[cfg(feature = "tauri-runtime")]
+    {
+        get_delegation_task_status_core(&db.conn, broker.inner(), child_conversation_id).await
     }
     #[cfg(not(feature = "tauri-runtime"))]
     {
@@ -660,5 +762,267 @@ mod tests {
         let db = crate::db::test_helpers::fresh_in_memory_db().await;
         let settings = load_delegation_settings(&db.conn).await;
         assert_eq!(settings.completed_cache_max_mb, DEFAULT_COMPLETED_CACHE_MB);
+    }
+
+    // -------- User-side cancel + reconciliation query (Requirement 8) --------
+    //
+    // The end-to-end test below deliberately drives a REAL `DelegationBroker`.
+    // A broker-mocked test would have stayed green through the entire
+    // pre-`a0779219` ownership defect (`cancel_task_by_id` compared only the
+    // connection id, so every user-side cancel answered `Unknown`) — the exact
+    // failure mode Requirement 8 exists to close.
+
+    /// Seed a folder + root parent conversation, returning `(folder_id,
+    /// parent_conversation_id)`. The parent id is what a `DelegationRequest`
+    /// carries and what the broker records on the session entry.
+    async fn seed_parent(conn: &DatabaseConnection, folder_path: &str) -> (i32, i32) {
+        use crate::db::service::folder_service;
+
+        let folder = folder_service::add_folder(conn, folder_path)
+            .await
+            .expect("folder");
+        let parent_id = conversation_service::create(
+            conn,
+            folder.id,
+            AgentType::ClaudeCode,
+            Some("parent".into()),
+            None,
+        )
+        .await
+        .expect("parent")
+        .id;
+        (folder.id, parent_id)
+    }
+
+    /// Create a delegation child row under `parent_id` whose
+    /// `delegation_call_id` is bound to `task_id`, and return its conversation
+    /// id. `delegation_call_id` is the join key `resolve_delegation_target`
+    /// reads, and `parent_id` must be the SAME parent the delegation was
+    /// started under — the broker's D5 ownership check compares exactly these
+    /// two, so a mismatched parent legitimately answers `Unknown`.
+    async fn seed_delegation_child(
+        conn: &DatabaseConnection,
+        folder_id: i32,
+        parent_id: i32,
+        task_id: &str,
+    ) -> i32 {
+        use crate::acp::delegation::spawner::DelegationLink;
+
+        conversation_service::create_with_delegation(
+            conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            Some("delegated child".into()),
+            None,
+            Some(DelegationLink {
+                parent_conversation_id: parent_id,
+                parent_tool_use_id: "pt-user-cancel".into(),
+                delegation_call_id: task_id.to_string(),
+            }),
+        )
+        .await
+        .expect("child")
+        .id
+    }
+
+    /// Requirement 8.2: an id with no live conversation row answers `Unknown`
+    /// with no error code, so the channel never discloses whether a row
+    /// exists.
+    #[tokio::test]
+    async fn cancel_on_unknown_child_conversation_reports_unknown() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let broker = make_broker();
+        let report = cancel_delegation_core(&db.conn, &broker, 424_242)
+            .await
+            .expect("an unknown id is a report, not an error");
+        assert_eq!(report.status, TaskStatus::Unknown);
+        assert!(
+            report.error_code.is_none(),
+            "unknown ids ride the Unknown status shape, not an error code"
+        );
+    }
+
+    /// Requirement 8.3: a regular root conversation (`parent_id` null) is not
+    /// a delegation subsession — cancel is refused with the stable
+    /// `not_continuable` code rather than reaching the broker.
+    #[tokio::test]
+    async fn cancel_on_root_conversation_is_rejected() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let broker = make_broker();
+        let (_folder_id, root_id) = seed_parent(&db.conn, "/w8-root").await;
+
+        let report = cancel_delegation_core(&db.conn, &broker, root_id)
+            .await
+            .expect("a refusal rides the report shape");
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert_eq!(report.error_code.as_deref(), Some("not_continuable"));
+        assert_eq!(report.child_conversation_id, Some(root_id));
+    }
+
+    /// Requirement 8.1 + 8.4-8.5, driven end to end through a REAL broker (no
+    /// broker mock): an LLM-spawned running task is canceled by the USER-side
+    /// entry, which holds no connection context and passes the synthetic
+    /// `USER_ENTRY_CONNECTION_ID`. Asserts the observable side effects, not
+    /// just the returned status: the session flips to `Canceled` and the child
+    /// connection is really torn down through the spawner.
+    #[tokio::test]
+    async fn cancel_core_cancels_a_real_running_task_through_a_real_broker() {
+        use crate::acp::delegation::broker::DelegationConfig;
+        use crate::acp::delegation::types::DelegationRequest;
+
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mock = Arc::new(MockSpawner::new());
+        let broker = DelegationBroker::new(
+            mock.clone() as Arc<dyn ConnectionSpawner>,
+            Arc::new(EmptyLookup) as Arc<dyn ConversationDepthLookup>,
+        );
+        broker
+            .set_config(DelegationConfig {
+                enabled: true,
+                ..DelegationConfig::default()
+            })
+            .await;
+
+        // The LLM spawns it: the running task carries a REAL parent connection.
+        mock.queue_spawn(Ok("child-conn-cancel".into())).await;
+        mock.queue_send(Ok(4_242)).await;
+        let (folder_id, parent_id) = seed_parent(&db.conn, "/w8-cancel").await;
+        let ack = broker
+            .start_delegation(DelegationRequest {
+                parent_connection_id: "parent-conn".into(),
+                parent_conversation_id: parent_id,
+                parent_tool_use_id: "pt-user-cancel".into(),
+                agent_type: AgentType::ClaudeCode,
+                task: "do x".into(),
+                working_dir: None,
+                requested_working_dir: None,
+                external_handle: None,
+                subagent_type: None,
+            })
+            .await;
+        let task_id = ack.task_id.expect("a running task carries an id");
+
+        // Bind a child row UNDER THE SAME PARENT to the broker-minted task id
+        // (the D5 join key the user-side entry resolves through).
+        let child_id = seed_delegation_child(&db.conn, folder_id, parent_id, &task_id).await;
+
+        let report = cancel_delegation_core(&db.conn, &broker, child_id)
+            .await
+            .expect("the happy path never surfaces an error");
+
+        assert_eq!(
+            report.status,
+            TaskStatus::Canceled,
+            "a user-side cancel of an LLM-spawned task must be honored; \
+             `Unknown` here means the ownership check regressed"
+        );
+        assert_eq!(report.task_id.as_deref(), Some(task_id.as_str()));
+        // Real side effect: the child connection was actually torn down.
+        assert_eq!(
+            mock.disconnects.lock().await.as_slice(),
+            &["child-conn-cancel"],
+            "cancel must tear the child connection down"
+        );
+        // And the broker's own view agrees the task is terminal.
+        let after = broker
+            .get_task_status(
+                USER_ENTRY_CONNECTION_ID,
+                Some(parent_id),
+                &task_id,
+                crate::acp::delegation::broker::StatusWait::Immediate,
+            )
+            .await;
+        assert_eq!(after.status, TaskStatus::Canceled);
+    }
+
+    /// Requirement 7.11-7.13 read side: the reconciliation query resolves the
+    /// authoritative status of a running task through the same user-side
+    /// credentials, so the panel can re-read a row after a lost event or a
+    /// transport reconnect. Real broker, no mock.
+    #[tokio::test]
+    async fn status_core_reads_authoritative_status_through_a_real_broker() {
+        use crate::acp::delegation::broker::DelegationConfig;
+        use crate::acp::delegation::types::DelegationRequest;
+
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let mock = Arc::new(MockSpawner::new());
+        let broker = DelegationBroker::new(
+            mock.clone() as Arc<dyn ConnectionSpawner>,
+            Arc::new(EmptyLookup) as Arc<dyn ConversationDepthLookup>,
+        );
+        broker
+            .set_config(DelegationConfig {
+                enabled: true,
+                ..DelegationConfig::default()
+            })
+            .await;
+
+        mock.queue_spawn(Ok("child-conn-status".into())).await;
+        mock.queue_send(Ok(4_243)).await;
+        let (folder_id, parent_id) = seed_parent(&db.conn, "/w8-status").await;
+        let ack = broker
+            .start_delegation(DelegationRequest {
+                parent_connection_id: "parent-conn".into(),
+                parent_conversation_id: parent_id,
+                parent_tool_use_id: "pt-user-cancel".into(),
+                agent_type: AgentType::ClaudeCode,
+                task: "do x".into(),
+                working_dir: None,
+                requested_working_dir: None,
+                external_handle: None,
+                subagent_type: None,
+            })
+            .await;
+        let task_id = ack.task_id.expect("a running task carries an id");
+        let child_id = seed_delegation_child(&db.conn, folder_id, parent_id, &task_id).await;
+
+        let running = get_delegation_task_status_core(&db.conn, &broker, child_id)
+            .await
+            .expect("the query never surfaces an error for a resolvable id");
+        assert_eq!(
+            running.status,
+            TaskStatus::Running,
+            "the reconciliation query must resolve under user-side credentials"
+        );
+        assert_eq!(running.task_id.as_deref(), Some(task_id.as_str()));
+
+        // After a cancel it must report the new authoritative terminal state —
+        // this is precisely the "cancel returned terminal but no event arrived"
+        // reconciliation case (R7.11).
+        let _ = cancel_delegation_core(&db.conn, &broker, child_id)
+            .await
+            .expect("cancel");
+        let settled = get_delegation_task_status_core(&db.conn, &broker, child_id)
+            .await
+            .expect("status after cancel");
+        assert_eq!(settled.status, TaskStatus::Canceled);
+    }
+
+    /// The reconciliation query shares cancel's target resolution, so an
+    /// unresolvable id gets the same non-disclosing verdict (Requirement 8.2
+    /// applied to the read side).
+    #[tokio::test]
+    async fn status_core_on_unknown_child_conversation_reports_unknown() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let broker = make_broker();
+        let report = get_delegation_task_status_core(&db.conn, &broker, 424_242)
+            .await
+            .expect("an unknown id is a report, not an error");
+        assert_eq!(report.status, TaskStatus::Unknown);
+        assert!(report.error_code.is_none());
+    }
+
+    /// And a regular root conversation is refused on the read side too.
+    #[tokio::test]
+    async fn status_core_on_root_conversation_is_rejected() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let broker = make_broker();
+        let (_folder_id, root_id) = seed_parent(&db.conn, "/w8-status-root").await;
+
+        let report = get_delegation_task_status_core(&db.conn, &broker, root_id)
+            .await
+            .expect("a refusal rides the report shape");
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert_eq!(report.error_code.as_deref(), Some("not_continuable"));
     }
 }
