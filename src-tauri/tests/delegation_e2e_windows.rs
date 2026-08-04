@@ -353,3 +353,438 @@ async fn end_to_end_named_pipe_back_to_back_requests() {
     completer.await.unwrap();
     listener_task.abort();
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stage 8 · persona pass-through wire e2e (4 cases)
+//
+// Everything above proves the pipe/listener/broker chain works for a plain
+// `delegate_to_agent` call. The four tests below add the persona layer:
+// carry a `subagent_type` on the same wire, and observe the full loop —
+//   listener parse → broker dispatch → provider translate → spawn args
+//   (or short-circuit) → tool_result / status carrying applied_persona.
+//
+// The broker unit tests (`tests/broker_persona*.rs`) already exercise these
+// four situations at the broker API surface. What they don't cover is the
+// LISTENER's `input.get("subagent_type")` parse and the STATUS query's
+// projection of `applied_persona` — those two seams only exist when the
+// call arrives as a real MCP wire frame and the caller polls with
+// `get_delegation_status`. E-052 (test-green ≠ real integration) is the
+// exact failure this closes: broker-layer green doesn't prove wire-layer
+// wired.
+//
+// Windows-only by file cfg; the UDS counterpart is left for a future round
+// since the parse path is transport-agnostic (same `input` JSON either way).
+// ─────────────────────────────────────────────────────────────────────────
+
+use codeg_lib::acp::delegation::persona::{AppliedPersona, LaunchOption};
+
+/// Small helper shared by the four stage-8 e2e tests: build a fresh listener
+/// bound to a fresh unique pipe, register one token, and return the pipe
+/// path + mock + listener join handle. Cuts ~100 lines of boilerplate per
+/// test while keeping the harness IDENTICAL to `end_to_end_named_pipe_happy_path`
+/// so the four new tests can't accidentally drift into a rosier reality than
+/// the original happy path.
+async fn spawn_stage8_listener(
+    tag: &str,
+    mock: Arc<MockSpawner>,
+) -> (String, Arc<DelegationBroker>, tokio::task::JoinHandle<()>) {
+    let broker = Arc::new(DelegationBroker::new(
+        mock as Arc<dyn ConnectionSpawner>,
+        Arc::new(AlwaysRoot) as Arc<dyn ConversationDepthLookup>,
+    ));
+    broker
+        .set_config(DelegationConfig {
+            enabled: true,
+            depth_limit: 8,
+            ..DelegationConfig::default()
+        })
+        .await;
+
+    let tokens = Arc::new(TokenRegistry::default());
+    tokens
+        .register(
+            "tok".into(),
+            TokenEntry {
+                parent_connection_id: "p1".into(),
+                working_dir: PathBuf::from(r"C:\Windows\Temp"),
+            },
+        )
+        .await;
+
+    let listener = DelegationListener::new(
+        broker.clone(),
+        tokens,
+        Arc::new(FixedParent(1)) as Arc<dyn ParentSessionLookup>,
+        Arc::new(NoFeedback) as Arc<dyn codeg_lib::acp::feedback::SessionFeedbackAccess>,
+        Arc::new(NoQuestions) as Arc<dyn SessionQuestionAccess>,
+        Arc::new(NoSessionInfo) as Arc<dyn codeg_lib::acp::session_info::SessionInfoAccess>,
+        Arc::new(NoTaskTools) as Arc<dyn codeg_lib::acp::work_task_tools::WorkTaskToolAccess>,
+    );
+
+    let pipe = unique_pipe(tag);
+    let pipe_for_listener = PathBuf::from(&pipe);
+    let listener_task = tokio::spawn(async move {
+        let _ = listener.run(pipe_for_listener).await;
+    });
+    (pipe, broker, listener_task)
+}
+
+/// **Verdict #1** (Kiro real persona · wire half of the argv chain):
+/// a `subagent_type` of a known-valid Kiro persona name reaches `spawn` as
+/// `LaunchOption::KiroPersona(name)`, and `get_delegation_status` reflects
+/// `applied_persona.kind == "native"`. The argv translation is separately
+/// pinned by `connection::kiro_launch_args_translate_persona_agent_verbatim`
+/// (unit) + `persona_merge_order::*_end_to_end` (integration) — those two
+/// plus this one form the full Kiro chain.
+///
+/// KIRO is chosen because its provider needs NO filesystem access: `Native`
+/// resolves without touching `<KIRO_HOME>/agents/<name>.json`. Kiro-cli
+/// reloads that file at process start; `codeg` only nominates the name via
+/// argv. So a fresh temp env is unnecessary — the name never hits disk.
+///
+/// Positive assertion: the wire carries the persona all the way to
+/// `SpawnCallArgs.launch_option` AND lands in the terminal status report.
+///
+/// Reverse assertion: `applied_persona.kind` is precisely `"native"` (never
+/// silently downgraded to `"hint"` or `"ignored_unsupported_cli"` for Kiro).
+#[tokio::test]
+async fn stage8_wire_kiro_native_persona_reaches_spawn_and_status() {
+    let mock = Arc::new(MockSpawner::new());
+    mock.queue_spawn(Ok("child-kiro".into())).await;
+    mock.queue_send(Ok(101)).await;
+
+    let (pipe, broker, listener_task) = spawn_stage8_listener("kiro-native", mock.clone()).await;
+
+    // 1. delegate_to_agent with a Kiro persona nomination → Running ack.
+    let req = BrokerRequest {
+        token: "tok".into(),
+        parent_connection_id: "p1".into(),
+        parent_tool_use_id: "pt-kiro".into(),
+        external_handle: None,
+        input: json!({
+            "agent_type": "kiro",
+            "task": "plan the recon",
+            "subagent_type": "plan-reality-recon",
+        }),
+    };
+    let ack = client_round_trip_with_retry(&pipe, &req)
+        .await
+        .expect("kiro persona round-trip");
+    assert_eq!(ack.outcome["status"], "running");
+    assert_eq!(ack.outcome["child_conversation_id"], 101);
+    let task_id = ack.outcome["task_id"]
+        .as_str()
+        .expect("running ack carries a task_id")
+        .to_string();
+
+    // 2. The broker resolved persona → launch_option; assert BEFORE completing
+    //    so a later change that only wires the terminal-report field can't
+    //    make this test go green while spawn silently loses the nomination.
+    {
+        let args = mock.spawn_args.lock().await;
+        assert_eq!(args.len(), 1, "exactly one spawn for a single delegation");
+        assert_eq!(
+            args[0].launch_option,
+            Some(LaunchOption::KiroPersona("plan-reality-recon".into())),
+            "wire subagent_type must reach spawn as KiroPersona; got {:?}",
+            args[0].launch_option
+        );
+    }
+
+    // 3. Resolve the child → completed. `AppliedPersona::Native` is R3-A2
+    //    timing: broker already stored the intent on spawn-Ok, so a successful
+    //    complete promotes it into the success outcome.
+    broker
+        .complete_call(
+            &task_id,
+            DelegationOutcome::Ok(DelegationSuccess {
+                text: "kiro-recon-done".into(),
+                child_conversation_id: 101,
+                child_agent_type: AgentType::Kiro,
+                turn_count: 1,
+                duration_ms: 42,
+                token_usage: None,
+                applied_persona: Some(AppliedPersona::Native {
+                    name: "plan-reality-recon".into(),
+                }),
+            }),
+        )
+        .await;
+
+    // 4. get_delegation_status → applied_persona.kind == "native".
+    let status_req = BrokerStatusRequest {
+        token: "tok".into(),
+        task_ids: vec![task_id],
+        wait_ms: Some(1_000),
+    };
+    let resp = client_status_round_trip_with_retry(&pipe, &status_req)
+        .await
+        .expect("kiro status round-trip");
+    listener_task.abort();
+
+    let task = &resp.outcome["tasks"][0];
+    assert_eq!(task["status"], "completed");
+    assert_eq!(task["text"], "kiro-recon-done");
+    assert_eq!(
+        task["applied_persona"]["kind"], "native",
+        "Kiro persona nomination must project as `native`, got {:?}",
+        task["applied_persona"]
+    );
+    assert_eq!(task["applied_persona"]["name"], "plan-reality-recon");
+}
+
+/// **Verdict #4** (Unsupported CLI silent downgrade):
+/// a `subagent_type` on `agent_type: "gemini"` must NEVER fail the
+/// delegation — R4.1/R4.2/R4.3 pin this as a silent downgrade where the
+/// child still runs, `applied_persona` attributes `IgnoredUnsupportedCli`,
+/// and a `[note]` on the success text tells the LLM the request was
+/// downgraded.
+///
+/// Positive assertion: status is `completed`, `applied_persona.kind`
+/// is `"ignored_unsupported_cli"`, and the success text carries a `[note]`
+/// with the persona name + `ignored` — the three tokens the broker's
+/// `append_unsupported_note` guarantees.
+///
+/// Reverse assertion: `spawn_args[0].launch_option` is `None`. If the broker
+/// ever forwarded the nomination to `spawn` for an unsupported CLI (e.g. a
+/// naive future refactor that skipped the `supports_persona()` gate), this
+/// assertion would fail even if `applied_persona` still looked right.
+#[tokio::test]
+async fn stage8_wire_unsupported_cli_silently_downgrades_with_note() {
+    let mock = Arc::new(MockSpawner::new());
+    mock.queue_spawn(Ok("child-gem".into())).await;
+    mock.queue_send(Ok(202)).await;
+
+    let (pipe, broker, listener_task) = spawn_stage8_listener("unsupported", mock.clone()).await;
+
+    let req = BrokerRequest {
+        token: "tok".into(),
+        parent_connection_id: "p1".into(),
+        parent_tool_use_id: "pt-gem".into(),
+        external_handle: None,
+        input: json!({
+            "agent_type": "gemini",
+            "task": "do gemini work",
+            "subagent_type": "some-agent",
+        }),
+    };
+    let ack = client_round_trip_with_retry(&pipe, &req)
+        .await
+        .expect("unsupported round-trip");
+    assert_eq!(
+        ack.outcome["status"], "running",
+        "unsupported CLI must NOT fail delegation on setup; got {:?}",
+        ack.outcome
+    );
+    let task_id = ack.outcome["task_id"]
+        .as_str()
+        .expect("running ack carries a task_id")
+        .to_string();
+
+    // Reverse guard: the nomination was DOWNGRADED, not forwarded. A future
+    // refactor that skips `supports_persona()` would fail this line even if
+    // it happened to still produce `IgnoredUnsupportedCli` downstream.
+    {
+        let args = mock.spawn_args.lock().await;
+        assert_eq!(args.len(), 1);
+        assert_eq!(
+            args[0].launch_option, None,
+            "unsupported CLI must NEVER forward a launch option; got {:?}",
+            args[0].launch_option
+        );
+    }
+
+    // The child ran and produced ordinary output. The broker will splice a
+    // `[note]` line onto this text before it reaches the status report.
+    broker
+        .complete_call(
+            &task_id,
+            DelegationOutcome::Ok(DelegationSuccess {
+                text: "gemini-said-hi".into(),
+                child_conversation_id: 202,
+                child_agent_type: AgentType::Gemini,
+                turn_count: 1,
+                duration_ms: 33,
+                token_usage: None,
+                applied_persona: None, // broker overrides from stored intent
+            }),
+        )
+        .await;
+
+    let status_req = BrokerStatusRequest {
+        token: "tok".into(),
+        task_ids: vec![task_id],
+        wait_ms: Some(1_000),
+    };
+    let resp = client_status_round_trip_with_retry(&pipe, &status_req)
+        .await
+        .expect("unsupported status round-trip");
+    listener_task.abort();
+
+    let task = &resp.outcome["tasks"][0];
+    assert_eq!(task["status"], "completed");
+    assert_eq!(
+        task["applied_persona"]["kind"], "ignored_unsupported_cli",
+        "unsupported CLI must attribute IgnoredUnsupportedCli, got {:?}",
+        task["applied_persona"]
+    );
+    assert_eq!(task["applied_persona"]["name"], "some-agent");
+
+    let text = task["text"]
+        .as_str()
+        .expect("completed status carries success text");
+    assert!(
+        text.contains("[note]") && text.contains("some-agent") && text.contains("ignored"),
+        "unsupported note must ride the result text (need [note] + persona name + `ignored`), got: {text}",
+    );
+}
+
+/// **Verdict #5** (Invalid persona hard failure):
+/// on a Claude Code delegation whose `subagent_type` refers to a persona
+/// file that does not exist (empty tempdir override), the broker must FAIL
+/// the delegation with wire code `invalid_persona` BEFORE any spawn attempt
+/// — R3-F3 explicitly rejects a silent no-persona degradation, which would
+/// hand the LLM a subagent that quietly ignored the requested role.
+///
+/// This test uses `temp_env` to make `CLAUDE_CONFIG_DIR` point at an empty
+/// tempdir, so the resolver walks a real filesystem path and reports
+/// `NotFound(name)` for the nonexistent persona. That, plus the reverse
+/// spawn-args assertion, is the ONLY way to catch a regression that
+/// swapped the failure path for a silent no-persona spawn.
+///
+/// Reverse assertion: `spawn_args` is empty. The broker must short-circuit
+/// on `PersonaEffect::Failed` and never call `spawn`.
+#[tokio::test]
+async fn stage8_wire_invalid_persona_fails_before_spawn() {
+    let home = tempfile::tempdir().expect("tempdir");
+    // Deliberately no agents/ subdir at all — resolver reports NotFound.
+    temp_env::async_with_vars([("CLAUDE_CONFIG_DIR", Some(home.path()))], async {
+        let mock = Arc::new(MockSpawner::new());
+        // No queue_spawn/queue_send — a spawn attempt would panic on
+        // "no queued result", giving us an even louder failure signal
+        // than the assertion below if the broker regresses.
+
+        let (pipe, _broker, listener_task) =
+            spawn_stage8_listener("invalid-persona", mock.clone()).await;
+
+        let req = BrokerRequest {
+            token: "tok".into(),
+            parent_connection_id: "p1".into(),
+            parent_tool_use_id: "pt-inv".into(),
+            external_handle: None,
+            input: json!({
+                "agent_type": "claude_code",
+                "task": "do it",
+                "subagent_type": "nonexistent-xyz-stage8",
+            }),
+        };
+        let resp = client_round_trip_with_retry(&pipe, &req)
+            .await
+            .expect("invalid-persona round-trip");
+        listener_task.abort();
+
+        assert_eq!(
+            resp.outcome["status"], "failed",
+            "an unresolvable persona must FAIL the delegation, not silently degrade; got {:?}",
+            resp.outcome
+        );
+        assert_eq!(
+            resp.outcome["error_code"], "invalid_persona",
+            "wire code must be `invalid_persona`; got {:?}",
+            resp.outcome["error_code"]
+        );
+
+        // Reverse guard: broker short-circuited before ever hitting the
+        // spawner. If a future refactor moved the resolver AFTER spawn,
+        // this would catch it even if the wire code still looked right.
+        let args = mock.spawn_args.lock().await;
+        assert!(
+            args.is_empty(),
+            "invalid-persona must abort BEFORE spawn; got {} spawn call(s)",
+            args.len()
+        );
+    })
+    .await;
+}
+
+/// **Verdict #6** (Persona-name grammar rejection):
+/// three concrete grammar-violating names — a slashed path (`foo/bar`), a
+/// dotted name (`a.b`), and a 65-char name (one over the cap) — must each
+/// fail the delegation with `invalid_persona` and never reach `spawn`. The
+/// grammar gate lives in the broker BEFORE `provider.resolve_persona_effect`
+/// (R3-F1 order), so this fires on ANY persona-supporting CLI without
+/// needing filesystem setup.
+///
+/// Each case runs on its OWN fresh listener + mock, so the spawn_args
+/// emptiness assertion is per-case (a shared mock would let one case
+/// legitimately spawn and mask another case that regressed to spawning).
+#[tokio::test]
+async fn stage8_wire_persona_name_grammar_rejected() {
+    let cases: [(&str, &str); 3] = [
+        ("slash", "foo/bar"),
+        ("dot", "a.b"),
+        // 65 characters — one over the 1..=64 grammar cap.
+        (
+            "too-long",
+            "a123456789012345678901234567890123456789012345678901234567890123z",
+        ),
+    ];
+
+    for (tag, bad_name) in cases {
+        assert_eq!(
+            bad_name.chars().count(),
+            match tag {
+                "too-long" => 65,
+                "slash" => 7,
+                "dot" => 3,
+                _ => unreachable!(),
+            },
+            "case `{tag}` fixture length precheck"
+        );
+
+        let mock = Arc::new(MockSpawner::new());
+        // Again, no queued results — a spawn attempt would panic first.
+
+        let (pipe, _broker, listener_task) =
+            spawn_stage8_listener(&format!("grammar-{tag}"), mock.clone()).await;
+
+        // Use Kiro so `supports_persona()` is true (the grammar gate has to
+        // fire — an unsupported CLI would short-circuit before it and land
+        // us on the wrong assertion path).
+        let req = BrokerRequest {
+            token: "tok".into(),
+            parent_connection_id: "p1".into(),
+            parent_tool_use_id: format!("pt-bad-{tag}"),
+            external_handle: None,
+            input: json!({
+                "agent_type": "kiro",
+                "task": "do x",
+                "subagent_type": bad_name,
+            }),
+        };
+        let resp = client_round_trip_with_retry(&pipe, &req)
+            .await
+            .unwrap_or_else(|e| panic!("grammar case `{tag}` round-trip failed: {e}"));
+        listener_task.abort();
+
+        assert_eq!(
+            resp.outcome["status"], "failed",
+            "grammar case `{tag}` ({bad_name}) must FAIL delegation; got {:?}",
+            resp.outcome
+        );
+        assert_eq!(
+            resp.outcome["error_code"], "invalid_persona",
+            "grammar case `{tag}` wire code must be `invalid_persona`; got {:?}",
+            resp.outcome["error_code"]
+        );
+
+        // Reverse guard: broker rejected on grammar BEFORE reaching the
+        // provider or the spawner. This is what proves R3-F1 order.
+        let args = mock.spawn_args.lock().await;
+        assert!(
+            args.is_empty(),
+            "grammar case `{tag}` must abort BEFORE spawn; got {} spawn call(s)",
+            args.len()
+        );
+    }
+}

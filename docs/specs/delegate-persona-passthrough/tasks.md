@@ -385,26 +385,35 @@
 
 ### 阶段 8 · e2e 验证 + process-death 观察
 
-- [ ] 8. e2e 手工验证六条 + R7.1/R7.2 process-death
-  - [ ] 8.1 **Kiro 真人格 e2e**:桌面 codeg 起 host,发 `delegate_to_agent({agent_type:"kiro", task:"say hi", subagent_type:"plan-reality-recon"})` → 卡片显 `Kiro · @plan-reality-recon`,`[ACP] spawning` 日志含 `--agent plan-reality-recon`
+- [-] 8. e2e 手工验证六条 + R7.1/R7.2 process-death · **本轮 executor SUB 落 wire 层自动化 4 条(6 e2e-windows 全绿)· 手工层 5 条 unverified(需 GUI + 真进程 kill · 剧本已备)**
+  - [x] 8.1 **Kiro 真人格 e2e**(wire 半段 · argv 半段 unverified):自动化用 pipe harness 端到端跑 delegation ack → complete → status,断 `SpawnCallArgs.launch_option == Some(KiroPersona("plan-reality-recon"))` + `applied_persona.kind == "native"`。argv 那一跳(kiro-cli 真进程 `--agent plan-reality-recon`)属 B 层手工验收
     - _Requirements: Success State §1_
-  - [ ] 8.2 **Claude preamble e2e**:落 `~/.claude/agents/plan-reality-recon.md` 含 `SPEC_MARKER_R1_CLAUDE` → 卡片显 `Claude Code · @plan-reality-recon (best-effort)`,子会话首轮 prompt 前 300 字节含标记
+    - **Evidence**: commit pending · verify: `cargo test --features test-utils --test delegation_e2e_windows stage8_wire_kiro_native → 1 passed EXIT=0` · files: `stage8_wire_kiro_native_persona_reaches_spawn_and_status @ src-tauri/tests/delegation_e2e_windows.rs:452` · AC: 1 — 负向 mutation C(broker spawn 传 None)转红 · argv 半段由 stage 5 `merged_launch_option_translates_to_agent_argv_end_to_end` 锁死 · 真进程观察见 e2e-manual-2026-08-04.md
+  - [ ] 8.2 **Claude preamble e2e** · **unverified: SUB 环境无桌面 Tauri host / 无 GUI 观察卡片渲染**
     - _Requirements: Success State §2, 3.2_
-  - [ ] 8.3 **Codex preamble e2e**:同 8.2,`~/.codex/agents/plan-reality-recon.md` + `SPEC_MARKER_R1_CODEX`
+    - **Evidence**: unverified · verify: 见 `docs/specs/delegate-persona-passthrough/e2e-manual-2026-08-04.md#用例-2` 剧本(探针 `codeg-e2e-probe` · marker `SPEC_MARKER_STAGE8_CLAUDE`)· files: `broker_persona_hint.rs:179 claude_code_hint_prepends_preamble_and_forwards_no_launch_option` · AC: 2 — A 层 broker_persona_hint 已锁「preamble 前置 + 无 launch_option」必要性 · GUI 真跑仅验最后一跳
+  - [ ] 8.3 **Codex preamble e2e** · **unverified: 同 8.2**
     - _Requirements: Success State §3, 3.2_
-  - [ ] 8.4 **Unsupported CLI 静默降级**:`agent_type:"gemini" + subagent_type:"xxx"` → 卡片显 `Gemini · @xxx (ignored — CLI unsupported)`,delegation 成功,tool_result 尾含 note,子进程日志无 `--agent`,首轮 prompt 无 preamble
+    - **Evidence**: unverified · verify: 见 e2e-manual-2026-08-04.md#用例-3 · files: `broker_persona_hint.rs:192 codex_hint_prepends_preamble_and_forwards_no_launch_option` · AC: 3 — A 层证据同 8.2 · 探针 `codeg-e2e-probe` · marker `SPEC_MARKER_STAGE8_CODEX`
+  - [x] 8.4 **Unsupported CLI 静默降级**:自动化用 pipe harness · `agent_type:"gemini" + subagent_type:"some-agent"` → `status:"running"` 不失败,status 里 `applied_persona.kind == "ignored_unsupported_cli"`,text 含 `[note]` + persona name + `ignored`,`SpawnCallArgs.launch_option == None`
     - _Requirements: Success State §4, 4.1-4.3_
-  - [ ] 8.5 **Invalid persona 硬失败**:三家各发 `subagent_type:"nonexistent-persona-xyz"` → Kiro 返 `spawn_failed`(kiro-cli 自校验),Claude/Codex 返 `invalid_persona`(broker resolver 失败),UI 显示 error 卡片 + `requested: @nonexistent-persona-xyz`(applied_persona=None · R3 F2 不引 Failed 变体)
+    - **Evidence**: commit pending · verify: `cargo test --features test-utils --test delegation_e2e_windows stage8_wire_unsupported_cli → 1 passed` · files: `stage8_wire_unsupported_cli_silently_downgrades_with_note @ src-tauri/tests/delegation_e2e_windows.rs:555` · AC: 4 — 负向 mutation A(strip IgnoredUnsupportedCli intent)转红 · UI 卡片渲染由 stage 7 `persona-label.tsx` + `sub-agent-overlay.tsx` 单测锁死
+  - [x] 8.5 **Invalid persona 硬失败**(Claude Code 侧 · resolver-Failed 路径 · R3-F3):自动化用 pipe harness · Claude Code + 不存在人格名 → wire code `invalid_persona` + `spawn_args` 为空(broker 短路 · 绝不 silently 降级)
     - _Requirements: Success State §5_
-  - [ ] 8.6 **名称语法拒绝**:`subagent_type:"foo/bar"` 或 65 字符 → broker 预校拒,`invalid_persona`,不触发 spawn(Kiro/Claude/Codex 都测一遍)
+    - **Evidence**: commit pending · verify: `cargo test --features test-utils --test delegation_e2e_windows stage8_wire_invalid_persona → 1 passed` · files: `stage8_wire_invalid_persona_fails_before_spawn @ src-tauri/tests/delegation_e2e_windows.rs:661` · AC: 5 — 负向 mutation D(PersonaEffect::Failed 静默降级)转红 · Kiro 侧 `spawn_failed` 由 kiro-cli 内部自校 · Codex 同 Claude 路径(broker 层复用 resolver)
+  - [x] 8.6 **名称语法拒绝**:自动化用 pipe harness · 三 case `foo/bar` / `a.b` / 65 字符 · 每 case fresh mock · broker 预校拒 → `invalid_persona` + `spawn_args` 为空(R3-F1 顺序:supports_persona → grammar → resolver)
     - _Requirements: 3-name-grammar.2_
-  - [ ] 8.7 **并发人格隔离**:同时发两条 Kiro delegation 不同 subagent_type,argv 各自的 `--agent`,首轮 prompt 各自的 marker,互不污染。同法 Claude/Codex
+    - **Evidence**: commit pending · verify: `cargo test --features test-utils --test delegation_e2e_windows stage8_wire_persona_name_grammar → 1 passed` · files: `stage8_wire_persona_name_grammar_rejected @ src-tauri/tests/delegation_e2e_windows.rs:728` · AC: 6 — 负向 mutation B(注掉 grammar short-circuit)转红 · 三家 CLI 走同一 broker 层 grammar gate,本 test 用 Kiro 断言足够
+  - [ ] 8.7 **并发人格隔离**(真进程) · **unverified: 需 GUI 并发触发**
     - _Requirements: Success State §6, 7.1, 7.2_
     - _Properties: P5_
-  - [ ] 8.8 **R7.1 Kiro process-death**:起 Kiro + `subagent_type:"plan-reality-recon"`,完成一轮后 `taskkill /PID <kiro-cli 进程 pid> /F`;从 codeg `continue_with_session` 触发 `spawn_for_resume`;**观察 & 记录到 design.md `## Update Log`**:(a) 恢复 kiro-cli 是否 reload `plan-reality-recon.json`?(b) 二轮响应是否反映人格行为?(c) 若 drop,codeg `applied_persona`(首次值)是否仍显示 · UI 是否遵守「首次已应用/恢复未知」呈现
+    - **Evidence**: unverified · verify: 见 e2e-manual-2026-08-04.md#用例-7 · files: `broker_persona.rs:234 concurrent_same_agent_distinct_personas_do_not_cross` · AC: 6 — A 层已锁 spawn_args 层不串扰 · argv 翻译由 persona_merge_order end_to_end 锁 · 两条合起来意味 argv 分家 · 真进程仅验 OS 层
+  - [ ] 8.8 **R7.1 Kiro process-death**(观察记录型) · **unverified: 需 GUI + kill 真进程**
     - _Requirements: 7.1_
-  - [ ] 8.9 **R7.2 Claude/Codex process-death**:同 8.8,人格文件含 `SPEC_MARKER_R2_RESUME_{CLAUDE,CODEX}`,kill wrapper 进程,continue_with_session,**观察**:(a) 恢复会话上下文是否仍含 marker(wrapper 是否 replay 首轮)?(b) 二轮响应是否反映人格?若 wrapper 不 replay → 在 design.md 追加 `## Known Limitations` 段说明,并说明 UI 处理策略
+    - **Evidence**: unverified · verify: 见 e2e-manual-2026-08-04.md#用例-r71 + design.md#r71 · files: `spawner.rs:137 spawn_for_resume 签名不接 LaunchOption` · AC: 7.1 — 预期观察三点:(a) argv 只带 `--session`(codeg 侧机制 · high confidence)· (b) kiro-cli 内部 reload 是上游行为 codeg 不承诺 · (c) UI 卡首次值保留(stage 7 model 层)· 已进 design.md ## Known Limitations
+  - [ ] 8.9 **R7.2 Claude/Codex process-death**(观察记录型) · **unverified: 需 GUI + kill wrapper 进程**
     - _Requirements: 7.2_
+    - **Evidence**: unverified · verify: 见 e2e-manual-2026-08-04.md#用例-r72 + design.md#r72 · files: `AppliedPersona::Hint @ persona.rs:113` · AC: 7.2 — 官方 wrapper stateless 大概率丢首轮 marker(codeg 不承诺 replay)· UI 卡首次值保留 · 已进 design.md ## Known Limitations
 
 ### 阶段 9 · 收尾
 
@@ -571,3 +580,12 @@
   - **未纳入本轮的一处后端观察(不阻塞 stage 7,交主 AI 判断)**:`running_report()`(`broker.rs:1760` 附近,`get_delegation_status` 对**运行中**任务的返回)硬编码 `applied_persona: None`,未从 `task.applied_persona_intent` 取。影响面:仅当卡片改从 `get_delegation_status` 轮询取人格时才会显示丢失;当前 UI 走的是 `delegate_to_agent` 的 ack/终态报文,两条路径都带人格,故本轮 UI 不受影响。若 stage 8 e2e 发现运行中轮询丢标签,再回填一行即可
   - **i18n**:新增 `personaBestEffort` / `personaIgnoredUnsupported` / `personaRequested` 三键,10 个 locale 全部补齐(en/zh-CN/zh-TW/ja/ko/es/de/fr/pt/ar)
   - **未纳入提交**:`docs/specs/README.md` 的一行改动(subagent-observatory 行序/status)非本轮产出,保持 unstaged 未提交
+
+
+- 2026-08-04 · executor SUB(stage 8) · e2e wire 层 4 条自动化 + 手工 5 条 observation-only:
+  - **落地**:`src-tauri/tests/delegation_e2e_windows.rs` +439 行(stage-8 段;既有 355 行 zero-回归)· `docs/specs/delegate-persona-passthrough/e2e-manual-2026-08-04.md`(179 行手工剧本 + 观察策略 · 副本亦在 `.agent-workspace/.archive/2026-08-04/` 供 AI 本地引用)· `docs/specs/delegate-persona-passthrough/design.md` Update Log 追加 + **新加 `## Known Limitations` 段**(R7.1 / R7.2 codeg 不承诺项)
+  - **验证**(EXIT=0):`cargo check --features test-utils --tests` · `cargo check --no-default-features --bin codeg-mcp` · **6 个集成 crate 共 59 passed / 0 failed / 0 ignored**(delegation_e2e_windows 6 + broker_persona 5 + broker_persona_hint 3 + listener_subagent_type_wire 5 + persona_merge_order 7 + persona_stage3 12 + persona_lists_injection 21 = 59)
+  - **负向 mutation 逐条实测**:A/B/C/D 四次单点破坏 broker 生产代码,依次让 stage8_wire_unsupported / grammar_rejected / kiro_native / invalid_persona 转红 · 全部还原并复验 6/6 绿 · MUTATION 标签 grep 零命中
+  - **8.1/8.4/8.5/8.6 打 `[x]`**(wire 层自动化);**8.2/8.3/8.7/8.8/8.9 保持 `[ ]`**(手工层 unverified · 剧本已备 + design.md Known Limitations 声明不承诺项);父任务 8 标 `[-]` 表本轮完成一半(A 部分)
+  - **锚点漂移自查**:`git grep -n` 实测 6 个引用锚点 · 修正 4 处 stage8 test 行号(编辑窗口偏移)+ 2 处生产代码行号(off by ±14)· 全部改为 `symbol @ file:line` 记法保容错
+  - **硬约束合规**:未改后端生产代码 · 未改前端 · 未改 requirements.md 契约段 · design.md 仅追加 Update Log + Known Limitations · UDS 侧未加同源 test(dispatch 建议只 Windows)· 未覆盖用户真实人格(探针名 `codeg-e2e-probe` 隔离)

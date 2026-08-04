@@ -568,3 +568,55 @@ For any `DelegationRequest` and any concurrent delegation state, `persona::resol
   - **R3 P2.1「五条→六条」**:已在 requirements.md 修正。
   - **R3 P2.3 `<<PERSONA_LISTS>>` 无生成方**:**驳回**——生成方是 companion tools/list handler 里 append_custom_agents_to_delegate_enum 附近的注入点(Q2 决策明确),评审误读。
   - **R3 P2.4 TOCTOU-safe 完全消除的表述过强 → 采纳**:§5 §2 断言符号安全性质的措辞,在 direct-child 段末补充「本方法只能降低 symlink 换链风险,不能完全消除同主体并发竞态」的免责,与 R1 A2 单主体前提对齐。
+
+
+- 2026-08-04 · executor SUB(stage 8 e2e 收尾)· wire e2e 4 条 + 手工用例 5 条(观察记录):
+  - **A 部分自动化落地**:`src-tauri/tests/delegation_e2e_windows.rs` 追加 stage-8 段(4 条 test · 439 行)· 覆盖 wire → listener 解析 → broker 分派 → spawn args + status/outcome 完整闭环:
+    - `stage8_wire_kiro_native_persona_reaches_spawn_and_status`(Kiro Native · wire 半段)
+    - `stage8_wire_unsupported_cli_silently_downgrades_with_note`(Gemini + `subagent_type` 静默降级 · `[note]` 挂 text)
+    - `stage8_wire_invalid_persona_fails_before_spawn`(Claude Code + 缺席 persona · `invalid_persona` · spawn_args 空 · R3-F3)
+    - `stage8_wire_persona_name_grammar_rejected`(`foo/bar` / `a.b` / 65-char 三 case · 每 case fresh listener + mock · spawn_args 空 · R3-F1)
+  - **既有 e2e 2 条零回归**:`end_to_end_named_pipe_happy_path` + `end_to_end_named_pipe_back_to_back_requests` 仍绿(6/6 total)
+  - **4 次负向 mutation 逐条验红 · 均已还原并复验绿**:
+    - Mutation A(unsupported CLI 分支 `IgnoredUnsupportedCli` intent 改 `None`)→ #4 转红(`applied_persona.kind == "ignored_unsupported_cli"` 变 Null)
+    - Mutation B(注掉 grammar `return report_err` short-circuit)→ #6 转红(wire code 变 `spawn_failed`,证 fall-through)
+    - Mutation C(`spawner.spawn(...launch_option_pending)` → `None`)→ #1 转红(`SpawnCallArgs.launch_option` 变 None)
+    - Mutation D(`PersonaEffect::Failed` 分支静默降级为 `(None,None,None)` 不 return)→ #5 转红(证 R3-F3「必须硬失败,不许 silent-degrade」)
+    - 每次 mutation 只改 1 处、跑相关 test 转红后立刻编辑还原,末次全绿(6 passed / 0 failed)· 证据锚点:变更 tag `MUTATION-{A,B,C,D} stage-8`(还原后 grep 应零命中)
+  - **B 部分手工用例 5 条**:`.agent-workspace/.archive/2026-08-04/delegate-persona-passthrough/e2e-manual-2026-08-04.md`
+    - 全部 unverified · 原因:SUB 环境无桌面 Tauri host / 无 GUI 观察卡片渲染 / 无法安全 kill 用户机器上的真进程
+    - 环境侦察显示 kiro-cli / claude-agent-acp / codex-acp 三家 wrapper 均在 PATH,`~/.kiro/agents`, `~/.claude/agents`, `~/.codex/agents` 均存在且含用户实用人格(**探针名统一 `codeg-e2e-probe` 隔离,不覆盖用户 `plan-reality-recon`**)
+    - 手工报告为每条用例记录了完整可复用剧本(fixture 落盘命令 + delegation 操作步骤 + 观察点 + 清理)
+    - R7.1/R7.2 观察策略基于代码级分析预写入:R7.1(a) 大概率 no(`spawn_for_resume` 签名不带 `LaunchOption` · argv 只带 `--session` 无 `--agent`)· (c) UI 卡首次值应保留(spawn-Ok 定并存入 running_task,不因 resume 清)· R7.2 官方 wrapper stateless,恢复后大概率丢 marker
+  - **A 层补强 B 层证据链**:每条手工用例都对应 A 层单元/集成 test 的 broker 侧证据(broker_persona P5 concurrent · broker_persona_hint claude/codex hint · persona_merge_order argv 翻译)。真进程观察等于把已锁的链再多一步验证到 OS 层,若发生偏离先看 A 层是否被破坏
+  - **验证输出(全部真跑)**:
+    - `cargo check --features test-utils --tests --message-format=short → EXIT=0`
+    - `cargo check --no-default-features --bin codeg-mcp --message-format=short → EXIT=0`
+    - `cargo test --features test-utils --test delegation_e2e_windows → 6 passed; 0 failed; EXIT=0`
+    - `cargo test --features test-utils --test broker_persona → 5 passed`
+    - `cargo test --features test-utils --test broker_persona_hint → 3 passed`
+    - `cargo test --features test-utils --test listener_subagent_type_wire → 5 passed`
+    - `cargo test --features test-utils --test persona_merge_order → 7 passed`
+    - `cargo test --features test-utils --test persona_stage3 → 12 passed`
+    - `cargo test --features test-utils --test persona_lists_injection → 21 passed`
+    - 6 集成 crate 共 **59 passed / 0 failed / 0 ignored**(既有 53 + 新加 4 = 57 相关 + 既有 e2e 2 = 59;无回归)
+  - **硬约束合规**:未改后端生产代码(broker.rs/manager.rs/listener.rs/persona.rs 零生产改动 · mutation 只在验证窗口存在)· 未改前端 · 未改 requirements.md/design.md 契约段(仅 Update Log + Known Limitations 追加)· UDS 侧未加同源 test(dispatch 建议只加 Windows;若 Unix 侧需要可原封移植 harness)· 未覆盖用户真实人格
+  - **Review Findings**:任务书 dispatch draft 关于「若 SUB 环境不便真跑 → unverified」的建议在本机部分不成立(CLI 都可用),但**「需真起 Tauri GUI + 真进程 kill + 人眼观察卡片」这个组合本 SUB 环境无法自动化**,故 B 部分整体 unverified 是唯一诚实结论。手工报告已为用户下轮真跑准备好完整剧本 · 三条预期观察基于代码级分析给出,可作为真跑时的对照 hypothesis
+
+## Known Limitations
+
+以下项属于「codeg 不控制的下游行为」或「本 spec 不承诺范围」,受影响的 UI 语义/文档需据此设计,不作为 spec 失败判据。
+
+### R7.1 · Kiro 子进程死亡后恢复的人格状态(kiro-cli 内部行为)
+
+- **codeg 侧机制**:`ConnectionSpawner::spawn_for_resume` 签名**不接** `LaunchOption`(R7.4),恢复 argv 仅带 `--session <id>`,**不重传** `--agent <name>`。
+- **kiro-cli 侧行为(codeg 不承诺)**:kiro-cli 是否把首次的 `--agent` 状态写进 session state 决定恢复后是否仍表现原人格。**若不写(自然行为)** → 恢复回退默认人格。这是上游实现细节,codeg 无法探测更无法控制。
+- **UI 呈现策略**:codeg 前端 `applied_persona` 是 spawn-Ok 时定并存进 running_task,恢复回合不清空 → **UI 卡片仍显示首次值**(不因 resume 改标签)。用户看到的是"首次已应用 `@X`",不是"恢复后仍在 `@X`"。若需精细区分"首次应用" vs "恢复后未知",需上游 wrapper 提供探测能力,当前不做。
+- **验收状态**:已由 stage-8 手工报告(`e2e-manual-2026-08-04.md`)记录观察剧本 · 待用户 GUI 环境真跑复核 · 若观察到与本节预期不一致,追加一行说明,不改架构。
+
+### R7.2 · Claude Code / Codex wrapper 冷恢复行为(wrapper 内部行为)
+
+- **codeg 侧机制**:Claude Code / Codex 走 Hint 路径,codeg 在**首轮 send** 时把 preamble 前置到 prompt · wrapper 侧 session state 由 wrapper 全权掌管。
+- **wrapper 侧行为(codeg 不承诺)**:`@agentclientprotocol/claude-agent-acp` / `codex-acp` 是 stateless wrapper,不持久化会话历史 · 恢复后**大概率丢首轮 marker / preamble**(wrapper 不 replay 首轮)。
+- **UI 呈现策略**:同 R7.1 · `applied_persona.kind == "hint"` 是 send-Ok 时定的首次值,恢复回合不清空 · UI 卡片仍标 `best-effort · @X`。**若真跑观察到 wrapper 不 replay 首轮** → 属预期内的 wrapper 限制,不修改 codeg 侧。
+- **长期升级路径**:待上游 wrapper 提供 `CLAUDE_ACP_AGENT` / `CODEX_AGENT` env 变量原生承载人格,则本 spec Hint tier 升级为 Native tier(见 `LaunchOption` 变体注释)。这是 tasks.md 9.6 记录的 tech-debt 追加任务,不阻塞本 spec 交付。
