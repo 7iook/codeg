@@ -1885,6 +1885,18 @@ impl CodexParser {
         let mut context_window_max_tokens: Option<u64> = None;
         let mut latest_total_usage: Option<TurnUsage> = None;
         let mut latest_total_tokens: Option<u64> = None;
+        // Cumulative `total_token_usage` as of the previous `token_count`, so
+        // each event can be reduced to what its own round-trip added.
+        let mut previous_total_usage: Option<TurnUsage> = None;
+        // Previous `last_token_usage`, used only by the no-total fallback to
+        // recognize a restated event.
+        let mut previous_last_usage: Option<TurnUsage> = None;
+        // Round-trip spend recorded before any assistant message existed to
+        // carry it; flushed onto the first one that appears.
+        let mut pending_round_usage: Option<TurnUsage> = None;
+        // Everything every round-trip reported, kept independently of which
+        // message ended up carrying it — see `reconcile_turn_usage`.
+        let mut recorded_round_usage = TurnUsage::default();
 
         let mut first_timestamp: Option<DateTime<Utc>> = None;
         let mut last_timestamp: Option<DateTime<Utc>> = None;
@@ -2339,20 +2351,92 @@ impl CodexParser {
                                     }
 
                                     if !info.is_null() {
-                                        if let Some(usage) = info
-                                            .get("last_token_usage")
-                                            .and_then(extract_turn_usage_from_codex_usage)
-                                        {
-                                            // Attach to the last assistant message
-                                            if let Some(last_msg) = messages
+                                        // What this round-trip spent. Preferred
+                                        // as the rise in the session's own
+                                        // cumulative counter; `last_token_usage`
+                                        // is the fallback for transcripts that
+                                        // report no total, and there a repeat of
+                                        // the previous event is dropped since it
+                                        // restates one call rather than adding
+                                        // another.
+                                        let round = match info.get("total_token_usage") {
+                                            Some(total_payload) => {
+                                                let total = codex_usage_counters(total_payload);
+                                                let round = codex_round_usage(
+                                                    previous_total_usage.as_ref(),
+                                                    &total,
+                                                );
+                                                previous_total_usage = Some(total);
+                                                round
+                                            }
+                                            None => match info.get("last_token_usage") {
+                                                Some(last_payload) => {
+                                                    let last = codex_usage_counters(last_payload);
+                                                    let repeated = previous_last_usage
+                                                        .as_ref()
+                                                        .is_some_and(|prev| prev == &last);
+                                                    previous_last_usage = Some(last.clone());
+                                                    if repeated {
+                                                        TurnUsage::default()
+                                                    } else {
+                                                        // Carry this round into the
+                                                        // cumulative baseline too.
+                                                        // A transcript that mixes
+                                                        // both shapes would
+                                                        // otherwise count it twice:
+                                                        // once here, and again
+                                                        // inside the next
+                                                        // total-bearing event's
+                                                        // delta, which is measured
+                                                        // from a baseline that
+                                                        // never learned about it.
+                                                        let base = previous_total_usage
+                                                            .clone()
+                                                            .unwrap_or_default();
+                                                        previous_total_usage =
+                                                            Some(codex_usage_add(&base, &last));
+                                                        last
+                                                    }
+                                                }
+                                                None => TurnUsage::default(),
+                                            },
+                                        };
+
+                                        if !codex_usage_is_zero(&round) {
+                                            recorded_round_usage =
+                                                codex_usage_add(&recorded_round_usage, &round);
+                                            // Every round of a turn belongs to
+                                            // the assistant message it worked
+                                            // for, so they accumulate onto it
+                                            // rather than the first one winning
+                                            // and the rest being dropped. A
+                                            // round that ran before any
+                                            // assistant message (the model went
+                                            // straight to a tool call) waits
+                                            // here for one to arrive — 3 % of
+                                            // all recorded spend, previously
+                                            // discarded outright.
+                                            pending_round_usage = Some(match pending_round_usage {
+                                                Some(ref pending) => {
+                                                    codex_usage_add(pending, &round)
+                                                }
+                                                None => round,
+                                            });
+                                        }
+                                        if let (Some(pending), Some(last_msg)) = (
+                                            pending_round_usage.clone(),
+                                            messages
                                                 .iter_mut()
                                                 .rev()
-                                                .find(|m| matches!(m.role, MessageRole::Assistant))
-                                            {
-                                                if last_msg.usage.is_none() {
-                                                    last_msg.usage = Some(usage);
+                                                .find(|m| matches!(m.role, MessageRole::Assistant)),
+                                        ) {
+                                            last_msg.usage = Some(match last_msg.usage {
+                                                Some(ref existing) => {
+                                                    codex_usage_add(existing, &pending)
                                                 }
-                                            }
+                                                None => pending,
+                                            });
+                                            pending_round_usage = None;
                                         }
                                     }
                                 }
@@ -3163,6 +3247,7 @@ impl CodexParser {
 
         fold_shell_session_polls(&mut messages, &poll_origins);
         let mut turns = group_into_turns(messages);
+        reconcile_turn_usage(&mut turns, &recorded_round_usage);
         super::relocate_orphaned_tool_results(&mut turns);
         super::structurize_read_tool_output(&mut turns);
         super::resolve_patch_line_numbers(&mut turns, cwd.as_deref());
@@ -3268,6 +3353,142 @@ fn extract_turn_usage_from_codex_usage(usage: &serde_json::Value) -> Option<Turn
         cache_creation_input_tokens: 0,
         cache_read_input_tokens,
     })
+}
+
+/// A codex usage payload read as raw counters, keeping zeros.
+///
+/// [`extract_turn_usage_from_codex_usage`] answers "is there anything to show",
+/// so it collapses an all-zero payload to `None`. The running-total arithmetic
+/// below needs the opposite: a cumulative counter that legitimately still reads
+/// zero is a real datapoint, not an absent one.
+fn codex_usage_counters(usage: &serde_json::Value) -> TurnUsage {
+    let field = |name: &str| usage.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_read = field("cached_input_tokens");
+    TurnUsage {
+        // Codex reports `input_tokens` *inclusive* of the cached prefix, so the
+        // cached part is split out rather than counted twice.
+        input_tokens: field("input_tokens").saturating_sub(cache_read),
+        output_tokens: field("output_tokens"),
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: cache_read,
+    }
+}
+
+fn codex_usage_is_zero(usage: &TurnUsage) -> bool {
+    usage.input_tokens == 0
+        && usage.output_tokens == 0
+        && usage.cache_creation_input_tokens == 0
+        && usage.cache_read_input_tokens == 0
+}
+
+fn codex_usage_add(base: &TurnUsage, extra: &TurnUsage) -> TurnUsage {
+    TurnUsage {
+        input_tokens: base.input_tokens.saturating_add(extra.input_tokens),
+        output_tokens: base.output_tokens.saturating_add(extra.output_tokens),
+        cache_creation_input_tokens: base
+            .cache_creation_input_tokens
+            .saturating_add(extra.cache_creation_input_tokens),
+        cache_read_input_tokens: base
+            .cache_read_input_tokens
+            .saturating_add(extra.cache_read_input_tokens),
+    }
+}
+
+/// What one model round-trip added, as the rise in the session's cumulative
+/// counter.
+///
+/// Codex emits a `token_count` event after **every** model call — including the
+/// tool-calling rounds inside a turn — and each one restates
+/// `total_token_usage` for the whole session. Differencing that counter is what
+/// makes the accounting exact: it cannot double-count a `token_count` that is
+/// emitted twice for the same call (7 380 of 31 846 events in a real session
+/// tree are such repeats), and it cannot lose a round whose event went
+/// unrecorded, because the next event's total absorbs it.
+///
+/// A total that moves *backwards* means the counter restarted (a fresh context
+/// after compaction), so the new value is the round's own spend.
+fn codex_round_usage(previous_total: Option<&TurnUsage>, total: &TurnUsage) -> TurnUsage {
+    let grand = |u: &TurnUsage| {
+        u.input_tokens
+            .saturating_add(u.output_tokens)
+            .saturating_add(u.cache_creation_input_tokens)
+            .saturating_add(u.cache_read_input_tokens)
+    };
+    // No baseline, or the counter restarted below it: the whole figure is this
+    // round's own spend. Differencing per field instead would clamp every field
+    // to zero and silently drop the rest of the session.
+    let Some(previous) = previous_total.filter(|prev| grand(prev) <= grand(total)) else {
+        return total.clone();
+    };
+    TurnUsage {
+        input_tokens: total.input_tokens.saturating_sub(previous.input_tokens),
+        output_tokens: total.output_tokens.saturating_sub(previous.output_tokens),
+        cache_creation_input_tokens: total
+            .cache_creation_input_tokens
+            .saturating_sub(previous.cache_creation_input_tokens),
+        cache_read_input_tokens: total
+            .cache_read_input_tokens
+            .saturating_sub(previous.cache_read_input_tokens),
+    }
+}
+
+/// Make the turns account for every token the transcript reported.
+///
+/// Round-trip usage is attached to the assistant message that was current when
+/// the `token_count` arrived, which is right whenever that message survives —
+/// but presentation is allowed to drop or fold messages (a tool call absorbed
+/// into a capsule, a duplicate agent message collapsed away), and a message
+/// that disappears takes its usage with it. Across a real session tree that
+/// silently lost 7 % of Codex spend, concentrated in exactly the sessions that
+/// worked hardest.
+///
+/// So the recorded rounds are also summed independently, and any shortfall is
+/// put back on the last turn that can hold it. The invariant this establishes
+/// is worth stating plainly: **the per-turn usage of a Codex session always
+/// sums to what its own counter reported**, whatever the renderer did to the
+/// turns in between.
+///
+/// A surplus is left alone. It would mean the turns claim more than the
+/// transcript ever reported, which no path here can produce, and inventing a
+/// correction for an impossible state would only hide the bug that caused it.
+fn reconcile_turn_usage(turns: &mut [MessageTurn], recorded: &TurnUsage) {
+    if codex_usage_is_zero(recorded) {
+        return;
+    }
+    let attributed = turns
+        .iter()
+        .filter_map(|t| t.usage.as_ref())
+        .fold(TurnUsage::default(), |acc, u| codex_usage_add(&acc, u));
+
+    let missing = TurnUsage {
+        input_tokens: recorded.input_tokens.saturating_sub(attributed.input_tokens),
+        output_tokens: recorded
+            .output_tokens
+            .saturating_sub(attributed.output_tokens),
+        cache_creation_input_tokens: recorded
+            .cache_creation_input_tokens
+            .saturating_sub(attributed.cache_creation_input_tokens),
+        cache_read_input_tokens: recorded
+            .cache_read_input_tokens
+            .saturating_sub(attributed.cache_read_input_tokens),
+    };
+    if codex_usage_is_zero(&missing) {
+        return;
+    }
+
+    // Prefer a turn that already reports usage — it is one the transcript
+    // itself tied to a model call, so the recovered tokens land beside spend
+    // that really happened rather than on an unrelated bubble.
+    let target = turns
+        .iter()
+        .rposition(|t| t.usage.is_some())
+        .or_else(|| turns.iter().rposition(|t| matches!(t.role, TurnRole::Assistant)));
+    if let Some(turn) = target.and_then(|i| turns.get_mut(i)) {
+        turn.usage = Some(match turn.usage {
+            Some(ref existing) => codex_usage_add(existing, &missing),
+            None => missing,
+        });
+    }
 }
 
 fn extract_context_window_used_tokens_from_token_count_info(
@@ -3703,6 +3924,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
 
 #[cfg(test)]
 mod tests {
+
     use std::collections::HashMap;
 
     use super::extract_codex_title_candidate;
@@ -4001,6 +4223,169 @@ mod tests {
         assert!((pct - ((170.0 / 258400.0) * 100.0)).abs() < 0.0001);
 
         let _ = fs::remove_file(path);
+    }
+
+    /// Sum the per-turn usage a parse produced — what the usage dashboard
+    /// materializes and what the session panel adds up.
+    fn turn_usage_total(detail: &crate::models::ConversationDetail) -> u64 {
+        detail
+            .turns
+            .iter()
+            .filter_map(|t| t.usage.as_ref())
+            .map(|u| {
+                u.input_tokens + u.output_tokens + u.cache_creation_input_tokens
+                    + u.cache_read_input_tokens
+            })
+            .sum()
+    }
+
+    fn parse_rollout(label: &str, content: &str, session_id: &str) -> crate::models::ConversationDetail {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-{label}-{nanos}.jsonl"));
+        fs::write(&path, content).expect("write test jsonl");
+        let detail = CodexParser::new()
+            .parse_conversation_detail(&path, session_id)
+            .expect("parse detail ok");
+        let _ = fs::remove_file(path);
+        detail
+    }
+
+    #[test]
+    fn every_model_round_trip_of_a_turn_is_counted() {
+        // Codex emits a `token_count` after each model call, so one turn that
+        // calls tools four times reports four times. Only the first was kept
+        // (`if last_msg.usage.is_none()`), which lost most of a working turn's
+        // spend — measured at 61 % of all Codex tokens in a real session tree.
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"rounds-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"working\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":20224,\"cached_input_tokens\":0,\"output_tokens\":458},\"last_token_usage\":{\"input_tokens\":20224,\"cached_input_tokens\":0,\"output_tokens\":458}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:13Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":51186,\"cached_input_tokens\":18000,\"output_tokens\":886},\"last_token_usage\":{\"input_tokens\":30962,\"cached_input_tokens\":18000,\"output_tokens\":428}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:29Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":92652,\"cached_input_tokens\":45000,\"output_tokens\":1420},\"last_token_usage\":{\"input_tokens\":41466,\"cached_input_tokens\":27000,\"output_tokens\":534}}}}\n"
+        );
+        let detail = parse_rollout("rounds", content, "rounds-1");
+
+        // The session's own cumulative counter is the ground truth, and the
+        // per-turn rows now reconstruct it exactly.
+        assert_eq!(turn_usage_total(&detail), 92_652 + 1_420);
+        let stats = detail.session_stats.expect("session stats");
+        let total = stats.total_usage.expect("total usage");
+        assert_eq!(
+            total.input_tokens + total.output_tokens + total.cache_read_input_tokens,
+            92_652 + 1_420
+        );
+    }
+
+    #[test]
+    fn a_restated_token_count_is_not_counted_twice() {
+        // Codex sometimes reports the same call twice (7 380 of 31 846 events
+        // in a real tree). Differencing the cumulative counter makes the repeat
+        // contribute nothing, where summing `last_token_usage` would inflate it.
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"repeat-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"hi\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":0,\"output_tokens\":50},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":0,\"output_tokens\":50}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":0,\"output_tokens\":50},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":0,\"output_tokens\":50}}}}\n"
+        );
+        let detail = parse_rollout("repeat", content, "repeat-1");
+        assert_eq!(turn_usage_total(&detail), 1_050);
+    }
+
+    #[test]
+    fn a_round_that_ran_before_any_assistant_message_is_not_lost() {
+        // When the model opens a turn by calling a tool, its first round-trips
+        // finish before it ever speaks. Those had no assistant message to
+        // attach to and were dropped outright — 3 % of all recorded spend.
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"early-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"go\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":800,\"cached_input_tokens\":0,\"output_tokens\":40},\"last_token_usage\":{\"input_tokens\":800,\"cached_input_tokens\":0,\"output_tokens\":40}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"done\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1900,\"cached_input_tokens\":0,\"output_tokens\":110},\"last_token_usage\":{\"input_tokens\":1100,\"cached_input_tokens\":0,\"output_tokens\":70}}}}\n"
+        );
+        let detail = parse_rollout("early", content, "early-1");
+        assert_eq!(turn_usage_total(&detail), 1_900 + 110);
+    }
+
+    #[test]
+    fn a_transcript_without_cumulative_totals_still_counts_each_call_once() {
+        // Fallback path: no `total_token_usage` to difference, so a `token_count`
+        // that merely restates the previous one is recognized by its payload.
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"nototal-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"hi\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":500,\"cached_input_tokens\":100,\"output_tokens\":25}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":500,\"cached_input_tokens\":100,\"output_tokens\":25}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":700,\"cached_input_tokens\":200,\"output_tokens\":30}}}}\n"
+        );
+        let detail = parse_rollout("nototal", content, "nototal-1");
+        assert_eq!(turn_usage_total(&detail), 525 + 730);
+    }
+
+    #[test]
+    fn a_transcript_that_mixes_both_shapes_counts_each_round_exactly_once() {
+        // A no-total event contributes its own `last_token_usage`, so the
+        // cumulative baseline has to learn about it. Otherwise the next
+        // total-bearing event differences against a stale figure and bills that
+        // round a second time.
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"mixed-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"hi\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":0,\"output_tokens\":0},\"last_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":0,\"output_tokens\":0}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":50,\"cached_input_tokens\":0,\"output_tokens\":0}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":180,\"cached_input_tokens\":0,\"output_tokens\":0},\"last_token_usage\":{\"input_tokens\":30,\"cached_input_tokens\":0,\"output_tokens\":0}}}}\n"
+        );
+        let detail = parse_rollout("mixed", content, "mixed-1");
+        // 100 + 50 + (180 - 150) — the session's own counter says 180 total.
+        assert_eq!(turn_usage_total(&detail), 180);
+    }
+
+    #[test]
+    fn a_rollout_with_no_assistant_message_still_reports_its_spend() {
+        // A turn that only ran tools and was interrupted leaves `token_count`
+        // events with no assistant turn to carry them, so `reconcile_turn_usage`
+        // has no target. The tokens are not lost: the session-level total is
+        // populated, and that is the fallback `facts_from_detail` records as a
+        // single fact row (covered by `a_session_level_total_is_recorded_when_
+        // no_turn_reports_usage` in commands::token_usage).
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"toolonly-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"go\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":900,\"cached_input_tokens\":100,\"output_tokens\":40},\"last_token_usage\":{\"input_tokens\":900,\"cached_input_tokens\":100,\"output_tokens\":40}}}}\n"
+        );
+        let detail = parse_rollout("toolonly", content, "toolonly-1");
+        assert!(
+            !detail.turns.iter().any(|t| matches!(t.role, TurnRole::Assistant)),
+            "precondition: this rollout has no assistant turn"
+        );
+        let total = detail
+            .session_stats
+            .as_ref()
+            .and_then(|s| s.total_usage.as_ref())
+            .expect("session-level total must survive as the fallback fact source");
+        assert_eq!(
+            total.input_tokens + total.output_tokens + total.cache_read_input_tokens,
+            940
+        );
+    }
+
+    #[test]
+    fn a_counter_that_restarts_after_compaction_does_not_wrap_to_zero() {
+        // A cumulative counter that moves backwards means a fresh context, so
+        // the new value is that round's own spend rather than a negative delta
+        // silently clamped away.
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"compact-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"hi\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":90000,\"cached_input_tokens\":0,\"output_tokens\":2000}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":5000,\"cached_input_tokens\":0,\"output_tokens\":100}}}}\n"
+        );
+        let detail = parse_rollout("compact", content, "compact-1");
+        assert_eq!(turn_usage_total(&detail), 92_000 + 5_100);
     }
 
     #[test]
