@@ -773,6 +773,16 @@ export function TokenUsagePage() {
     report.totals.total_tokens === 0 &&
     (status?.fact_rows ?? 0) === 0
 
+  // Nothing has been indexed yet, so the page is one call to action: every
+  // toolbar control slices data that doesn't exist, and the actions folded into
+  // the ⋯ menu are all the empty state's own button (an incremental sync over
+  // an empty fact table IS the full build). Hidden during the very first load
+  // too — we don't know yet which of the two layouts applies, and putting a row
+  // of controls on screen only to retract it a moment later reads worse than
+  // letting it arrive together with the content. An error leaves `report` null
+  // with `loading` false, so the toolbar (the only way to retry) comes back.
+  const showToolbar = !isEmpty && !(loading && report == null)
+
   const fresh = totals ? freshTokens(totals) : 0
   const idle = report ? idleDays(report) : null
   const peak = report ? peakPoint(report.series) : null
@@ -789,186 +799,189 @@ export function TokenUsagePage() {
             breathing room on every side (the title band above carries its own
             border). Three zones on one wrapping row: the range (hot presets
             as segments, the long tail folded into one pill), the dimension
-            filters, and a single overflow menu carrying every data action. */}
-      <div className="shrink-0 p-4">
-        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-x-2.5 gap-y-2">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <SegmentedFilter
-              ariaLabel={t("rangeLabel")}
-              value={preset}
-              onChange={changePreset}
-              options={HOT_RANGE_PRESETS.map((p) => ({
-                value: p,
-                label: t(RANGE_LABEL_KEYS[p]),
-              }))}
-            />
-            <SingleSelectFilter
-              placeholder={t("moreRanges")}
-              ariaLabel={t("rangeLabel")}
-              options={MORE_RANGE_PRESETS.map((p) => ({
-                value: p,
-                label: t(RANGE_LABEL_KEYS[p]),
-              }))}
-              value={
-                (MORE_RANGE_PRESETS as readonly string[]).includes(preset)
-                  ? preset
-                  : null
-              }
-              onChange={(v) => changePreset(v as TokenUsageRangePreset)}
-            />
-            {preset === "custom" && (
-              <CustomRangeFields
-                from={custom.from}
-                to={custom.to}
-                onChange={setCustom}
+            filters, and a single overflow menu carrying every data action.
+            Absent entirely on the first-run empty state — see `showToolbar`. */}
+      {showToolbar && (
+        <div className="shrink-0 p-4">
+          <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-x-2.5 gap-y-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <SegmentedFilter
+                ariaLabel={t("rangeLabel")}
+                value={preset}
+                onChange={changePreset}
+                options={HOT_RANGE_PRESETS.map((p) => ({
+                  value: p,
+                  label: t(RANGE_LABEL_KEYS[p]),
+                }))}
               />
-            )}
-          </div>
+              <SingleSelectFilter
+                placeholder={t("moreRanges")}
+                ariaLabel={t("rangeLabel")}
+                options={MORE_RANGE_PRESETS.map((p) => ({
+                  value: p,
+                  label: t(RANGE_LABEL_KEYS[p]),
+                }))}
+                value={
+                  (MORE_RANGE_PRESETS as readonly string[]).includes(preset)
+                    ? preset
+                    : null
+                }
+                onChange={(v) => changePreset(v as TokenUsageRangePreset)}
+              />
+              {preset === "custom" && (
+                <CustomRangeFields
+                  from={custom.from}
+                  to={custom.to}
+                  onChange={setCustom}
+                />
+              )}
+            </div>
 
-          <div className="h-5 w-px bg-border" aria-hidden="true" />
+            <div className="h-5 w-px bg-border" aria-hidden="true" />
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            <MultiSelectFilter
-              icon={Folder}
-              label={t("folderFilter")}
-              allLabel={t("allFolders")}
-              options={folderOptions}
-              selected={folderIds}
-              onChange={setFolderIds}
-              searchPlaceholder={t("searchPlaceholder")}
-              emptyLabel={t("noMatches")}
-            />
-            <MultiSelectFilter
-              icon={Bot}
-              label={t("agentFilter")}
-              allLabel={t("allAgents")}
-              options={agentOptions}
-              selected={agentTypes}
-              onChange={setAgentTypes}
-              searchPlaceholder={t("searchPlaceholder")}
-              emptyLabel={t("noMatches")}
-            />
-            <MultiSelectFilter
-              icon={Cpu}
-              label={t("modelFilter")}
-              allLabel={t("allModels")}
-              options={modelOptions}
-              selected={models}
-              onChange={setModels}
-              searchPlaceholder={t("searchPlaceholder")}
-              emptyLabel={t("noMatches")}
-            />
-            {hasFilters && (
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="h-8 gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground"
-                onClick={resetFilters}
-              >
-                <RotateCcw className="size-3.5" />
-                {t("resetFilters")}
-              </Button>
-            )}
-          </div>
-
-          <div className="ms-auto flex items-center gap-1.5">
-            {status && status.stale_conversations > 0 && !syncing && (
-              <span className="text-xs text-muted-foreground">
-                {t("staleHint", { count: status.stale_conversations })}
-              </span>
-            )}
-            {/* Every data action lives in one overflow menu; while a sync
-                  runs the trigger itself spins, so the state stays visible
-                  with the buttons folded away. Styled as a filled pill like
-                  the filter triggers — a ghost icon here reads as free space,
-                  so its right edge never looked aligned with the cards below
-                  (and nudging the button out would misalign the hover pill
-                  instead). A resting fill gives the eye a real edge to line
-                  up, and hovering only deepens the tone. */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <MultiSelectFilter
+                icon={Folder}
+                label={t("folderFilter")}
+                allLabel={t("allFolders")}
+                options={folderOptions}
+                selected={folderIds}
+                onChange={setFolderIds}
+                searchPlaceholder={t("searchPlaceholder")}
+                emptyLabel={t("noMatches")}
+              />
+              <MultiSelectFilter
+                icon={Bot}
+                label={t("agentFilter")}
+                allLabel={t("allAgents")}
+                options={agentOptions}
+                selected={agentTypes}
+                onChange={setAgentTypes}
+                searchPlaceholder={t("searchPlaceholder")}
+                emptyLabel={t("noMatches")}
+              />
+              <MultiSelectFilter
+                icon={Cpu}
+                label={t("modelFilter")}
+                allLabel={t("allModels")}
+                options={modelOptions}
+                selected={models}
+                onChange={setModels}
+                searchPlaceholder={t("searchPlaceholder")}
+                emptyLabel={t("noMatches")}
+              />
+              {hasFilters && (
                 <Button
                   type="button"
-                  size="icon"
+                  size="sm"
                   variant="ghost"
-                  className="size-8 rounded-full bg-muted/70 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  aria-label={t("moreActions")}
+                  className="h-8 gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground"
+                  onClick={resetFilters}
                 >
-                  {syncing ? (
-                    <RefreshCw className="size-4 animate-spin" />
-                  ) : (
-                    <MoreHorizontal className="size-4" />
-                  )}
+                  <RotateCcw className="size-3.5" />
+                  {t("resetFilters")}
                 </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-72 rounded-xl">
-                <DropdownMenuItem
-                  disabled={syncing}
-                  onSelect={() => void runSync("incremental")}
-                  className="gap-2.5 rounded-lg"
-                >
-                  {/* Two-line items pin the icon to the title line
-                      (self-start + half-step nudge to its optical centre) —
-                      centring against the whole block leaves each icon
-                      floating at a different height per item. */}
-                  <RefreshCw
-                    className={cn(
-                      "mt-0.5 size-4 shrink-0 self-start text-muted-foreground",
-                      syncing && "animate-spin"
+              )}
+            </div>
+
+            <div className="ms-auto flex items-center gap-1.5">
+              {status && status.stale_conversations > 0 && !syncing && (
+                <span className="text-xs text-muted-foreground">
+                  {t("staleHint", { count: status.stale_conversations })}
+                </span>
+              )}
+              {/* Every data action lives in one overflow menu; while a sync
+                    runs the trigger itself spins, so the state stays visible
+                    with the buttons folded away. Styled as a filled pill like
+                    the filter triggers — a ghost icon here reads as free space,
+                    so its right edge never looked aligned with the cards below
+                    (and nudging the button out would misalign the hover pill
+                    instead). A resting fill gives the eye a real edge to line
+                    up, and hovering only deepens the tone. */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-8 rounded-full bg-muted/70 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    aria-label={t("moreActions")}
+                  >
+                    {syncing ? (
+                      <RefreshCw className="size-4 animate-spin" />
+                    ) : (
+                      <MoreHorizontal className="size-4" />
                     )}
-                  />
-                  <span className="flex min-w-0 flex-col gap-0.5">
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-72 rounded-xl">
+                  <DropdownMenuItem
+                    disabled={syncing}
+                    onSelect={() => void runSync("incremental")}
+                    className="gap-2.5 rounded-lg"
+                  >
+                    {/* Two-line items pin the icon to the title line
+                        (self-start + half-step nudge to its optical centre) —
+                        centring against the whole block leaves each icon
+                        floating at a different height per item. */}
+                    <RefreshCw
+                      className={cn(
+                        "mt-0.5 size-4 shrink-0 self-start text-muted-foreground",
+                        syncing && "animate-spin"
+                      )}
+                    />
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      <span className="text-[0.8125rem] font-medium">
+                        {syncing ? t("syncing") : t("refresh")}
+                      </span>
+                      <span className="truncate text-xs text-muted-foreground">
+                        {status?.last_synced_at
+                          ? t("lastSynced", {
+                              time: new Date(
+                                status.last_synced_at
+                              ).toLocaleString(locale),
+                            })
+                          : t("lastSyncedNever")}
+                      </span>
+                    </span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={syncing}
+                    onSelect={() => void runSync("full")}
+                    className="gap-2.5 rounded-lg"
+                  >
+                    <DatabaseBackup className="mt-0.5 size-4 shrink-0 self-start text-muted-foreground" />
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      <span className="text-[0.8125rem] font-medium">
+                        {t("rebuild")}
+                      </span>
+                      <span className="text-xs leading-relaxed text-muted-foreground">
+                        {t("rebuildHint")}
+                      </span>
+                    </span>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={!report || report.totals.total_tokens === 0}
+                    onSelect={() => {
+                      if (pageRef.current) {
+                        setShareTheme(resolveShareCardTheme(pageRef.current))
+                      }
+                      setShareOpen(true)
+                    }}
+                    className="gap-2.5 rounded-lg"
+                  >
+                    <Share2 className="size-4 shrink-0 text-muted-foreground" />
                     <span className="text-[0.8125rem] font-medium">
-                      {syncing ? t("syncing") : t("refresh")}
+                      {t("share")}
                     </span>
-                    <span className="truncate text-xs text-muted-foreground">
-                      {status?.last_synced_at
-                        ? t("lastSynced", {
-                            time: new Date(
-                              status.last_synced_at
-                            ).toLocaleString(locale),
-                          })
-                        : t("lastSyncedNever")}
-                    </span>
-                  </span>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={syncing}
-                  onSelect={() => void runSync("full")}
-                  className="gap-2.5 rounded-lg"
-                >
-                  <DatabaseBackup className="mt-0.5 size-4 shrink-0 self-start text-muted-foreground" />
-                  <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="text-[0.8125rem] font-medium">
-                      {t("rebuild")}
-                    </span>
-                    <span className="text-xs leading-relaxed text-muted-foreground">
-                      {t("rebuildHint")}
-                    </span>
-                  </span>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  disabled={!report || report.totals.total_tokens === 0}
-                  onSelect={() => {
-                    if (pageRef.current) {
-                      setShareTheme(resolveShareCardTheme(pageRef.current))
-                    }
-                    setShareOpen(true)
-                  }}
-                  className="gap-2.5 rounded-lg"
-                >
-                  <Share2 className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="text-[0.8125rem] font-medium">
-                    {t("share")}
-                  </span>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {progress && progress.total > 0 && (
         <div className="shrink-0 space-y-1 border-b border-border px-4 py-2">
@@ -987,401 +1000,423 @@ export function TokenUsagePage() {
         </div>
       )}
 
-      {/* Scrolled cards slide under a soft fade below the toolbar — the same
-          clip-fade treatment as collapsed chat messages, faded in only once
-          there is actually something underneath it. */}
-      <div className="relative min-h-0 flex-1">
-        <div
-          aria-hidden="true"
-          className={cn(
-            "pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-background to-transparent transition-opacity duration-200",
-            scrolled ? "opacity-100" : "opacity-0"
+      {isEmpty ? (
+        /* First run. With the toolbar withheld there is nothing above it and
+           nothing to scroll, so the call to action takes the whole canvas —
+           same shape as the Tasks board's empty state — instead of hanging in
+           a dashed box pinned under the title bar. */
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+          {error && (
+            <p className="max-w-md rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              {t("loadFailed")}: {error}
+            </p>
           )}
-        />
-        <ScrollArea className="h-full" onScroll={handleContentScroll}>
-          {/* Same geometry as the toolbar — outer gutter, then the capped
-              column — so the two columns stay flush at every viewport width.
-              Padding inside the max-width element would instead shave 32px
-              off the cards once the viewport clears the cap. */}
-          <div className="px-4 pb-4">
-            <div className="mx-auto w-full max-w-6xl space-y-4">
-              {error && (
-                <p className="rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-                  {t("loadFailed")}: {error}
-                </p>
-              )}
-
-              {report?.truncated && (
-                <p className="rounded-xl border border-border bg-muted/40 px-4 py-2.5 text-xs text-muted-foreground">
-                  {t("truncatedNotice")}
-                </p>
-              )}
-
-              {loading && !report ? (
-                <LoadingSkeleton />
-              ) : isEmpty ? (
-                <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border px-6 py-20 text-center">
-                  <ChartNoAxesColumn
-                    className="size-8 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                  <h2 className="text-base font-semibold">{t("emptyTitle")}</h2>
-                  <p className="max-w-md text-sm text-muted-foreground">
-                    {t("emptyHint")}
+          <ChartNoAxesColumn
+            className="size-10 text-muted-foreground/40"
+            aria-hidden="true"
+          />
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-medium">{t("emptyTitle")}</p>
+            <p className="max-w-sm text-xs text-muted-foreground">
+              {t("emptyHint")}
+            </p>
+          </div>
+          {/* Full, not incremental. On a genuine first run the two do the same
+              work (nothing is stamped yet, so everything is stale), but they
+              part ways in the state where an empty fact table sits behind
+              up-to-date stamps — a first pass that pinned every conversation at
+              zero, a restore, a wipe. There an incremental pass skips
+              everything and this button becomes a no-op, and with the toolbar
+              withheld the ⋯ menu's rebuild entry isn't there to escape with. */}
+          <Button
+            type="button"
+            size="sm"
+            className="gap-1.5"
+            disabled={syncing}
+            onClick={() => void runSync("full")}
+          >
+            <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
+            {t("emptyAction")}
+          </Button>
+        </div>
+      ) : (
+        /* Scrolled cards slide under a soft fade below the toolbar — the same
+           clip-fade treatment as collapsed chat messages, faded in only once
+           there is actually something underneath it. */
+        <div className="relative min-h-0 flex-1">
+          <div
+            aria-hidden="true"
+            className={cn(
+              "pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-background to-transparent transition-opacity duration-200",
+              scrolled ? "opacity-100" : "opacity-0"
+            )}
+          />
+          <ScrollArea className="h-full" onScroll={handleContentScroll}>
+            {/* Same geometry as the toolbar — outer gutter, then the capped
+                column — so the two columns stay flush at every viewport width.
+                Padding inside the max-width element would instead shave 32px
+                off the cards once the viewport clears the cap. */}
+            <div className="px-4 pb-4">
+              <div className="mx-auto w-full max-w-6xl space-y-4">
+                {error && (
+                  <p className="rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                    {t("loadFailed")}: {error}
                   </p>
-                  <Button
-                    type="button"
-                    className="mt-1 gap-1.5"
-                    disabled={syncing}
-                    onClick={() => void runSync("incremental")}
-                  >
-                    <RefreshCw
-                      className={cn("size-4", syncing && "animate-spin")}
-                    />
-                    {t("emptyAction")}
-                  </Button>
-                </div>
-              ) : (
-                totals &&
-                report && (
-                  <>
-                    {/* ─── Hero: the one number, and what the cache did ─── */}
-                    <section className="overflow-hidden rounded-xl border border-border bg-card">
-                      {/* Even halves — but only while the cache panel exists,
-                        so a cache-less report doesn't strand the hero figure
-                        in half the card. */}
-                      <div
-                        className={cn(
-                          "grid",
-                          cache !== null && "lg:grid-cols-2"
-                        )}
-                      >
-                        <div className="flex flex-col p-5">
-                          <div className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted-foreground">
-                            {t("tileTotal")}
-                          </div>
-                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                            <span className="text-5xl font-semibold leading-none tracking-tight">
-                              {formatTokensPrecise(totals.total_tokens)}
-                            </span>
-                            {delta && (
-                              <DeltaBadge
-                                delta={delta}
-                                newLabel={t("deltaNew")}
-                                title={t("vsPrevious")}
-                              />
+                )}
+
+                {report?.truncated && (
+                  <p className="rounded-xl border border-border bg-muted/40 px-4 py-2.5 text-xs text-muted-foreground">
+                    {t("truncatedNotice")}
+                  </p>
+                )}
+
+                {loading && !report ? (
+                  <LoadingSkeleton />
+                ) : (
+                  totals &&
+                  report && (
+                    <>
+                      {/* ─── Hero: the one number, and what the cache did ─── */}
+                      <section className="overflow-hidden rounded-xl border border-border bg-card">
+                        {/* Even halves — but only while the cache panel exists,
+                          so a cache-less report doesn't strand the hero figure
+                          in half the card. */}
+                        <div
+                          className={cn(
+                            "grid",
+                            cache !== null && "lg:grid-cols-2"
+                          )}
+                        >
+                          <div className="flex flex-col p-5">
+                            <div className="text-[0.6875rem] font-medium uppercase tracking-wider text-muted-foreground">
+                              {t("tileTotal")}
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                              <span className="text-5xl font-semibold leading-none tracking-tight">
+                                {formatTokensPrecise(totals.total_tokens)}
+                              </span>
+                              {delta && (
+                                <DeltaBadge
+                                  delta={delta}
+                                  newLabel={t("deltaNew")}
+                                  title={t("vsPrevious")}
+                                />
+                              )}
+                            </div>
+                            {archetype && totals.total_tokens > 0 && (
+                              // The outer wrapper owns the spacing: mt-auto pins
+                              // the strip to the card's bottom edge on wide
+                              // layouts, pt-5 keeps a floor under the hero number
+                              // when there is no slack to distribute.
+                              <div className="mt-auto pt-5">
+                                <div
+                                  className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 rounded-lg px-3 py-2.5 text-[0.8125rem] leading-relaxed"
+                                  style={{
+                                    backgroundColor: "var(--tu-accent-soft)",
+                                  }}
+                                >
+                                  <span aria-hidden="true">
+                                    {ARCHETYPE_EMOJI[archetype.id]}
+                                  </span>
+                                  <span className="font-semibold">
+                                    {t(ARCHETYPE_LABEL_KEYS[archetype.id])}
+                                  </span>
+                                  <span className="text-muted-foreground">
+                                    {t(
+                                      ARCHETYPE_DESC_KEYS[archetype.id],
+                                      archetype.values
+                                    )}
+                                    {archetype.id === "cacheMaster" &&
+                                      totals.cache_read_tokens > 0 &&
+                                      ` ${t("cacheSavedSuffix", {
+                                        saved: formatTokensPrecise(
+                                          totals.cache_read_tokens
+                                        ),
+                                      })}`}
+                                  </span>
+                                </div>
+                              </div>
                             )}
                           </div>
-                          {archetype && totals.total_tokens > 0 && (
-                            // The outer wrapper owns the spacing: mt-auto pins
-                            // the strip to the card's bottom edge on wide
-                            // layouts, pt-5 keeps a floor under the hero number
-                            // when there is no slack to distribute.
-                            <div className="mt-auto pt-5">
-                              <div
-                                className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 rounded-lg px-3 py-2.5 text-[0.8125rem] leading-relaxed"
-                                style={{
-                                  backgroundColor: "var(--tu-accent-soft)",
-                                }}
-                              >
-                                <span aria-hidden="true">
-                                  {ARCHETYPE_EMOJI[archetype.id]}
-                                </span>
-                                <span className="font-semibold">
-                                  {t(ARCHETYPE_LABEL_KEYS[archetype.id])}
-                                </span>
-                                <span className="text-muted-foreground">
-                                  {t(
-                                    ARCHETYPE_DESC_KEYS[archetype.id],
-                                    archetype.values
-                                  )}
-                                  {archetype.id === "cacheMaster" &&
-                                    totals.cache_read_tokens > 0 &&
-                                    ` ${t("cacheSavedSuffix", {
-                                      saved: formatTokensPrecise(
-                                        totals.cache_read_tokens
-                                      ),
-                                    })}`}
-                                </span>
+                          {cache !== null && (
+                            <div className="flex items-center gap-5 border-t border-border p-5 lg:border-s lg:border-t-0">
+                              <RingMeter
+                                ratio={cache}
+                                valueText={`${Math.round(cache * 100)}%`}
+                                caption={t("cacheHitCaption")}
+                              />
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold">
+                                  {cache >= 0.5
+                                    ? t("cacheHeroTitleHigh")
+                                    : t("cacheHeroTitleLow")}
+                                </div>
+                                <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                                  {t("cacheHeroDesc", {
+                                    cached: formatTokensPrecise(
+                                      totals.cache_read_tokens
+                                    ),
+                                    fresh: formatTokensPrecise(fresh),
+                                  })}
+                                </p>
                               </div>
                             </div>
                           )}
                         </div>
-                        {cache !== null && (
-                          <div className="flex items-center gap-5 border-t border-border p-5 lg:border-s lg:border-t-0">
-                            <RingMeter
-                              ratio={cache}
-                              valueText={`${Math.round(cache * 100)}%`}
-                              caption={t("cacheHitCaption")}
-                            />
-                            <div className="min-w-0">
-                              <div className="text-sm font-semibold">
-                                {cache >= 0.5
-                                  ? t("cacheHeroTitleHigh")
-                                  : t("cacheHeroTitleLow")}
-                              </div>
-                              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                                {t("cacheHeroDesc", {
-                                  cached: formatTokensPrecise(
-                                    totals.cache_read_tokens
-                                  ),
-                                  fresh: formatTokensPrecise(fresh),
-                                })}
-                              </p>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </section>
+                      </section>
 
-                    {/* ─── Stats strip ─── */}
-                    <section className="grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-card lg:grid-cols-4">
-                      {/* `conversation_count` is workspace-scoped on the
-                        server (workspace_conversation_count), so with an
-                        unbounded range it agrees exactly with the status
-                        bar's session counter. */}
-                      <StatCell
-                        label={t("tileSessions")}
-                        value={totals.conversation_count.toLocaleString(locale)}
-                        hint={`${t("avgPerSession")} ${formatTokenCount(
-                          Math.round(averagePerConversation(totals))
-                        )}`}
-                      />
-                      <StatCell
-                        className="border-s"
-                        label={t("tileTurns")}
-                        value={totals.turn_count.toLocaleString(locale)}
-                        hint={t("avgTurnsPerSession", {
-                          count: averageTurnsPerConversation(totals).toFixed(1),
-                        })}
-                      />
-                      <StatCell
-                        className="border-t lg:border-s lg:border-t-0"
-                        label={t("tileActiveDays")}
-                        value={t("daysValue", { count: totals.active_days })}
-                        hint={t("streakLongestDays", {
-                          count: report.streak.longest_days,
-                        })}
-                      />
-                      <StatCell
-                        className="border-s border-t lg:border-t-0"
-                        label={t("tileGenTime")}
-                        value={formatDuration(totals.duration_ms)}
-                        hint={`${t("avgPerActiveDay")} ${formatTokenCount(
-                          Math.round(averagePerActiveDay(totals))
-                        )}`}
-                      />
-                    </section>
-
-                    {/* ─── Trend ─── */}
-                    <Panel
-                      title={t("trendTitle")}
-                      icon={ChartNoAxesColumn}
-                      actions={
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                          <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                            <span className="flex items-center gap-1.5">
-                              <span
-                                aria-hidden="true"
-                                className="size-2 rounded-[2px]"
-                                style={{ backgroundColor: ACCENT }}
-                              />
-                              {t("cacheRead")}
-                            </span>
-                            <span className="flex items-center gap-1.5">
-                              <span
-                                aria-hidden="true"
-                                className="size-2 rounded-[2px]"
-                                style={{ backgroundColor: INK }}
-                              />
-                              {t("freshTokens")}
-                            </span>
-                          </div>
-                          <SegmentedFilter
-                            ariaLabel={t("bucketLabel")}
-                            value={effectiveBucket}
-                            onChange={(v) => {
-                              setBucket(v)
-                              setBucketTouched(true)
-                            }}
-                            options={(["day", "week", "month"] as const).map(
-                              (b) => ({
-                                value: b,
-                                label: t(BUCKET_LABEL_KEYS[b]),
-                              })
-                            )}
-                          />
-                        </div>
-                      }
-                    >
-                      <TrendChart
-                        data={trendData}
-                        label={t("trendTitle")}
-                        cacheLabel={t("cacheRead")}
-                        freshLabel={t("freshTokens")}
-                        emptyLabel={t("trendEmpty")}
-                      />
-                      {(peak || busiestHour !== null || idle !== null) && (
-                        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t border-border pt-3 text-xs text-muted-foreground">
-                          {peak && (
-                            <span>
-                              {t("peakBucket", {
-                                bucket: t(BUCKET_UNIT_KEYS[report.bucket]),
-                              })}
-                              {": "}
-                              <span className="font-medium text-foreground">
-                                {formatBucketLabel(peak.bucket_key)} ·{" "}
-                                {formatTokenCount(peak.total_tokens)}
-                              </span>
-                            </span>
+                      {/* ─── Stats strip ─── */}
+                      <section className="grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-card lg:grid-cols-4">
+                        {/* `conversation_count` is workspace-scoped on the
+                          server (workspace_conversation_count), so with an
+                          unbounded range it agrees exactly with the status
+                          bar's session counter. */}
+                        <StatCell
+                          label={t("tileSessions")}
+                          value={totals.conversation_count.toLocaleString(
+                            locale
                           )}
-                          {busiestHour !== null && (
-                            <span>
-                              {t("peakHour")}
-                              {": "}
-                              <span className="font-medium text-foreground">
-                                {String(busiestHour).padStart(2, "0")}:00
-                              </span>
-                            </span>
-                          )}
-                          {idle !== null && (
-                            <span>
-                              {t("idleDays")}
-                              {": "}
-                              <span className="font-medium text-foreground">
-                                {t("daysValue", { count: idle })}
-                              </span>
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </Panel>
-
-                    {/* ─── Composition + rhythm — stretched to one shared height ─── */}
-                    <div className="grid gap-4 lg:grid-cols-2">
-                      <Panel
-                        title={t("compositionTitle")}
-                        hint={t("compositionHint")}
-                      >
-                        <RankedBars
-                          data={compositionRows}
-                          emptyLabel={t("emptyBreakdown")}
+                          hint={`${t("avgPerSession")} ${formatTokenCount(
+                            Math.round(averagePerConversation(totals))
+                          )}`}
                         />
-                        {totals.cache_read_tokens > 0 && (
-                          <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
-                            {t("compositionNote", {
-                              value: formatTokensPrecise(
-                                totals.cache_read_tokens
-                              ),
-                            })}
-                          </p>
-                        )}
-                      </Panel>
+                        <StatCell
+                          className="border-s"
+                          label={t("tileTurns")}
+                          value={totals.turn_count.toLocaleString(locale)}
+                          hint={t("avgTurnsPerSession", {
+                            count:
+                              averageTurnsPerConversation(totals).toFixed(1),
+                          })}
+                        />
+                        <StatCell
+                          className="border-t lg:border-s lg:border-t-0"
+                          label={t("tileActiveDays")}
+                          value={t("daysValue", { count: totals.active_days })}
+                          hint={t("streakLongestDays", {
+                            count: report.streak.longest_days,
+                          })}
+                        />
+                        <StatCell
+                          className="border-s border-t lg:border-t-0"
+                          label={t("tileGenTime")}
+                          value={formatDuration(totals.duration_ms)}
+                          hint={`${t("avgPerActiveDay")} ${formatTokenCount(
+                            Math.round(averagePerActiveDay(totals))
+                          )}`}
+                        />
+                      </section>
 
+                      {/* ─── Trend ─── */}
                       <Panel
-                        title={t("heatmapTitle")}
-                        hint={
-                          busiestHour !== null
-                            ? `${t("heatmapHint")} ${t("heatmapPeakHint", {
-                                hour: String(busiestHour).padStart(2, "0"),
-                              })}`
-                            : t("heatmapHint")
+                        title={t("trendTitle")}
+                        icon={ChartNoAxesColumn}
+                        actions={
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                            <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                              <span className="flex items-center gap-1.5">
+                                <span
+                                  aria-hidden="true"
+                                  className="size-2 rounded-[2px]"
+                                  style={{ backgroundColor: ACCENT }}
+                                />
+                                {t("cacheRead")}
+                              </span>
+                              <span className="flex items-center gap-1.5">
+                                <span
+                                  aria-hidden="true"
+                                  className="size-2 rounded-[2px]"
+                                  style={{ backgroundColor: INK }}
+                                />
+                                {t("freshTokens")}
+                              </span>
+                            </div>
+                            <SegmentedFilter
+                              ariaLabel={t("bucketLabel")}
+                              value={effectiveBucket}
+                              onChange={(v) => {
+                                setBucket(v)
+                                setBucketTouched(true)
+                              }}
+                              options={(["day", "week", "month"] as const).map(
+                                (b) => ({
+                                  value: b,
+                                  label: t(BUCKET_LABEL_KEYS[b]),
+                                })
+                              )}
+                            />
+                          </div>
                         }
                       >
-                        <ActivityHeatmap
-                          matrix={heat.cells}
-                          max={heat.max}
-                          weekdayLabels={weekdayLabels}
-                          legendLess={t("less")}
-                          legendMore={t("more")}
-                          formatAria={(weekday, hour, value) =>
-                            t("heatmapCell", {
-                              weekday: weekdayLabels[weekday],
-                              hour: String(hour).padStart(2, "0"),
-                              value: formatTokenCount(value),
-                            })
+                        <TrendChart
+                          data={trendData}
+                          label={t("trendTitle")}
+                          cacheLabel={t("cacheRead")}
+                          freshLabel={t("freshTokens")}
+                          emptyLabel={t("trendEmpty")}
+                        />
+                        {(peak || busiestHour !== null || idle !== null) && (
+                          <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 border-t border-border pt-3 text-xs text-muted-foreground">
+                            {peak && (
+                              <span>
+                                {t("peakBucket", {
+                                  bucket: t(BUCKET_UNIT_KEYS[report.bucket]),
+                                })}
+                                {": "}
+                                <span className="font-medium text-foreground">
+                                  {formatBucketLabel(peak.bucket_key)} ·{" "}
+                                  {formatTokenCount(peak.total_tokens)}
+                                </span>
+                              </span>
+                            )}
+                            {busiestHour !== null && (
+                              <span>
+                                {t("peakHour")}
+                                {": "}
+                                <span className="font-medium text-foreground">
+                                  {String(busiestHour).padStart(2, "0")}:00
+                                </span>
+                              </span>
+                            )}
+                            {idle !== null && (
+                              <span>
+                                {t("idleDays")}
+                                {": "}
+                                <span className="font-medium text-foreground">
+                                  {t("daysValue", { count: idle })}
+                                </span>
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </Panel>
+
+                      {/* ─── Composition + rhythm — stretched to one shared height ─── */}
+                      <div className="grid gap-4 lg:grid-cols-2">
+                        <Panel
+                          title={t("compositionTitle")}
+                          hint={t("compositionHint")}
+                        >
+                          <RankedBars
+                            data={compositionRows}
+                            emptyLabel={t("emptyBreakdown")}
+                          />
+                          {totals.cache_read_tokens > 0 && (
+                            <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
+                              {t("compositionNote", {
+                                value: formatTokensPrecise(
+                                  totals.cache_read_tokens
+                                ),
+                              })}
+                            </p>
+                          )}
+                        </Panel>
+
+                        <Panel
+                          title={t("heatmapTitle")}
+                          hint={
+                            busiestHour !== null
+                              ? `${t("heatmapHint")} ${t("heatmapPeakHint", {
+                                  hour: String(busiestHour).padStart(2, "0"),
+                                })}`
+                              : t("heatmapHint")
                           }
+                        >
+                          <ActivityHeatmap
+                            matrix={heat.cells}
+                            max={heat.max}
+                            weekdayLabels={weekdayLabels}
+                            legendLess={t("less")}
+                            legendMore={t("more")}
+                            formatAria={(weekday, hour, value) =>
+                              t("heatmapCell", {
+                                weekday: weekdayLabels[weekday],
+                                hour: String(hour).padStart(2, "0"),
+                                value: formatTokenCount(value),
+                              })
+                            }
+                          />
+                        </Panel>
+                      </div>
+
+                      {/* ─── Distribution ─── */}
+                      <Panel
+                        title={t("distributionTitle")}
+                        hint={t("distributionHint")}
+                        actions={
+                          <SegmentedFilter
+                            ariaLabel={t("distributionTitle")}
+                            value={dim}
+                            onChange={setDim}
+                            options={[
+                              {
+                                value: "folder" as const,
+                                label: t("byFolderTitle"),
+                              },
+                              {
+                                value: "agent" as const,
+                                label: t("byAgentTitle"),
+                              },
+                              {
+                                value: "model" as const,
+                                label: t("byModelTitle"),
+                              },
+                            ]}
+                          />
+                        }
+                      >
+                        <RankedBars
+                          data={breakdownRows}
+                          showRank
+                          emptyLabel={t("emptyBreakdown")}
+                          onSelect={onBreakdownSelect}
                         />
                       </Panel>
-                    </div>
 
-                    {/* ─── Distribution ─── */}
-                    <Panel
-                      title={t("distributionTitle")}
-                      hint={t("distributionHint")}
-                      actions={
-                        <SegmentedFilter
-                          ariaLabel={t("distributionTitle")}
-                          value={dim}
-                          onChange={setDim}
-                          options={[
-                            {
-                              value: "folder" as const,
-                              label: t("byFolderTitle"),
-                            },
-                            {
-                              value: "agent" as const,
-                              label: t("byAgentTitle"),
-                            },
-                            {
-                              value: "model" as const,
-                              label: t("byModelTitle"),
-                            },
-                          ]}
-                        />
-                      }
-                    >
-                      <RankedBars
-                        data={breakdownRows}
-                        showRank
-                        emptyLabel={t("emptyBreakdown")}
-                        onSelect={onBreakdownSelect}
-                      />
-                    </Panel>
-
-                    {/* ─── Top sessions ─── */}
-                    <Panel title={t("topSessionsTitle")}>
-                      {report.top_conversations.length === 0 ? (
-                        <p className="py-6 text-center text-sm text-muted-foreground">
-                          {t("topSessionsEmpty")}
-                        </p>
-                      ) : (
-                        <ol className="divide-y divide-border">
-                          {report.top_conversations.map((c, i) => (
-                            <li
-                              key={c.conversation_id}
-                              className="flex items-center gap-3 py-2 first:pt-0 last:pb-0"
-                            >
-                              <span
-                                aria-hidden="true"
-                                className="w-5 shrink-0 font-mono text-[0.625rem] tabular-nums text-muted-foreground/70"
+                      {/* ─── Top sessions ─── */}
+                      <Panel title={t("topSessionsTitle")}>
+                        {report.top_conversations.length === 0 ? (
+                          <p className="py-6 text-center text-sm text-muted-foreground">
+                            {t("topSessionsEmpty")}
+                          </p>
+                        ) : (
+                          <ol className="divide-y divide-border">
+                            {report.top_conversations.map((c, i) => (
+                              <li
+                                key={c.conversation_id}
+                                className="flex items-center gap-3 py-2 first:pt-0 last:pb-0"
                               >
-                                {String(i + 1).padStart(2, "0")}
-                              </span>
-                              <span className="min-w-0 flex-1 truncate text-[0.8125rem]">
-                                {c.title || t("untitledSession")}
-                              </span>
-                              <span className="hidden shrink-0 truncate text-xs text-muted-foreground sm:block sm:max-w-[10rem]">
-                                {c.folder_label}
-                              </span>
-                              <span className="shrink-0 text-xs text-muted-foreground">
-                                {getAgentLabel(c.agent_type as AgentType)}
-                              </span>
-                              <span className="shrink-0 font-mono text-xs tabular-nums">
-                                {formatTokenCount(c.total_tokens)}
-                              </span>
-                            </li>
-                          ))}
-                        </ol>
-                      )}
-                    </Panel>
-                  </>
-                )
-              )}
+                                <span
+                                  aria-hidden="true"
+                                  className="w-5 shrink-0 font-mono text-[0.625rem] tabular-nums text-muted-foreground/70"
+                                >
+                                  {String(i + 1).padStart(2, "0")}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate text-[0.8125rem]">
+                                  {c.title || t("untitledSession")}
+                                </span>
+                                <span className="hidden shrink-0 truncate text-xs text-muted-foreground sm:block sm:max-w-[10rem]">
+                                  {c.folder_label}
+                                </span>
+                                <span className="shrink-0 text-xs text-muted-foreground">
+                                  {getAgentLabel(c.agent_type as AgentType)}
+                                </span>
+                                <span className="shrink-0 font-mono text-xs tabular-nums">
+                                  {formatTokenCount(c.total_tokens)}
+                                </span>
+                              </li>
+                            ))}
+                          </ol>
+                        )}
+                      </Panel>
+                    </>
+                  )
+                )}
+              </div>
             </div>
-          </div>
-        </ScrollArea>
-      </div>
+          </ScrollArea>
+        </div>
+      )}
 
       {/* ─── Share ─── */}
       <Dialog open={shareOpen} onOpenChange={setShareOpen}>
