@@ -730,9 +730,13 @@ impl ConnectionManager {
         {
             let mut s = state_arc.write().await;
             if s.turn_in_flight {
+                // Names the gate, not just the outcome: the linked path checks
+                // the same flag once before its side effects and again here, and
+                // the two lines share a module target with no file/line in the
+                // default format — identical text would be unattributable.
                 tracing::debug!(
                     connection_id = %conn_id,
-                    "[ACP] prompt rejected: a turn is already in flight"
+                    "[ACP] prompt rejected at the send gate: a turn is already in flight"
                 );
                 return Err(AcpError::TurnInProgress);
             }
@@ -895,9 +899,11 @@ impl ConnectionManager {
         // InProgress or broadcasting a phantom user message. The frontend turns
         // this rejection into a queued message above the input box.
         if turn_in_flight {
+            // Distinct from `send_prompt_inner`'s send-gate line so a log reader
+            // can tell which of the two checks bounced the prompt.
             tracing::debug!(
                 connection_id = %conn_id,
-                "[ACP] prompt rejected: a turn is already in flight"
+                "[ACP] prompt rejected before admission: a turn is already in flight"
             );
             return Err(AcpError::TurnInProgress);
         }
