@@ -33,8 +33,8 @@ use crate::acp::InternalEventBus;
 use crate::commands::acp::{build_session_runtime_env, verify_agent_installed};
 use crate::commands::conversations::{create_conversation_core, emit_conversation_upsert};
 use crate::commands::folders::{
-    emit_folder_upsert, get_folder_core, git_worktree_add, open_worktree_folder_core,
-    resolve_git_head,
+    emit_folder_deleted, emit_folder_upsert, get_folder_core, git_worktree_add,
+    open_worktree_folder_core, resolve_git_head,
 };
 use crate::db::entities::conversation::{self, ConversationStatus};
 use crate::db::entities::work_task::WorkTaskStatus;
@@ -1947,8 +1947,11 @@ impl TaskEngine {
             }
         };
         let Ok(wt) = get_folder_core(&self.db, wt_id).await else {
-            // Folder row already gone — just detach.
+            // Folder row already gone (a retried cleanup) — just detach, and
+            // still tell clients to drop it: one holding a stale copy would
+            // otherwise keep rendering a worktree no refetch would return.
             let _ = work_task_service::clear_worktree(&self.db.conn, task_id).await;
+            emit_folder_deleted(&self.emitter, wt_id);
             return;
         };
 
@@ -1969,64 +1972,15 @@ impl TaskEngine {
             return;
         }
 
-        // Git succeeded — converge the DB. Conversations first (so they are
-        // never orphaned under a vanishing folder), then tabs, then the folder
-        // row itself.
-        let moved = conversation_service::reparent_folder_conversations(
-            &self.db.conn,
+        converge_worktree_removal(
+            &self.db,
+            &self.emitter,
+            task_id,
             wt_id,
             task.folder_id,
             &wt.path,
         )
-        .await
-        .unwrap_or(0);
-
-        match tab_service::delete_folder_tabs_and_bump(&self.db.conn, wt_id).await {
-            Ok(inv) => {
-                if let Some(tabs) = inv.emit {
-                    emit_event(
-                        &self.emitter,
-                        crate::web::event_bridge::TABS_CHANGED_EVENT,
-                        crate::web::event_bridge::TabsChanged {
-                            version: inv.version,
-                            origin: "server".to_string(),
-                            tabs,
-                        },
-                    );
-                }
-            }
-            Err(e) => tracing::warn!("[work_task] tab cleanup failed for folder {wt_id}: {e}"),
-        }
-
-        if let Ok(Some(row)) = folder::Entity::find_by_id(wt_id).one(&self.db.conn).await {
-            let mut active = row.into_active_model();
-            active.is_open = Set(false);
-            active.deleted_at = Set(Some(chrono::Utc::now()));
-            active.updated_at = Set(chrono::Utc::now());
-            let _ = active.update(&self.db.conn).await;
-        }
-
-        let _ = work_task_service::clear_worktree(&self.db.conn, task_id).await;
-        let _ = work_task_service::record_event(
-            &self.db.conn,
-            task_id,
-            "user_action",
-            "engine",
-            Some(serde_json::json!({ "action": "cleanup", "reparented": moved })),
-        )
         .await;
-
-        // Nudge every client to refetch conversations/folders — the worktree
-        // folder is gone and its conversations moved to the project folder.
-        emit_event(
-            &self.emitter,
-            crate::web::event_bridge::CONVERSATIONS_BULK_CHANGED_EVENT,
-            crate::web::event_bridge::ConversationsBulkChanged {
-                imported: 0,
-                updated: moved as u32,
-                folder_ids: vec![task.folder_id],
-            },
-        );
     }
 
     // ── reconcile ───────────────────────────────────────────────────────────
@@ -2202,6 +2156,99 @@ impl TaskEngine {
 struct WorktreeRef {
     folder_id: i32,
     path: String,
+}
+
+/// Converge DB + clients once a task worktree is off disk. Split out of
+/// [`TaskEngine::remove_worktree_locked`] so the ordering contract below is
+/// unit-testable without a real git worktree.
+///
+/// Write order: conversations first (never orphaned under a vanishing folder),
+/// then its tabs, then the folder row. Each step ends in a broadcast, because a
+/// removal no client hears about is a removal no client shows: the sidebar keeps
+/// the dead worktree until the next full `fetchFolders` (i.e. a reload).
+async fn converge_worktree_removal(
+    db: &AppDatabase,
+    emitter: &EventEmitter,
+    task_id: i32,
+    wt_id: i32,
+    project_folder_id: i32,
+    wt_path: &str,
+) {
+    let moved = conversation_service::reparent_folder_conversations(
+        &db.conn,
+        wt_id,
+        project_folder_id,
+        wt_path,
+    )
+    .await
+    .unwrap_or(0);
+
+    match tab_service::delete_folder_tabs_and_bump(&db.conn, wt_id).await {
+        Ok(inv) => {
+            if let Some(tabs) = inv.emit {
+                emit_event(
+                    emitter,
+                    crate::web::event_bridge::TABS_CHANGED_EVENT,
+                    crate::web::event_bridge::TabsChanged {
+                        version: inv.version,
+                        origin: "server".to_string(),
+                        tabs,
+                    },
+                );
+            }
+        }
+        Err(e) => tracing::warn!("[work_task] tab cleanup failed for folder {wt_id}: {e}"),
+    }
+
+    // Announce the folder drop only when the row really is gone, so a failed
+    // write can't leave clients disagreeing with what a refetch would return.
+    let folder_gone = match folder::Entity::find_by_id(wt_id).one(&db.conn).await {
+        Ok(Some(row)) => {
+            let now = chrono::Utc::now();
+            let mut active = row.into_active_model();
+            active.is_open = Set(false);
+            active.deleted_at = Set(Some(now));
+            active.updated_at = Set(now);
+            match active.update(&db.conn).await {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!("[work_task] worktree folder {wt_id} soft-delete failed: {e}");
+                    false
+                }
+            }
+        }
+        // Already soft-deleted / never there: a client still holding it is stale.
+        Ok(None) => true,
+        Err(e) => {
+            tracing::warn!("[work_task] worktree folder {wt_id} lookup failed: {e}");
+            false
+        }
+    };
+
+    let _ = work_task_service::clear_worktree(&db.conn, task_id).await;
+    let _ = work_task_service::record_event(
+        &db.conn,
+        task_id,
+        "user_action",
+        "engine",
+        Some(serde_json::json!({ "action": "cleanup", "reparented": moved })),
+    )
+    .await;
+
+    // Conversations first: this starts every client's refetch, so the moved
+    // rows have the shortest possible window with no folder to render under.
+    emit_event(
+        emitter,
+        crate::web::event_bridge::CONVERSATIONS_BULK_CHANGED_EVENT,
+        crate::web::event_bridge::ConversationsBulkChanged {
+            imported: 0,
+            updated: moved as u32,
+            folder_ids: vec![project_folder_id],
+        },
+    );
+    if folder_gone {
+        emit_folder_deleted(emitter, wt_id);
+    }
 }
 
 /// Pick the launch mode for a pump-driven launch from the task's history: a
@@ -2861,6 +2908,117 @@ mod tests {
         .await
         .expect("compose");
         assert_eq!(texts(&bare), texts(&blank));
+    }
+
+    /// The worktree is off disk; everything below is what the clients see.
+    /// Without the `folder://changed` delete the removed worktree keeps
+    /// rendering in every sidebar until the next full `fetchFolders`.
+    #[tokio::test]
+    async fn worktree_removal_announces_the_dropped_folder() {
+        use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+        use crate::web::event_bridge::WebEventBroadcaster;
+
+        let db = fresh_in_memory_db().await;
+        let root_id = seed_folder(&db, "/tmp/repo").await;
+        let wt = open_worktree_folder_core(&db, "/tmp/repo-task-1".to_string(), root_id)
+            .await
+            .expect("worktree folder");
+        let conv = conversation_service::create(&db.conn, wt.id, AgentType::ClaudeCode, None, None)
+            .await
+            .expect("conversation");
+        let task = work_task_service::create(
+            &db.conn,
+            crate::models::WorkTaskDraft {
+                folder_id: root_id,
+                title: "fix login".to_string(),
+                config: serde_json::json!({
+                    "display_text": "fix login",
+                    "prompt_blocks": [{ "type": "text", "text": "fix login" }],
+                }),
+            },
+        )
+        .await
+        .expect("task");
+        work_task_service::attach_worktree(&db.conn, task.id, wt.id, "main", "abc", "task/1")
+            .await
+            .expect("attach");
+
+        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let mut rx = broadcaster.subscribe();
+        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+
+        converge_worktree_removal(&db, &emitter, task.id, wt.id, root_id, &wt.path).await;
+
+        // The folder row is gone from every list a client can fetch…
+        assert!(
+            crate::db::service::folder_service::get_folder_by_id(&db.conn, wt.id)
+                .await
+                .expect("lookup")
+                .is_none()
+        );
+        // …its conversation moved to the project folder (stamped with where it ran)…
+        let moved = conversation_service::get_by_id(&db.conn, conv.id)
+            .await
+            .expect("conversation row");
+        assert_eq!(moved.folder_id, root_id);
+        assert_eq!(moved.origin_cwd.as_deref(), Some("/tmp/repo-task-1"));
+        // …and the task no longer points at it.
+        let after = work_task_service::get_model(&db.conn, task.id)
+            .await
+            .expect("task row");
+        assert_eq!(after.worktree_folder_id, None);
+
+        // Conversations first (that refetch is what re-places the moved rows),
+        // then the folder drop.
+        let bulk = rx.try_recv().expect("bulk change should broadcast");
+        assert_eq!(
+            bulk.channel,
+            crate::web::event_bridge::CONVERSATIONS_BULK_CHANGED_EVENT
+        );
+        let dropped = rx.try_recv().expect("folder delete should broadcast");
+        assert_eq!(
+            dropped.channel,
+            crate::web::event_bridge::FOLDER_CHANGED_EVENT
+        );
+        assert_eq!(dropped.payload["kind"], "deleted");
+        assert_eq!(dropped.payload["id"], wt.id);
+    }
+
+    /// A retried cleanup finds the row already soft-deleted. It must still
+    /// announce the drop — a client that missed the first broadcast is the
+    /// reason the user retried.
+    #[tokio::test]
+    async fn worktree_removal_re_announces_an_already_deleted_folder() {
+        use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+        use crate::web::event_bridge::WebEventBroadcaster;
+
+        let db = fresh_in_memory_db().await;
+        let root_id = seed_folder(&db, "/tmp/repo2").await;
+        let task = work_task_service::create(
+            &db.conn,
+            crate::models::WorkTaskDraft {
+                folder_id: root_id,
+                title: "fix login".to_string(),
+                config: serde_json::json!({
+                    "display_text": "fix login",
+                    "prompt_blocks": [{ "type": "text", "text": "fix login" }],
+                }),
+            },
+        )
+        .await
+        .expect("task");
+
+        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let mut rx = broadcaster.subscribe();
+        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+
+        // Folder id 9999 never existed — the "already gone" branch.
+        converge_worktree_removal(&db, &emitter, task.id, 9999, root_id, "/tmp/repo2-task-1").await;
+
+        let _bulk = rx.try_recv().expect("bulk change should broadcast");
+        let dropped = rx.try_recv().expect("folder delete should broadcast");
+        assert_eq!(dropped.payload["kind"], "deleted");
+        assert_eq!(dropped.payload["id"], 9999);
     }
 
     #[test]
