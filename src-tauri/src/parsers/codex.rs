@@ -486,22 +486,37 @@ const TOTAL_OUTPUT_LINES: &str = "Total output lines: ";
 /// agree — declared, present, and calls — and every line has to be a complete
 /// exec envelope, which is also what tells this blob apart from a single
 /// command's stdout that merely got truncated (the far more common banner).
-fn uncollapse_truncated_chunks(parsed: &CodeModeOutput, calls: usize) -> Option<Vec<String>> {
+fn uncollapse_truncated_chunks(blob: Option<&TruncatedBlob>, calls: usize) -> Option<Vec<String>> {
     if calls == 0 {
         return None;
     }
-    let (declared, body) = truncated_blob(parsed)?;
-    if body.len() != declared || declared != calls {
+    let blob = blob?;
+    if blob.body.len() != blob.declared || blob.declared != calls {
         return None;
     }
-    body.iter()
+    blob.body
+        .iter()
         .all(|line| unwrap_exec_chunk_envelope(line).is_some())
-        .then(|| body.iter().map(|line| line.to_string()).collect())
+        .then(|| blob.body.iter().map(|line| line.to_string()).collect())
 }
 
 /// The line count a collapsed blob declares, and the lines it actually kept.
-/// `declared > body.len()` means codex dropped lines to fit the cap.
-fn truncated_blob(parsed: &CodeModeOutput) -> Option<(usize, Vec<&str>)> {
+///
+/// Reading it costs a pass over the whole blob, and three of the paths below
+/// want it, so `unwrap_code_mode_script` reads it once and hands it down.
+struct TruncatedBlob<'a> {
+    declared: usize,
+    body: Vec<&'a str>,
+}
+
+impl TruncatedBlob<'_> {
+    /// Codex dropped lines from the middle to fit the cap.
+    fn truncated(&self) -> bool {
+        self.declared > self.body.len()
+    }
+}
+
+fn truncated_blob(parsed: &CodeModeOutput) -> Option<TruncatedBlob<'_>> {
     let [collapsed] = parsed.chunks.as_slice() else {
         return None;
     };
@@ -518,7 +533,10 @@ fn truncated_blob(parsed: &CodeModeOutput) -> Option<(usize, Vec<&str>)> {
     if !lines.next()?.is_empty() {
         return None;
     }
-    Some((declared, lines.collect()))
+    Some(TruncatedBlob {
+        declared,
+        body: lines.collect(),
+    })
 }
 
 /// One call's share of a collapsed blob that was split on the separator lines
@@ -571,14 +589,14 @@ const MIN_ANCHORS: usize = 2;
 /// it at the cost of the case this exists for — 89% of collapsed blobs are
 /// missing lines — so the split is kept and the labels are what it rests on.
 fn split_by_separators(
-    parsed: &CodeModeOutput,
+    blob: Option<&TruncatedBlob>,
     calls: &[CodeModeCall],
     separators: &[Separator],
 ) -> Option<Vec<SeparatorSlot>> {
     if calls.len() < 2 || separators.is_empty() {
         return None;
     }
-    let (_, body) = truncated_blob(parsed)?;
+    let body = &blob?.body;
 
     let labels: Option<Vec<&str>> = calls.iter().map(|c| c.label.as_deref()).collect();
     let by_index = |offset: usize| (0..calls.len()).map(|i| (i + offset).to_string()).collect();
@@ -590,10 +608,11 @@ fn split_by_separators(
         .chain([by_index(0), by_index(1)])
         .collect();
 
+    let index = index_body_lines(body);
     let mut best: Option<Vec<Option<usize>>> = None;
     for separator in separators {
         for values in &candidates {
-            let Some(found) = locate_anchors(&body, separator, values) else {
+            let Some(found) = locate_anchors(&index, separator, values) else {
                 continue;
             };
             let hits = found.iter().flatten().count();
@@ -609,14 +628,31 @@ fn split_by_separators(
         }
     }
 
-    Some(slots_from_anchors(&body, &best?))
+    Some(slots_from_anchors(body, &best?))
 }
 
-/// Where each value's separator line sits in `body`, or `None` for the ones
+/// Every line of the blob, trimmed of trailing whitespace, mapped to where it
+/// sits — or to `None` when it occurs more than once.
+///
+/// Built once and read by every candidate, which is what keeps the split from
+/// costing a pass over the blob per command: a run of separators is looked up,
+/// not searched for.
+fn index_body_lines<'a>(body: &[&'a str]) -> HashMap<&'a str, Option<usize>> {
+    let mut index = HashMap::with_capacity(body.len());
+    for (at, line) in body.iter().enumerate() {
+        index
+            .entry(line.trim_end())
+            .and_modify(|seen| *seen = None)
+            .or_insert(Some(at));
+    }
+    index
+}
+
+/// Where each value's separator line sits in the blob, or `None` for the ones
 /// truncation removed. Refuses the whole candidate when a line repeats or the
 /// lines run backwards — either means the match is not the separator run.
 fn locate_anchors(
-    body: &[&str],
+    index: &HashMap<&str, Option<usize>>,
     separator: &Separator,
     values: &[String],
 ) -> Option<Vec<Option<usize>>> {
@@ -625,16 +661,14 @@ fn locate_anchors(
 
     for value in values {
         let anchor = separator.anchor(value);
-        let anchor = anchor.trim_end();
-        let mut hits = body
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| line.trim_end() == anchor)
-            .map(|(index, _)| index);
-        let hit = hits.next();
-        if hits.next().is_some() {
-            return None;
-        }
+        let hit = match index.get(anchor.trim_end()) {
+            // The line occurs twice, so it is not a boundary to cut on. Only a
+            // line some value actually predicts can refuse a candidate; an
+            // ordinary output line repeating is nobody's separator.
+            Some(None) => return None,
+            Some(Some(at)) => Some(*at),
+            None => None,
+        };
         if let Some(at) = hit {
             if previous.is_some_and(|before| at <= before) {
                 return None;
@@ -677,10 +711,11 @@ fn slots_from_anchors(body: &[&str], found: &[Option<usize>]) -> Vec<SeparatorSl
             Some((next_call, Some(at))) => (*at, *next_call),
             _ => (body.len(), found.len()),
         };
-        let text = body.get(start..end).unwrap_or_default().join("\n");
-        let text = text.trim_end();
+        let mut text = body.get(start..end).unwrap_or_default().join("\n");
+        let kept = text.trim_end().len();
+        text.truncate(kept);
         slots[*call] = SeparatorSlot {
-            text: (!text.is_empty()).then(|| text.to_string()),
+            text: (!text.is_empty()).then_some(text),
             placed: true,
             shares_with: (call + 1..next_call).collect(),
         };
@@ -803,7 +838,12 @@ fn unwrap_code_mode_script(
     // A collapsed blob stands in for the chunks it was rendered from, when the
     // counts prove which is which. Nothing changes when it does not: the
     // fallback is `parsed.chunks` itself, banner and all.
-    let uncollapsed = uncollapse_truncated_chunks(parsed, calls.len());
+    // Every path that reads it bails on the call count first, so a script that
+    // recovered nothing does not pay to have its blob split into lines.
+    let blob = (!calls.is_empty())
+        .then(|| truncated_blob(parsed))
+        .flatten();
+    let uncollapsed = uncollapse_truncated_chunks(blob.as_ref(), calls.len());
     let chunks: &[String] = uncollapsed.as_deref().unwrap_or(&parsed.chunks);
 
     if calls.len() == 1 {
@@ -871,8 +911,8 @@ fn unwrap_code_mode_script(
     // The chunks did not divide, but the script may have labelled its results
     // on their way out. Only reachable for a collapsed blob — anything with real
     // chunks was already handled above.
-    if let Some(slots) = split_by_separators(parsed, calls, &script.separators) {
-        let truncated = truncated_blob(parsed).is_some_and(|(declared, body)| declared > body.len());
+    if let Some(slots) = split_by_separators(blob.as_ref(), calls, &script.separators) {
+        let truncated = blob.as_ref().is_some_and(TruncatedBlob::truncated);
         let last = calls.len() - 1;
         let mut uses = Vec::with_capacity(calls.len());
         let mut results = Vec::with_capacity(calls.len());
@@ -7119,6 +7159,35 @@ mod tests {
         let uses = tool_uses(&detail);
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].1, CODEX_SCRIPT_TOOL_NAME);
+    }
+
+    /// Only a line some separator actually predicts can make a candidate
+    /// ambiguous. Two commands printing the same ordinary line is the normal
+    /// case — `index_body_lines` marks it repeated, but nothing looks it up.
+    #[test]
+    fn a_repeated_output_line_still_splits() {
+        let detail = code_mode_detail(
+            &labelled_fanout(&["alpha", "beta", "gamma"]),
+            labelled_blob(8, &[
+                ("alpha", "shared line\none"),
+                ("beta", "shared line\ntwo"),
+                ("gamma", "three"),
+            ]),
+            "code-mode-labelled-repeat",
+        );
+
+        assert_eq!(
+            tool_results(&detail),
+            vec![
+                ("call_1#0".into(), Some("shared line\none".into()), false),
+                ("call_1#1".into(), Some("shared line\ntwo".into()), false),
+                ("call_1#2".into(), Some("three".into()), false),
+            ]
+        );
+        // Every line the banner declared is present, so nothing went missing.
+        let metas = tool_metas(&detail);
+        assert!(metas.iter().all(|m| m.get("truncated").is_none()));
+        assert!(metas.iter().all(|m| m.get("outputMissing").is_none()));
     }
 
     /// One separator divides nothing: it would hand the whole blob to the first
