@@ -1324,6 +1324,10 @@ impl ClaudeParser {
         super::relocate_orphaned_tool_results(&mut turns);
         super::structurize_read_tool_output(&mut turns);
         super::resolve_patch_line_numbers(&mut turns, cwd.as_deref());
+        // Only very old Claude Code builds wrote `system` / `turn_duration`
+        // records; current ones log no timings at all, so without this every
+        // reply lost its elapsed-time chip the moment the live timer stopped.
+        super::backfill_turn_durations(&mut turns, &[]);
         let context_window_used_tokens = latest_claude_context_window_used_tokens(&turns);
         let context_window_max_tokens =
             claude_context_window_max_tokens_for_model(model.as_deref());
@@ -1933,6 +1937,7 @@ mod tests {
         crate::parsers::relocate_orphaned_tool_results(&mut turns);
         crate::parsers::structurize_read_tool_output(&mut turns);
         crate::parsers::resolve_patch_line_numbers(&mut turns, cwd.as_deref());
+        crate::parsers::backfill_turn_durations(&mut turns, &[]);
 
         assert_eq!(
             serde_json::to_string(&turns).unwrap(),

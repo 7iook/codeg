@@ -1865,7 +1865,22 @@ impl CodexParser {
         // persisted the `/goal` text as the opening `user_message`, which arrives
         // BEFORE the goal — there the flag stays false and nothing is synthesized.
         let mut goal_opens_session = false;
-        let mut last_turn_context_ts: Option<DateTime<Utc>> = None;
+        // Start-of-turn markers, chronological, fed to
+        // `backfill_turn_durations` so the first reply of a turn is measured
+        // from when codex began working — not from the previous turn's end,
+        // which would charge it the user's thinking time.
+        //
+        // Two lists because the two events are not equally trustworthy.
+        // `task_started` fires exactly once per turn. `turn_context` normally
+        // follows it within milliseconds, but newer codex re-emits it MID-turn
+        // (it carries a `turn_id` and is rewritten when the turn's config
+        // changes) — 6 of 495 records across the local rollout corpus. Since a
+        // marker only ever moves the boundary forward, a mid-turn one would
+        // truncate the reply that follows it and silently drop that slice from
+        // the turn's total. So `turn_context` is used only as a fallback, for
+        // rollouts old enough to predate `task_started`.
+        let mut task_start_markers: Vec<DateTime<Utc>> = Vec::new();
+        let mut turn_context_markers: Vec<DateTime<Utc>> = Vec::new();
         let mut context_window_used_tokens: Option<u64> = None;
         let mut context_window_max_tokens: Option<u64> = None;
         let mut latest_total_usage: Option<TurnUsage> = None;
@@ -2002,7 +2017,9 @@ impl CodexParser {
                             .and_then(|m| m.as_str())
                             .map(|s| s.to_string());
                     }
-                    last_turn_context_ts = parse_codex_timestamp(&value);
+                    if let Some(ts) = parse_codex_timestamp(&value) {
+                        push_turn_start(&mut turn_context_markers, ts);
+                    }
                 }
                 "event_msg" => {
                     if let Some(payload) = value.get("payload") {
@@ -2025,9 +2042,18 @@ impl CodexParser {
                         }
 
                         match payload_type {
-                            "task_started" if context_window_max_tokens.is_none() => {
-                                context_window_max_tokens =
-                                    payload.get("model_context_window").and_then(|v| v.as_u64());
+                            "task_started" => {
+                                if context_window_max_tokens.is_none() {
+                                    context_window_max_tokens = payload
+                                        .get("model_context_window")
+                                        .and_then(|v| v.as_u64());
+                                }
+                                // The one marker codex writes exactly once per
+                                // turn; it precedes `turn_context` and the
+                                // prompt.
+                                if let Some(ts) = parse_codex_timestamp(&value) {
+                                    push_turn_start(&mut task_start_markers, ts);
+                                }
                             }
                             "user_message" => {
                                 active_agent_count = 0;
@@ -2330,23 +2356,14 @@ impl CodexParser {
                                         }
                                     }
                                 }
-                                // Compute duration from turn_context to token_count
-                                if let (Some(start_ts), Some(end_ts)) =
-                                    (last_turn_context_ts, parse_codex_timestamp(&value))
-                                {
-                                    let duration = (end_ts - start_ts).num_milliseconds();
-                                    if duration > 0 {
-                                        if let Some(last_msg) = messages
-                                            .iter_mut()
-                                            .rev()
-                                            .find(|m| matches!(m.role, MessageRole::Assistant))
-                                        {
-                                            if last_msg.duration_ms.is_none() {
-                                                last_msg.duration_ms = Some(duration as u64);
-                                            }
-                                        }
-                                    }
-                                }
+                                // Durations are NOT derived here. `token_count`
+                                // fires once per model request, so measuring
+                                // turn_context → token_count restated the whole
+                                // elapsed turn on every sub-turn; the UI sums
+                                // sub-turns into one card, which multiplied a
+                                // reply's reported time several-fold. See
+                                // `backfill_turn_durations`, applied after
+                                // grouping, which partitions the turn instead.
                             }
                             _ => {}
                         }
@@ -3149,6 +3166,14 @@ impl CodexParser {
         super::relocate_orphaned_tool_results(&mut turns);
         super::structurize_read_tool_output(&mut turns);
         super::resolve_patch_line_numbers(&mut turns, cwd.as_deref());
+        // After relocation every turn's `completed_at` is final — tile the
+        // timeline into per-reply durations before stats aggregate them.
+        let turn_starts = if task_start_markers.is_empty() {
+            &turn_context_markers
+        } else {
+            &task_start_markers
+        };
+        super::backfill_turn_durations(&mut turns, turn_starts);
         let mut session_stats = super::compute_session_stats(&turns);
         session_stats =
             merge_codex_total_usage_stats(session_stats, latest_total_usage, latest_total_tokens);
@@ -3324,6 +3349,18 @@ fn parse_codex_timestamp(value: &serde_json::Value) -> Option<DateTime<Utc>> {
         .get("timestamp")
         .and_then(|t| t.as_str())
         .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+}
+
+/// Append a start-of-turn marker to one of the two marker lists (see their
+/// declaration for why `task_started` and `turn_context` are kept apart).
+///
+/// An out-of-order arrival (skewed clocks in a rollout) is dropped rather than
+/// inserted: the backfill scans the list once, in order.
+fn push_turn_start(turn_starts: &mut Vec<DateTime<Utc>>, ts: DateTime<Utc>) {
+    match turn_starts.last() {
+        Some(last) if ts <= *last => {}
+        _ => turn_starts.push(ts),
+    }
 }
 
 /// Emit any buffered streaming `agent_reasoning` sections as a single Thinking
@@ -3967,12 +4004,126 @@ mod tests {
     }
 
     #[test]
+    fn parse_detail_durations_partition_a_multi_message_turn() {
+        // Regression: durations came from `turn_context → token_count`, and
+        // codex fires `token_count` once per model request — so every reply in
+        // a turn restated the elapsed time SINCE THE PROMPT. The UI merges a
+        // turn's replies into one card by summing their durations, so a 30s
+        // turn reported 10+22+30 = 62s (on a real 4-prompt rollout: 26 minutes
+        // of work shown as 109). Each reply must instead carry only its own
+        // slice, and the slices must add up to the turn.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-spans-{nanos}.jsonl"));
+
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"spans-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.100Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.200Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"go\"}}\n",
+            // Reply 1 at +10s, then two more model requests inside the SAME turn.
+            "{\"timestamp\":\"2026-03-01T10:00:10.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"one\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:11.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":2,\"total_tokens\":12}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:22.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"two\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:23.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":2,\"total_tokens\":12}}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:30.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"three\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:30.400Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":2,\"total_tokens\":12}}}}\n",
+            // A second prompt arrives 10 minutes later; that idle gap belongs
+            // to nobody, so its reply must report 4s and not 10m4s.
+            "{\"timestamp\":\"2026-03-01T10:10:30.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:10:30.100Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:10:30.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"again\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:10:34.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"four\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "spans-1")
+            .expect("parse detail ok");
+
+        let assistant_durations: Vec<Option<u64>> = detail
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, TurnRole::Assistant))
+            .map(|t| t.duration_ms)
+            .collect();
+        assert_eq!(
+            assistant_durations,
+            vec![
+                Some(10_000), // prompt → "one"
+                Some(12_000), // "one" → "two"
+                Some(8_000),  // "two" → "three"
+                Some(4_000),  // second prompt → "four"
+            ]
+        );
+
+        // Turn 1's replies sum to its wall clock, and the session total is the
+        // two turns' work — never the idle stretch between them.
+        let turn_one: u64 = assistant_durations[..3].iter().flatten().sum();
+        assert_eq!(turn_one, 30_000);
+        let stats = detail.session_stats.expect("session stats");
+        assert_eq!(stats.total_duration_ms, 34_000);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_mid_turn_turn_context_does_not_truncate_the_reply_after_it() {
+        // Newer codex re-emits `turn_context` in the MIDDLE of a turn — it
+        // carries a `turn_id` and is rewritten when the turn's config changes
+        // (6 of 495 records across the local rollout corpus). A start marker
+        // only ever moves the boundary forward, so treating that one as a turn
+        // start would charge the following reply just the time since it and
+        // silently drop the rest of the span from the turn's total. Only
+        // `task_started` — exactly one per turn — anchors the measurement;
+        // `turn_context` is a fallback for rollouts that predate it.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-midctx-{nanos}.jsonl"));
+
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"midctx-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.100Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.200Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"go\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:10.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"one\"}}\n",
+            // Re-emitted mid-turn, 1s before the next reply. If this counted as
+            // a turn start, "two" would report 1s instead of its real 20s.
+            "{\"timestamp\":\"2026-03-01T10:00:29.300Z\",\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"t-1\",\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:30.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"two\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "midctx-1")
+            .expect("parse detail ok");
+
+        let assistant_durations: Vec<Option<u64>> = detail
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, TurnRole::Assistant))
+            .map(|t| t.duration_ms)
+            .collect();
+        assert_eq!(assistant_durations, vec![Some(10_000), Some(20_000)]);
+        // Still tiles: 10s + 20s is the whole prompt→last-reply span.
+        let total: u64 = assistant_durations.iter().flatten().sum();
+        assert_eq!(total, 30_000);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn parse_detail_completion_time_uses_agent_message_timestamp_not_added_turn_span() {
-        // Regression: in Codex `duration_ms` is computed from the
-        // turn_context → token_count span, while `timestamp` on the
-        // assistant `UnifiedMessage` is the agent_message event time
-        // (already near turn end). Adding them double-counts the entire
-        // turn span. completed_at must reflect the agent_message arrival.
+        // Regression: `duration_ms` is a *span* and `timestamp` on the
+        // assistant `UnifiedMessage` is the agent_message event time (already
+        // at the end of that span, not its start), so adding the two
+        // double-counts. completed_at must reflect the agent_message arrival.
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
