@@ -486,8 +486,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Cline",
             description: "Autonomous coding agent CLI",
             distribution: AgentDistribution::Npx {
-                version: "3.0.49",
-                package: "cline@3.0.49",
+                version: "3.0.50",
+                package: "cline@3.0.50",
                 cmd: "cline",
                 args: &["--acp"],
                 env: &[],
@@ -500,39 +500,39 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "OpenCode",
             description: "The open source coding agent",
             distribution: AgentDistribution::Binary {
-                version: "1.18.11",
+                version: "1.18.14",
                 cmd: "opencode",
                 args: &["acp"],
                 env: &[],
                 platforms: &[
                     PlatformBinary {
                         platform: "darwin-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-darwin-arm64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.14/opencode-darwin-arm64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "darwin-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-darwin-x64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.14/opencode-darwin-x64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "linux-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-linux-arm64.tar.gz",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.14/opencode-linux-arm64.tar.gz",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "linux-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-linux-x64.tar.gz",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.14/opencode-linux-x64.tar.gz",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "windows-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-windows-arm64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.14/opencode-windows-arm64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "windows-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.11/opencode-windows-x64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.14/opencode-windows-x64.zip",
                         sha256: None,
                     },
                 ],
@@ -581,8 +581,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Kimi Code",
             description: "Moonshot AI's official CLI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "0.31.1",
-                package: "@moonshot-ai/kimi-code@0.31.1",
+                version: "0.33.0",
+                package: "@moonshot-ai/kimi-code@0.33.0",
                 cmd: "kimi",
                 args: &["acp"],
                 env: &[],
@@ -881,8 +881,8 @@ mod tests {
         );
         assert_npx_version(
             AgentType::Cline,
-            "3.0.49",
-            "cline@3.0.49",
+            "3.0.50",
+            "cline@3.0.50",
             Some("22.0.0"),
         );
         assert_npx_version(
@@ -893,8 +893,8 @@ mod tests {
         );
         assert_npx_version(
             AgentType::KimiCode,
-            "0.31.1",
-            "@moonshot-ai/kimi-code@0.31.1",
+            "0.33.0",
+            "@moonshot-ai/kimi-code@0.33.0",
             Some("22.19.0"),
         );
         assert_npx_version(
@@ -910,7 +910,7 @@ mod tests {
             "@xai-official/grok@0.2.118",
             Some("20.0.0"),
         );
-        assert_binary_version(AgentType::OpenCode, "1.18.11", "/releases/download/v1.18.11/");
+        assert_binary_version(AgentType::OpenCode, "1.18.14", "/releases/download/v1.18.14/");
         assert_uvx_version(
             AgentType::Hermes,
             "0.19.0",
