@@ -26,6 +26,7 @@ import {
   GitCommitHorizontal,
   GitMerge,
   Loader2,
+  MessageSquarePlus,
   MessageSquareText,
   Pencil,
   Play,
@@ -49,6 +50,13 @@ import {
   workTaskStart,
 } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
+import {
+  canSubmitFollowUp,
+  DEFAULT_FOLLOW_UP_INTENT,
+  followUpScenario,
+  FOLLOW_UP_SCENARIOS,
+  type FollowUpIntent,
+} from "@/lib/task-follow-up"
 import { formatTokenCount } from "@/lib/token-format"
 import { onTransportReconnect, subscribe } from "@/lib/platform"
 import { UnifiedDiffPreview } from "@/components/diff/unified-diff-preview"
@@ -154,8 +162,12 @@ export function TaskDetailSheet({
   const t = useTranslations("Tasks")
   const [events, setEvents] = useState<WorkTaskEvent[]>([])
   const [files, setFiles] = useState<WorkTaskChangedFile[]>([])
-  const [returnOpen, setReturnOpen] = useState(false)
-  const [returnText, setReturnText] = useState("")
+  // The composer under the action row. On a reviewed task it is a follow-up
+  // with its own scenario chips and send button; on a failed/canceled one it is
+  // just a note that rides the existing restart button.
+  const [composerOpen, setComposerOpen] = useState(false)
+  const [composerText, setComposerText] = useState("")
+  const [intent, setIntent] = useState<FollowUpIntent>(DEFAULT_FOLLOW_UP_INTENT)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteWorktree, setDeleteWorktree] = useState(false)
   const [diffFile, setDiffFile] = useState<string | null | false>(false)
@@ -227,8 +239,9 @@ export function TaskDetailSheet({
 
     setEvents([])
     setFiles([])
-    setReturnOpen(false)
-    setReturnText("")
+    setComposerOpen(false)
+    setComposerText("")
+    setIntent(DEFAULT_FOLLOW_UP_INTENT)
     void reload()
     let unsub: (() => void) | undefined
     let cancelled = false
@@ -258,6 +271,18 @@ export function TaskDetailSheet({
       setBusy(false)
     }
   }, [])
+
+  /// A restart that consumed the note closes the box with it, so the text
+  /// cannot be silently attached to a second restart the user did not mean.
+  const runRestart = useCallback(
+    (fn: () => Promise<unknown>) =>
+      run(async () => {
+        await fn()
+        setComposerOpen(false)
+        setComposerText("")
+      }),
+    [run]
+  )
 
   // Snapshot first (it carries the model the run actually used); otherwise the
   // resolved agent's display name, so a task that simply follows the folder's
@@ -291,6 +316,11 @@ export function TaskDetailSheet({
   // anything, so they sit in the bottom bar instead.
   const zoneActions: ZoneAction[] = []
   const isReview = task.status === "review" && !archived
+  // A note for a restart (failed / canceled): both stopped for a reason the
+  // user usually knows and the agent doesn't. It rides the existing primary
+  // rather than adding a second way to restart — an empty box leaves those
+  // buttons behaving exactly as they always did.
+  const note = composerOpen ? composerText.trim() || null : null
   if (isReview) {
     zoneActions.push({
       icon: GitMerge,
@@ -300,8 +330,8 @@ export function TaskDetailSheet({
     })
     zoneActions.push({
       icon: Undo2,
-      label: t("actionReturn"),
-      onClick: () => setReturnOpen((v) => !v),
+      label: t("actionFollowUp"),
+      onClick: () => setComposerOpen((v) => !v),
     })
     zoneActions.push({
       icon: Ban,
@@ -315,6 +345,11 @@ export function TaskDetailSheet({
       label,
       filled,
       onClick: () => run(() => workTaskArchive(task.id, !archived)),
+    })
+    const addNote = (): ZoneAction => ({
+      icon: MessageSquarePlus,
+      label: t("actionAddNote"),
+      onClick: () => setComposerOpen((v) => !v),
     })
     if (archived) {
       zoneActions.push(archive(t("actionUnarchive"), true))
@@ -346,8 +381,9 @@ export function TaskDetailSheet({
             icon: RotateCw,
             label: t("actionRetry"),
             filled: true,
-            onClick: () => run(() => workTaskRetry(task.id)),
+            onClick: () => runRestart(() => workTaskRetry(task.id, note)),
           })
+          zoneActions.push(addNote())
           zoneActions.push(archive(t("actionArchive")))
           break
         case "done":
@@ -358,8 +394,9 @@ export function TaskDetailSheet({
             icon: RotateCw,
             label: t("actionRequeue"),
             filled: true,
-            onClick: () => run(() => workTaskRequeue(task.id)),
+            onClick: () => runRestart(() => workTaskRequeue(task.id, note)),
           })
+          zoneActions.push(addNote())
           zoneActions.push(archive(t("actionArchive")))
           break
       }
@@ -367,14 +404,21 @@ export function TaskDetailSheet({
   }
 
   const hasTrailingAction = zoneActions.some((a) => a.trailing)
+  const scenario = followUpScenario(intent)
+  const composerPlaceholder = isReview
+    ? t(scenario.placeholderKey)
+    : task.status === "failed"
+      ? t("followUpPlaceholderRetry")
+      : t("followUpPlaceholderRequeue")
 
-  const submitReturn = () =>
+  const submitFollowUp = () =>
     run(async () => {
-      const feedback = returnText.trim()
-      if (!feedback) return
-      await workTaskReturn(task.id, feedback)
-      setReturnOpen(false)
-      setReturnText("")
+      const feedback = composerText.trim()
+      if (!canSubmitFollowUp(intent, feedback)) return
+      await workTaskReturn(task.id, feedback, intent)
+      setComposerOpen(false)
+      setComposerText("")
+      setIntent(DEFAULT_FOLLOW_UP_INTENT)
     })
 
   return (
@@ -609,26 +653,72 @@ export function TaskDetailSheet({
                     ))}
                   </div>
 
-                  {returnOpen ? (
-                    <div className="flex flex-col gap-1.5">
+                  {composerOpen ? (
+                    <div className="flex flex-col gap-2">
+                      {/* Scenario chips, reviewed tasks only. They pick the
+                          framing the agent receives, so they read as a choice
+                          of intent rather than of template — hence a labelled
+                          row of toggles instead of a dropdown of canned text.
+                          Not offered on a restart: there the note is context
+                          for a run whose purpose is already fixed. */}
+                      {isReview ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {FOLLOW_UP_SCENARIOS.map((option) => {
+                            const active = option.intent === intent
+                            return (
+                              <button
+                                key={option.intent}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => setIntent(option.intent)}
+                                className={cn(
+                                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[0.6875rem] font-medium transition-colors",
+                                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                  active
+                                    ? "border-primary bg-primary text-primary-foreground"
+                                    : "border-border bg-background text-muted-foreground hover:text-foreground"
+                                )}
+                              >
+                                <option.icon
+                                  className="size-3"
+                                  aria-hidden="true"
+                                />
+                                {t(option.labelKey)}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      ) : null}
                       <Textarea
                         className="bg-background"
-                        value={returnText}
-                        onChange={(e) => setReturnText(e.target.value)}
-                        placeholder={t("returnPlaceholder")}
+                        value={composerText}
+                        onChange={(e) => setComposerText(e.target.value)}
+                        placeholder={composerPlaceholder}
                         rows={3}
                         autoFocus
                       />
-                      <div className="flex justify-end">
-                        <Button
-                          type="button"
-                          size="sm"
-                          disabled={busy || !returnText.trim()}
-                          onClick={submitReturn}
-                        >
-                          {t("returnSubmit")}
-                        </Button>
-                      </div>
+                      {/* A follow-up is its own action, so it sends itself. A
+                          restart note is a modifier on the button above, and
+                          giving it a second send button would ask the user
+                          which of the two actually restarts the task. */}
+                      {isReview ? (
+                        <div className="flex justify-end">
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={
+                              busy || !canSubmitFollowUp(intent, composerText)
+                            }
+                            onClick={submitFollowUp}
+                          >
+                            {t("followUpSubmit")}
+                          </Button>
+                        </div>
+                      ) : (
+                        <p className="text-[0.6875rem] leading-snug text-muted-foreground">
+                          {t("followUpNoteHint")}
+                        </p>
+                      )}
                     </div>
                   ) : null}
                 </section>

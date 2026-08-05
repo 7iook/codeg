@@ -11,6 +11,7 @@ import { notifyWebUnauthorized } from "./transport/web-connection-store"
 import { getCurrentEffectiveAppLocale } from "./i18n"
 import { TurnBusyError, isTurnInProgressRejection } from "./turn-busy"
 import type { FolderThemeColor } from "./theme-presets"
+import type { FollowUpIntent } from "./task-follow-up"
 import type {
   AgentType,
   AgentDelegationDefaults,
@@ -2789,21 +2790,39 @@ export async function workTaskStartAll(
   return getTransport().call("work_task_start_all", { folderId })
 }
 
-export async function workTaskRetry(id: number): Promise<void> {
-  return getTransport().call("work_task_retry", { id })
+/** failed → queued. `note` (optional) reaches the retry prompt. */
+export async function workTaskRetry(
+  id: number,
+  note?: string | null
+): Promise<void> {
+  return getTransport().call("work_task_retry", { id, note: note ?? null })
 }
 
-/** canceled → todo (back onto the board; started again explicitly). */
-export async function workTaskRequeue(id: number): Promise<void> {
-  return getTransport().call("work_task_requeue", { id })
+/**
+ * canceled → todo (back onto the board; started again explicitly). `note`
+ * (optional) reaches the next run's prompt — a cancel usually had a reason.
+ */
+export async function workTaskRequeue(
+  id: number,
+  note?: string | null
+): Promise<void> {
+  return getTransport().call("work_task_requeue", { id, note: note ?? null })
 }
 
-/** Return a reviewed task to the agent with feedback. */
+/**
+ * Follow up on a reviewed task. `intent` picks the framing the agent receives
+ * (see `lib/task-follow-up`); omitted means `revise`.
+ */
 export async function workTaskReturn(
   id: number,
-  feedback: string
+  feedback: string,
+  intent?: FollowUpIntent
 ): Promise<void> {
-  return getTransport().call("work_task_return", { id, feedback })
+  return getTransport().call("work_task_return", {
+    id,
+    feedback,
+    intent: intent ?? null,
+  })
 }
 
 export async function workTaskCancel(id: number): Promise<void> {

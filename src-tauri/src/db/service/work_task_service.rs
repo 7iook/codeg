@@ -234,6 +234,37 @@ pub async fn list_events(
     Ok(rows.into_iter().map(event_to_info).collect())
 }
 
+/// The task's most recent events of the given kinds, newest first.
+///
+/// Two departures from `list_events`, both required by anything reasoning about
+/// the latest state rather than rendering a timeline:
+/// - **newest first.** `list_events` orders ASCENDING before applying its
+///   limit, so past `limit` events it returns the task's OLDEST rows and stops
+///   seeing recent ones entirely.
+/// - **by id, not timestamp.** The log is append-only with an autoincrement
+///   key, so id IS insertion order; `created_at` comes from the wall clock,
+///   which can tie within a transaction and can step backwards under an NTP
+///   correction.
+///
+/// `kinds` narrows the query rather than the result: filtering after the fact
+/// would let a burst of one kind (an agent reporting progress, say) push the
+/// rows the caller cares about past the limit.
+pub async fn recent_events_of_kinds(
+    conn: &DatabaseConnection,
+    task_id: i32,
+    kinds: &[&str],
+    limit: u64,
+) -> Result<Vec<WorkTaskEventInfo>, DbError> {
+    let rows = work_task_event::Entity::find()
+        .filter(work_task_event::Column::TaskId.eq(task_id))
+        .filter(work_task_event::Column::Kind.is_in(kinds.iter().copied()))
+        .order_by_desc(work_task_event::Column::Id)
+        .limit(limit)
+        .all(conn)
+        .await?;
+    Ok(rows.into_iter().map(event_to_info).collect())
+}
+
 /// Raw rows in the given statuses. Deliberately does NOT join the folder: the
 /// reconcile sweep must also converge tasks whose folder was removed mid-run.
 pub async fn list_by_status(
@@ -522,6 +553,26 @@ pub async fn claim_for_run(
     from: WorkTaskStatus,
     actor: &str,
 ) -> Result<Option<i32>, DbError> {
+    claim_for_run_with_action(conn, id, from, actor, None).await
+}
+
+/// `claim_for_run` plus a `user_action` event written in the SAME transaction
+/// as the CAS.
+///
+/// Both halves of that atomicity matter for an instruction the user attaches to
+/// the claim (review feedback, a retry note):
+/// - recorded before the CAS, a claim that LOSES leaves an orphan instruction
+///   in the log for some later generation to pick up;
+/// - recorded after the CAS commits, the task is already `queued` and a pump
+///   running concurrently can claim and launch it before the instruction is
+///   readable — the generation would then run without it.
+pub async fn claim_for_run_with_action(
+    conn: &DatabaseConnection,
+    id: i32,
+    from: WorkTaskStatus,
+    actor: &str,
+    action: Option<serde_json::Value>,
+) -> Result<Option<i32>, DbError> {
     let now = Utc::now();
     let txn = conn.begin().await?;
     let res = work_task::Entity::update_many()
@@ -562,6 +613,15 @@ pub async fn claim_for_run(
         .await?
         .map(|m| m.run_seq)
         .ok_or_else(|| DbError::NotFound(format!("work task {id}")))?;
+    // The instruction lands before the status change, so a newest-first scan
+    // that stops at the first user action never has to reason about ordering
+    // within this transaction.
+    if let Some(mut action) = action {
+        if let serde_json::Value::Object(map) = &mut action {
+            map.insert("run_seq".to_string(), serde_json::json!(run_seq));
+        }
+        record_event(&txn, id, "user_action", actor, Some(action)).await?;
+    }
     status_changed_event(&txn, id, actor, Some(from), WorkTaskStatus::Queued, None).await?;
     txn.commit().await?;
     Ok(Some(run_seq))
@@ -686,7 +746,15 @@ pub async fn auto_claim_next(
 
 /// canceled → todo ("requeue"): back to the board, worktree (if any) reused at
 /// the next start.
-pub async fn requeue_canceled(conn: &DatabaseConnection, id: i32) -> Result<bool, DbError> {
+/// canceled → todo, optionally carrying the note the user attached to the
+/// requeue. The note is written in the SAME transaction as the CAS: the moment
+/// this commits the task is schedulable, and an `auto_process` folder's pump
+/// can claim and launch it — a note written afterwards would lose that race.
+pub async fn requeue_canceled(
+    conn: &DatabaseConnection,
+    id: i32,
+    note: Option<&str>,
+) -> Result<bool, DbError> {
     let now = Utc::now();
     let txn = conn.begin().await?;
     let res = work_task::Entity::update_many()
@@ -711,6 +779,16 @@ pub async fn requeue_canceled(conn: &DatabaseConnection, id: i32) -> Result<bool
     if res.rows_affected != 1 {
         txn.rollback().await?;
         return Ok(false);
+    }
+    if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
+        record_event(
+            &txn,
+            id,
+            "user_action",
+            "user",
+            Some(serde_json::json!({ "action": "requeue", "note": note })),
+        )
+        .await?;
     }
     status_changed_event(
         &txn,
@@ -1937,7 +2015,7 @@ mod tests {
         );
 
         // Requeue resurrects it; the next claim bumps the generation.
-        assert!(requeue_canceled(&db.conn, t.id).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id, None).await.unwrap());
         let seq2 = claim_for_run(&db.conn, t.id, WorkTaskStatus::Todo, "user")
             .await
             .unwrap()
@@ -2296,7 +2374,7 @@ mod tests {
         // …and so does requeueing an archived canceled task.
         assert!(cancel(&db.conn, t.id).await.unwrap());
         assert!(set_archived(&db.conn, t.id, true).await.unwrap());
-        assert!(requeue_canceled(&db.conn, t.id).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id, None).await.unwrap());
         let row = get(&db.conn, t.id).await.unwrap();
         assert_eq!(row.status, WorkTaskStatus::Todo);
         assert!(row.archived_at.is_none());
