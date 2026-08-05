@@ -102,6 +102,13 @@ pub struct MergeParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompleteParams {
+    pub id: i32,
+    pub delete_worktree: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StartAllParams {
     /// `None` = every folder holding todos.
     #[serde(default)]
@@ -279,6 +286,15 @@ pub async fn work_task_merge(
     Json(params): Json<MergeParams>,
 ) -> Result<Json<()>, AppCommandError> {
     core::work_task_merge_core(params.id, params.message, params.delete_worktree)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn work_task_complete(
+    Json(params): Json<CompleteParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::work_task_complete_core(params.id, params.delete_worktree)
         .await
         .map_err(AppCommandError::from)?;
     Ok(Json(()))

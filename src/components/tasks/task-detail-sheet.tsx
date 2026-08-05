@@ -63,6 +63,7 @@ import { UnifiedDiffPreview } from "@/components/diff/unified-diff-preview"
 import { MessageResponse } from "@/components/ai-elements/message"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
+import { hasNothingToMerge } from "./task-acceptance"
 import { StatusChip, statusLabelKey } from "./task-card"
 import {
   AlertDialog,
@@ -129,6 +130,8 @@ interface TaskDetailSheetProps {
   /** Opens the page-owned read-only live session viewer. */
   onViewSession: (task: WorkTask) => void
   onMerge: (task: WorkTask) => void
+  /** Replaces merge when the task changed nothing (see `hasNothingToMerge`). */
+  onComplete: (task: WorkTask) => void
   onEdit: (task: WorkTask) => void
 }
 
@@ -157,6 +160,7 @@ export function TaskDetailSheet({
   folderName,
   onViewSession,
   onMerge,
+  onComplete,
   onEdit,
 }: TaskDetailSheetProps) {
   const t = useTranslations("Tasks")
@@ -322,12 +326,23 @@ export function TaskDetailSheet({
   // buttons behaving exactly as they always did.
   const note = composerOpen ? composerText.trim() || null : null
   if (isReview) {
-    zoneActions.push({
-      icon: GitMerge,
-      label: t("actionMerge"),
-      filled: true,
-      onClick: () => onMerge(task),
-    })
+    // A task that changed nothing has no merge to offer — accepting it IS the
+    // primary action (same swap the board card makes).
+    zoneActions.push(
+      hasNothingToMerge(task)
+        ? {
+            icon: CircleCheck,
+            label: t("actionComplete"),
+            filled: true,
+            onClick: () => onComplete(task),
+          }
+        : {
+            icon: GitMerge,
+            label: t("actionMerge"),
+            filled: true,
+            onClick: () => onMerge(task),
+          }
+    )
     zoneActions.push({
       icon: Undo2,
       label: t("actionFollowUp"),

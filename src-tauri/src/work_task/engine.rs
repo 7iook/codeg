@@ -1572,6 +1572,112 @@ impl TaskEngine {
         text.filter(|t| !t.trim().is_empty())
     }
 
+    // ── accept without merging ─────────────────────────────────────────────
+
+    /// Accept a reviewed task that produced nothing to land: no merge
+    /// generation, just review → done, optionally taking the worktree with it.
+    ///
+    /// The board only offers this when the recorded diff stat is empty, and
+    /// that stat is a snapshot from when the run settled — so git, not the row,
+    /// decides. The whole decision runs inside the folder's git lock, with the
+    /// CAS in the middle: check, settle and remove form one critical section,
+    /// leaving no window in which the task can gain a commit between the check
+    /// that cleared it and the `branch -D` that would take it away.
+    ///
+    /// Two probes, because neither alone sees everything the removal destroys:
+    /// a commit made on the work branch is invisible to `git status` but shows
+    /// up in the diff against the base, and an untracked file is the reverse.
+    /// Anything either one finds keeps the worktree on disk.
+    pub async fn complete_task(&self, task_id: i32, delete_worktree: bool) -> Result<(), String> {
+        let task = work_task_service::get_model(&self.db.conn, task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if task.status != WorkTaskStatus::Review {
+            return Err("task is not in review".to_string());
+        }
+
+        // Held across the check → CAS → removal. Uncontended in the common
+        // case: the merge path holds this only for its dispatch, not for the
+        // generation that follows.
+        let lock = self.folder_lock(task.folder_id).await;
+        let _guard = lock.lock().await;
+
+        if self.has_landable_changes(&task).await? {
+            return Err(
+                "this task changed files after all — merge it instead of completing it".to_string(),
+            );
+        }
+        if !work_task_service::complete_without_merge(&self.db.conn, task_id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err("task left review before it could be completed".to_string());
+        }
+        self.emit_upsert(task_id);
+
+        if delete_worktree {
+            if self.worktree_holds_uncommitted(&task).await {
+                let _ = work_task_service::set_cleanup_state(
+                    &self.db.conn,
+                    task_id,
+                    true,
+                    Some(
+                        "the worktree was kept: it still holds uncommitted files. Remove them, \
+                         then retry the cleanup."
+                            .to_string(),
+                    ),
+                )
+                .await;
+            } else {
+                self.remove_worktree_locked(task_id).await;
+            }
+            self.emit_upsert(task_id);
+        }
+        Ok(())
+    }
+
+    /// Whether the task worktree still has anything uncommitted (tracked edits
+    /// or untracked files). A git error reads as "clean": the removal path is
+    /// itself tolerant of a worktree that is already off disk, which is the
+    /// likeliest reason git could not answer here.
+    async fn worktree_holds_uncommitted(
+        &self,
+        task: &crate::db::entities::work_task::Model,
+    ) -> bool {
+        let Some(wt_id) = task.worktree_folder_id else {
+            return false;
+        };
+        let Ok(wt) = get_folder_core(&self.db, wt_id).await else {
+            return false;
+        };
+        task_git::has_changes(&wt.path).await.unwrap_or(false)
+    }
+
+    /// Live git truth for "would a merge still have something to take from this
+    /// task?" — including work committed on the branch after the run settled,
+    /// which `git status` reports as a clean worktree. Mirrors the changed-files
+    /// view the user reviewed (same base fallback), so the board's offer and
+    /// this check cannot disagree. A task whose worktree is already gone has
+    /// nothing to land.
+    async fn has_landable_changes(
+        &self,
+        task: &crate::db::entities::work_task::Model,
+    ) -> Result<bool, String> {
+        let Some(wt_id) = task.worktree_folder_id else {
+            return Ok(false);
+        };
+        let Some(base) = task.base_sha.clone().or_else(|| task.base_branch.clone()) else {
+            return Ok(false);
+        };
+        let wt = get_folder_core(&self.db, wt_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let files = task_git::diff_numstat(&wt.path, &base)
+            .await
+            .map_err(|e| format!("could not read the task's changes: {e}"))?;
+        Ok(!files.is_empty())
+    }
+
     // ── merge (two-stage, persisted intent, per-folder git mutex) ───────────
 
     /// Land a reviewed task on its base branch. Runs the full stage 0/A/B

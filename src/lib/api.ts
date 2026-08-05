@@ -2921,6 +2921,15 @@ export async function workTaskMerge(
   })
 }
 
+/** Finish a reviewed task that has nothing to merge (review → done), taking
+ *  its worktree with it when asked. Refused if the worktree changed after all. */
+export async function workTaskComplete(
+  id: number,
+  deleteWorktree: boolean
+): Promise<void> {
+  return getTransport().call("work_task_complete", { id, deleteWorktree })
+}
+
 export async function workTaskArchive(
   id: number,
   archived: boolean

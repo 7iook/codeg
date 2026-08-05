@@ -9,8 +9,10 @@
 //! - Every transition writes its `work_task_event` row in the SAME transaction
 //!   (and the CAS UPDATE is the transaction's first statement, so SQLite takes
 //!   the write lock up front — see the busy-snapshot pitfall).
-//! - `done` is written only by `merge_landed` and never rolls back; a failed
-//!   worktree cleanup surfaces as `cleanup_state='failed'` on the done row.
+//! - `done` is written only by `merge_landed` (a landed merge) and
+//!   `complete_without_merge` (a reviewed task with nothing to land), and never
+//!   rolls back; a failed worktree cleanup surfaces as `cleanup_state='failed'`
+//!   on the done row.
 
 use chrono::Utc;
 use sea_orm::sea_query::Expr;
@@ -1257,8 +1259,9 @@ pub async fn begin_merge(
     Ok(Some(run_seq))
 }
 
-/// merging → done. The ONLY writer of `done`; never rolls back. Used both by
-/// the live merge path and by crash recovery back-filling a landed merge.
+/// merging → done. The merge path's writer of `done` (the other is
+/// [`complete_without_merge`]); never rolls back. Used both by the live merge
+/// path and by crash recovery back-filling a landed merge.
 pub async fn merge_landed(
     conn: &DatabaseConnection,
     id: i32,
@@ -1293,6 +1296,46 @@ pub async fn merge_landed(
         Some(WorkTaskStatus::Merging),
         WorkTaskStatus::Done,
         Some(serde_json::json!({ "merge_commit": merge_commit })),
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(true)
+}
+
+/// review → done for a task that produced nothing to land: the user accepted
+/// it outright instead of merging an empty change set. The second writer of
+/// `done` (see [`merge_landed`]) — `merge_commit` stays NULL, and the caller
+/// has already checked git truth, so the CAS is the whole guard.
+pub async fn complete_without_merge(conn: &DatabaseConnection, id: i32) -> Result<bool, DbError> {
+    let now = Utc::now();
+    let txn = conn.begin().await?;
+    let res = work_task::Entity::update_many()
+        .col_expr(
+            work_task::Column::Status,
+            Expr::value(status_str(WorkTaskStatus::Done)),
+        )
+        // A refused merge attempt leaves its reason on the row; the task is
+        // finishing on purpose now, so that banner must not follow it.
+        .col_expr(work_task::Column::LastError, Expr::value(None::<String>))
+        .col_expr(work_task::Column::PendingMerge, Expr::value(None::<String>))
+        .col_expr(work_task::Column::FinishedAt, Expr::value(Some(now)))
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
+        .filter(work_task::Column::Id.eq(id))
+        .filter(work_task::Column::Status.eq(WorkTaskStatus::Review))
+        .filter(work_task::Column::DeletedAt.is_null())
+        .exec(&txn)
+        .await?;
+    if res.rows_affected != 1 {
+        txn.rollback().await?;
+        return Ok(false);
+    }
+    status_changed_event(
+        &txn,
+        id,
+        "user",
+        Some(WorkTaskStatus::Review),
+        WorkTaskStatus::Done,
+        Some(serde_json::json!({ "reason": "completed without merging: no changes" })),
     )
     .await?;
     txn.commit().await?;
@@ -2107,6 +2150,63 @@ mod tests {
         assert_eq!(got.last_error.as_deref(), Some("conflict"));
         let events = list_events(&db.conn, t.id, 100).await.unwrap();
         assert!(events.iter().any(|e| e.kind == "merge_conflict"));
+    }
+
+    /// A task that changed nothing finishes without a merge commit — from
+    /// review only, and once.
+    #[tokio::test]
+    async fn complete_without_merge_lands_done_from_review_only() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-complete").await;
+        let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
+
+        // A todo task is not up for acceptance.
+        assert!(!complete_without_merge(&db.conn, t.id).await.unwrap());
+
+        to_review(&db, t.id).await;
+        // A refused merge leaves its banner on the review row; finishing the
+        // task on purpose must not carry that error into Done.
+        let state = WorkTaskMergeState {
+            pre_merge_head: "abc".into(),
+            message: "m".into(),
+            strategy: "squash".into(),
+            delete_worktree: false,
+            auto_message: false,
+        };
+        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap().is_some());
+        assert!(merge_back_to_review(&db.conn, t.id, Some("nope".into()), None)
+            .await
+            .unwrap());
+        assert_eq!(
+            get(&db.conn, t.id).await.unwrap().last_error.as_deref(),
+            Some("nope")
+        );
+
+        assert!(complete_without_merge(&db.conn, t.id).await.unwrap());
+        let got = get(&db.conn, t.id).await.unwrap();
+        assert_eq!(got.status, WorkTaskStatus::Done);
+        // Nothing was merged, so nothing points at a merge commit.
+        assert!(got.merge_commit.is_none());
+        assert!(got.finished_at.is_some());
+        assert!(got.last_error.is_none());
+
+        // Terminal: a second acceptance and a late merge settle are no-ops.
+        assert!(!complete_without_merge(&db.conn, t.id).await.unwrap());
+        assert!(!merge_landed(&db.conn, t.id, "abc").await.unwrap());
+        assert_eq!(
+            get(&db.conn, t.id).await.unwrap().status,
+            WorkTaskStatus::Done
+        );
+
+        let events = list_events(&db.conn, t.id, 100).await.unwrap();
+        let settle = events
+            .iter()
+            .rfind(|e| e.kind == "status_changed")
+            .expect("status change");
+        assert_eq!(
+            settle.payload.as_ref().and_then(|p| p.get("to")).and_then(|v| v.as_str()),
+            Some("done")
+        );
     }
 
     #[tokio::test]

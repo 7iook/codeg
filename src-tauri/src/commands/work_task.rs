@@ -222,6 +222,16 @@ pub async fn work_task_merge_core(
         .map_err(DbError::Validation)
 }
 
+/// Finish a reviewed task that has nothing to land (review → done, no merge),
+/// optionally removing its worktree. Refused when the worktree turns out to
+/// hold changes after all — that task belongs on the merge path.
+pub async fn work_task_complete_core(id: i32, delete_worktree: bool) -> Result<(), DbError> {
+    engine()?
+        .complete_task(id, delete_worktree)
+        .await
+        .map_err(DbError::Validation)
+}
+
 /// Archive / unarchive a terminal task (pure DB; no engine needed). Archived
 /// tasks leave the default board view and the attention badge.
 pub async fn work_task_archive_core(
@@ -508,6 +518,12 @@ pub async fn work_task_merge(
     delete_worktree: bool,
 ) -> Result<(), DbError> {
     work_task_merge_core(id, message, delete_worktree).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_complete(id: i32, delete_worktree: bool) -> Result<(), DbError> {
+    work_task_complete_core(id, delete_worktree).await
 }
 
 #[cfg(feature = "tauri-runtime")]
