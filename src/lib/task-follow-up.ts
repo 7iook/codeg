@@ -20,6 +20,8 @@ import {
   type LucideIcon,
 } from "lucide-react"
 
+import type { AgentType, FolderDetail, WorkTask } from "./types"
+
 export type FollowUpIntent = "revise" | "continue" | "question" | "verify"
 
 /**
@@ -89,4 +91,51 @@ export function canSubmitFollowUp(
   text: string
 ): boolean {
   return text.trim().length > 0 || followUpScenario(intent).allowsEmpty
+}
+
+/** What the follow-up composer resolves its commands / references against. */
+export interface FollowUpComposerTarget {
+  /** Whose slash commands and skills are offered. */
+  agentType: AgentType
+  /** Working directory `@` references and the command probe run in. */
+  folderPath: string | null
+}
+
+/** The subset of a folder this resolution needs. */
+type FolderLike = Pick<FolderDetail, "id" | "path" | "default_agent_type">
+
+/**
+ * Where the follow-up box should look for files and commands.
+ *
+ * Path: the task's own WORKTREE when it has one. That is the checkout the agent
+ * has been working in, so it is what the user means by "the file I'm pointing
+ * at" — the project root would offer the pre-task state under paths the agent
+ * never sees. Falls back to the project folder (a task that never started has
+ * no worktree yet).
+ *
+ * Agent: the conversation's, which is what actually ran; then the task's own
+ * override, which is all we have before the conversation detail lands; then the
+ * folder default. `claude_code` is the last resort, mirroring the task editor —
+ * a wrong guess costs an empty command list, not a wrong launch (the follow-up
+ * resumes the task's existing session either way).
+ */
+export function followUpComposerTarget(args: {
+  task: WorkTask
+  /** Agent of the task's conversation, once its detail has loaded. */
+  conversationAgentType: AgentType | null
+  folders: FolderLike[]
+}): FollowUpComposerTarget {
+  const { task, conversationAgentType, folders } = args
+  const byId = (id: number | null) =>
+    id == null ? undefined : folders.find((f) => f.id === id)
+  const projectFolder = byId(task.folder_id)
+  const worktreeFolder = byId(task.worktree_folder_id)
+  return {
+    agentType:
+      conversationAgentType ??
+      task.config?.agent_type ??
+      projectFolder?.default_agent_type ??
+      "claude_code",
+    folderPath: worktreeFolder?.path ?? projectFolder?.path ?? null,
+  }
 }

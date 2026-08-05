@@ -53,6 +53,7 @@ import { toErrorMessage } from "@/lib/app-error"
 import {
   canSubmitFollowUp,
   DEFAULT_FOLLOW_UP_INTENT,
+  followUpComposerTarget,
   followUpScenario,
   FOLLOW_UP_SCENARIOS,
   type FollowUpIntent,
@@ -62,9 +63,13 @@ import { onTransportReconnect, subscribe } from "@/lib/platform"
 import { UnifiedDiffPreview } from "@/components/diff/unified-diff-preview"
 import { MessageResponse } from "@/components/ai-elements/message"
 import { AgentIcon } from "@/components/agent-icon"
+import type { RichComposerHandle } from "@/components/chat/composer/rich-composer"
 import { getAgentLabel } from "@/lib/custom-agents"
+import { useShortcutSettings } from "@/hooks/use-shortcut-settings"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { hasNothingToMerge } from "./task-acceptance"
 import { StatusChip, statusLabelKey } from "./task-card"
+import { TaskFollowUpComposer } from "./task-follow-up-composer"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -92,7 +97,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
-import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import type {
   AgentType,
@@ -164,6 +168,11 @@ export function TaskDetailSheet({
   onEdit,
 }: TaskDetailSheetProps) {
   const t = useTranslations("Tasks")
+  // Backs the follow-up composer's `@` references and `/` command probe. The
+  // whole list, not the opened one: a task's worktree folder is normally not
+  // among the folders the user has open.
+  const allFolders = useAppWorkspaceStore((s) => s.allFolders)
+  const { shortcuts } = useShortcutSettings()
   const [events, setEvents] = useState<WorkTaskEvent[]>([])
   const [files, setFiles] = useState<WorkTaskChangedFile[]>([])
   // The composer under the action row. On a reviewed task it is a follow-up
@@ -171,11 +180,14 @@ export function TaskDetailSheet({
   // just a note that rides the existing restart button.
   const [composerOpen, setComposerOpen] = useState(false)
   const [composerText, setComposerText] = useState("")
+  const composerRef = useRef<RichComposerHandle>(null)
   const [intent, setIntent] = useState<FollowUpIntent>(DEFAULT_FOLLOW_UP_INTENT)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteWorktree, setDeleteWorktree] = useState(false)
   const [diffFile, setDiffFile] = useState<string | null | false>(false)
   const [busy, setBusy] = useState(false)
+  /** Synchronous in-flight latch for the follow-up send (see submitFollowUp). */
+  const submittingRef = useRef(false)
   const reqRef = useRef(0)
 
   const taskId = task?.id ?? null
@@ -306,6 +318,13 @@ export function TaskDetailSheet({
   // Conversation truth first; a task that overrides the folder default carries
   // its own agent, and before the detail lands that override is all we have.
   const agentType = convAgentType ?? task.config?.agent_type ?? null
+  // The same resolution, plus a folder default and the worktree path, for the
+  // composer's commands / skills / file references.
+  const composerTarget = followUpComposerTarget({
+    task,
+    conversationAgentType: convAgentType,
+    folders: allFolders,
+  })
 
   // The user-authored brief, as typed (the agent receives the block form).
   const promptText = task.config?.display_text?.trim() || null
@@ -324,7 +343,15 @@ export function TaskDetailSheet({
   // user usually knows and the agent doesn't. It rides the existing primary
   // rather than adding a second way to restart — an empty box leaves those
   // buttons behaving exactly as they always did.
-  const note = composerOpen ? composerText.trim() || null : null
+  //
+  // Read from the editor when the button fires, never from the render's state:
+  // `composerText` trails the document by however long React takes to commit
+  // the keystroke, so a restart triggered right after typing would carry the
+  // previous value. Same rule as the follow-up send below.
+  const composerNote = (): string | null => {
+    if (!composerOpen) return null
+    return (composerRef.current?.getText() ?? composerText).trim() || null
+  }
   if (isReview) {
     // A task that changed nothing has no merge to offer — accepting it IS the
     // primary action (same swap the board card makes).
@@ -396,7 +423,8 @@ export function TaskDetailSheet({
             icon: RotateCw,
             label: t("actionRetry"),
             filled: true,
-            onClick: () => runRestart(() => workTaskRetry(task.id, note)),
+            onClick: () =>
+              runRestart(() => workTaskRetry(task.id, composerNote())),
           })
           zoneActions.push(addNote())
           zoneActions.push(archive(t("actionArchive")))
@@ -409,7 +437,8 @@ export function TaskDetailSheet({
             icon: RotateCw,
             label: t("actionRequeue"),
             filled: true,
-            onClick: () => runRestart(() => workTaskRequeue(task.id, note)),
+            onClick: () =>
+              runRestart(() => workTaskRequeue(task.id, composerNote())),
           })
           zoneActions.push(addNote())
           zoneActions.push(archive(t("actionArchive")))
@@ -428,9 +457,22 @@ export function TaskDetailSheet({
 
   const submitFollowUp = () =>
     run(async () => {
-      const feedback = composerText.trim()
+      // Straight from the editor: reference badges serialize to their inline
+      // token here, and this can't lag a keystroke behind the state.
+      const feedback = (composerRef.current?.getText() ?? composerText).trim()
       if (!canSubmitFollowUp(intent, feedback)) return
-      await workTaskReturn(task.id, feedback, intent)
+      // A ref, not `busy`: the send key is read out of a ref inside the
+      // editor's own keydown handler, so a second Enter can arrive before
+      // React has re-rendered with `busy` set. The backend's CAS would reject
+      // the loser anyway — this keeps it from surfacing as an error toast for
+      // a keypress the user is entitled to repeat.
+      if (submittingRef.current) return
+      submittingRef.current = true
+      try {
+        await workTaskReturn(task.id, feedback, intent)
+      } finally {
+        submittingRef.current = false
+      }
       setComposerOpen(false)
       setComposerText("")
       setIntent(DEFAULT_FOLLOW_UP_INTENT)
@@ -704,13 +746,36 @@ export function TaskDetailSheet({
                           })}
                         </div>
                       ) : null}
-                      <Textarea
-                        className="bg-background"
-                        value={composerText}
-                        onChange={(e) => setComposerText(e.target.value)}
+                      {/* The real composer, not a textarea: this is the step
+                          where naming a file or firing a command matters most.
+                          A note has no send action of its own, so it leaves
+                          `onSubmit` unwired and Enter stays a newline.
+                          `submitFollowUp` is handed over whole rather than
+                          wrapped in a guard that reads render state: the editor
+                          calls it out of a ref that a passive effect refreshes,
+                          so anything read here could be a render behind the
+                          keystroke that triggered it — it validates the live
+                          document itself. */}
+                      <TaskFollowUpComposer
+                        editorRef={composerRef}
+                        agentType={composerTarget.agentType}
+                        folderPath={composerTarget.folderPath}
+                        defaultText={composerText}
                         placeholder={composerPlaceholder}
-                        rows={3}
+                        ariaLabel={
+                          isReview ? t("actionFollowUp") : t("actionAddNote")
+                        }
                         autoFocus
+                        submitShortcut={shortcuts.send_message}
+                        newlineShortcut={shortcuts.newline_in_message}
+                        onChange={setComposerText}
+                        onSubmit={
+                          isReview
+                            ? () => {
+                                void submitFollowUp()
+                              }
+                            : undefined
+                        }
                       />
                       {/* A follow-up is its own action, so it sends itself. A
                           restart note is a modifier on the button above, and
