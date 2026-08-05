@@ -730,6 +730,10 @@ impl ConnectionManager {
         {
             let mut s = state_arc.write().await;
             if s.turn_in_flight {
+                tracing::debug!(
+                    connection_id = %conn_id,
+                    "[ACP] prompt rejected: a turn is already in flight"
+                );
                 return Err(AcpError::TurnInProgress);
             }
             s.turn_in_flight = true;
@@ -891,6 +895,10 @@ impl ConnectionManager {
         // InProgress or broadcasting a phantom user message. The frontend turns
         // this rejection into a queued message above the input box.
         if turn_in_flight {
+            tracing::debug!(
+                connection_id = %conn_id,
+                "[ACP] prompt rejected: a turn is already in flight"
+            );
             return Err(AcpError::TurnInProgress);
         }
 
@@ -1399,6 +1407,10 @@ impl ConnectionManager {
         // underneath us, but we never SET it: not setting the gate is precisely
         // why a dropped fork can't wedge the connection.
         if state_arc.read().await.turn_in_flight {
+            tracing::debug!(
+                connection_id = %conn_id,
+                "[ACP] fork rejected: a turn is already in flight"
+            );
             return Err(AcpError::TurnInProgress);
         }
 
