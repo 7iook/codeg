@@ -20,8 +20,8 @@
 | slug | 标题 | status | rounds | last review | related ADR | tags | 一句话 |
 |------|------|------|------|------|------|------|------|
 | [kiro-agent-integration](./kiro-agent-integration/design.md) | Kiro CLI 作为 ACP agent 接入 codeg · 设计 | converged | 3 | NEEDS_CHANGES | ADR-0001 | acp, agent-integration, kiro, mcp | 新增 SystemBinary 分布类型接入系统安装的 kiro-cli，复用 Cursor/Grok 的既有模式完成注册、会话解析、MCP 接管与启动参数注入。 |
-| [delegate-persona-passthrough](./delegate-persona-passthrough/design.md) | delegate_to_agent 支持透传自定义 subagent 人格(Kiro / Claude / Codex) · 设计 | drafting | 3 | NEEDS_CHANGES | — | delegation, subagent, persona, acp, kiro, claude-code, codex, broker | 给 delegate_to_agent 加可选 subagent_type,让主 AI 派任务时能点名 Kiro/Claude/Codex 里的自定义人格;Kiro 走 --agent 原生真人格,Claude/Codex 走首轮 preamble best-effort 变通。 |
 | [subagent-observatory](./subagent-observatory/design.md) | 常驻子智能体观察面板（委托 + 内部 SUB 统一观察） · 设计 | drafting | 0 | UNKNOWN | — | delegation, subagent, observability, ui, broker, cancel | 给委托子智能体与 Claude 内置 SUB 加一条常驻指示条与清单面板，让用户不滚消息流就能看到谁在跑并能就地取消；顺带修掉 cancel_task_by_id 对用户侧恒返 unknown 的归属校验缺陷。 |
+| [delegate-persona-passthrough](./delegate-persona-passthrough/design.md) | delegate_to_agent 支持透传自定义 subagent 人格(Kiro / Claude / Codex) · 设计 | shipped | 3 | NEEDS_CHANGES | — | delegation, subagent, persona, acp, kiro, claude-code, codex, broker | 给 delegate_to_agent 加可选 subagent_type,让主 AI 派任务时能点名 Kiro/Claude/Codex 里的自定义人格;Kiro 走 --agent 原生真人格,Claude/Codex 走首轮 preamble best-effort 变通。 |
 | [delegation-continue-session](./delegation-continue-session/design.md) | 委托子代理从一次性改为可续聊 + 用户侧交互入口 · 设计 | shipped | 3 | NEEDS_CHANGES | — | delegation, subagent, acp, lifecycle, broker | 拆掉 broker 的 one-shot 销毁让终态子会话保留可复用，对齐上游 PR |
 
 ### Legacy(未回填 front-matter · 需触碰时按 spec-deliverable §Spec Front-matter 补)

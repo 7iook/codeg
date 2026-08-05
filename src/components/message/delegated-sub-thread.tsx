@@ -26,6 +26,10 @@ import { useTranslations } from "next-intl"
 import { AgentIcon } from "@/components/agent-icon"
 import type { ToolCallState } from "@/lib/adapters/ai-elements-adapter"
 import { StatusBadge } from "@/components/message/delegation-status-badge"
+import {
+  PersonaLabel,
+  RequestedPersonaNote,
+} from "@/components/message/persona-label"
 import { SubAgentSessionDialog } from "@/components/message/sub-agent-session-dialog"
 import { useDelegationCardModel } from "@/hooks/use-delegation-card-model"
 
@@ -68,6 +72,8 @@ export function DelegatedSubThread({
     errorCode,
     childConversationId,
     childConnectionId,
+    appliedPersona,
+    requestedPersona,
     hasModel,
   } = useDelegationCardModel({
     parentToolUseId,
@@ -104,6 +110,7 @@ export function DelegatedSubThread({
               <span className="text-sm font-semibold text-foreground">
                 {agentType ? getAgentLabel(agentType) : t("unknownAgent")}
               </span>
+              <PersonaLabel persona={appliedPersona} className="text-xs" />
               {taskId && (
                 <span
                   className="shrink-0 font-mono text-xs text-muted-foreground"
@@ -118,6 +125,14 @@ export function DelegatedSubThread({
               <div className="text-xs text-muted-foreground whitespace-pre-wrap break-words line-clamp-1">
                 {task}
               </div>
+            )}
+            {/* Failure only: explain what persona was asked for, reusing the
+                existing error card rather than a new outcome field (R5.4). */}
+            {status === "err" && (
+              <RequestedPersonaNote
+                requestedPersona={requestedPersona}
+                className="text-xs"
+              />
             )}
           </div>
         </div>

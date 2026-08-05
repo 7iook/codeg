@@ -3183,6 +3183,13 @@ async fn inject_codeg_mcp(
         args.push("--disabled-agents".to_string());
         args.push(disabled_builtins.join(","));
     }
+    // Persona inventory for `delegate_to_agent`'s `subagent_type` description,
+    // scanned parent-side for the same reason the two flags above are computed
+    // here: the companion is a stdio translation layer and the parent owns
+    // "what is advertised". `persona_lists_args` returns an EMPTY vector when
+    // the host has no personas at all, which keeps the omit-when-empty
+    // contract above without a branch at this call site.
+    args.extend(collect_persona_lists_args());
     server = server.args(args);
     servers.push(McpServer::Stdio(server));
     Some(CompanionInjection {
@@ -3212,6 +3219,40 @@ fn delegate_target_args(disabled_wire_slugs: &[String]) -> (Vec<String>, Vec<Str
     disabled_builtins.sort();
     disabled_builtins.dedup();
     (custom_slugs, disabled_builtins)
+}
+
+/// Scan the three persona-supporting CLIs' `agents/` directories and build the
+/// `--persona-lists` argv tokens, or an EMPTY vector when the host defines no
+/// personas at all.
+///
+/// Read fresh at injection time, exactly like the delegate-target flags above:
+/// a persona the user just authored has to show up on the next launch without
+/// a restart, and a cache here would be one more thing to invalidate.
+///
+/// The Kiro side reuses `commands::acp::list_kiro_custom_agents`, which
+/// predates this stage and scans `*.json` (Kiro's real persona format) rather
+/// than the `*.md` the two hint-tier CLIs use; its entries are mapped into the
+/// shared shape rather than rescanned. Kiro ids are NOT re-filtered through
+/// `is_valid_persona_name` here: that inventory also drives the connection's
+/// own `--agent` selection (`verify_kiro_selected_agent_exists`), so narrowing
+/// it in this one consumer would make the advertised list disagree with the
+/// list the user picks from in settings. A Kiro persona whose stem the
+/// `subagent_type` grammar rejects is caught by the broker's own gate.
+fn collect_persona_lists_args() -> Vec<String> {
+    use crate::acp::delegation::persona::{list_personas_at, persona_lists_args, PersonaListEntry};
+
+    let kiro: Vec<PersonaListEntry> = crate::commands::acp::list_kiro_custom_agents()
+        .into_iter()
+        .map(|a| PersonaListEntry {
+            id: a.id,
+            description: a.description,
+        })
+        .collect();
+    let claude =
+        list_personas_at(&crate::parsers::claude::resolve_claude_config_dir().join("agents"));
+    let codex = list_personas_at(&crate::parsers::codex::resolve_codex_home_dir().join("agents"));
+
+    persona_lists_args(&kiro, &claude, &codex)
 }
 
 /// Resolve an MCP server `command` to an absolute path.

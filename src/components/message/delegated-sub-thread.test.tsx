@@ -521,3 +521,144 @@ describe("DelegatedSubThread (async ack semantics)", () => {
     )
   })
 })
+
+describe("DelegatedSubThread persona label", () => {
+  beforeEach(() => {
+    mockChildConnection = undefined
+    mockedHook.mockReturnValue({
+      binding: undefined,
+      detail: null,
+      loading: false,
+      error: null,
+    })
+  })
+
+  /** A broker ack/report as the parent tool output, MCP-envelope shaped. */
+  function outputWith(report: Record<string, unknown>): string {
+    return JSON.stringify({
+      content: [{ type: "text", text: "Delegation successful." }],
+      structuredContent: report,
+    })
+  }
+
+  it("shows the effective persona while the child is still running", () => {
+    // Backend R3-A2: `Native` is committed at spawn-Ok, i.e. on the running
+    // ack — so the label must appear from the ack, not only at terminal state.
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({ agent_type: "kiro", task: "review the spec" })}
+        output={outputWith({
+          status: "running",
+          child_conversation_id: 99,
+          applied_persona: { kind: "native", name: "plan-reality-recon" },
+        })}
+        state="output-available"
+      />
+    )
+    expect(screen.getByTestId("delegation-persona-label")).toHaveTextContent(
+      "· @plan-reality-recon"
+    )
+  })
+
+  it("dims a best-effort hint persona", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({ agent_type: "claude_code", task: "review" })}
+        output={outputWith({
+          status: "completed",
+          text: "done",
+          applied_persona: { kind: "hint", name: "code-reviewer" },
+        })}
+        state="output-available"
+      />
+    )
+    expect(screen.getByTestId("delegation-persona-label")).toHaveTextContent(
+      "· @code-reviewer (best-effort)"
+    )
+  })
+
+  it("greys out a persona an unsupported CLI dropped", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({ agent_type: "gemini", task: "review" })}
+        output={outputWith({
+          status: "completed",
+          text: "done",
+          applied_persona: {
+            kind: "ignored_unsupported_cli",
+            name: "plan-reality-recon",
+          },
+        })}
+        state="output-available"
+      />
+    )
+    expect(screen.getByTestId("delegation-persona-label")).toHaveTextContent(
+      "· @plan-reality-recon (ignored — CLI unsupported)"
+    )
+  })
+
+  /**
+   * Requirement 5.5 / R2-A4 — the anti-fallback guard. A nominated
+   * `subagent_type` with no `applied_persona` on a SUCCESSFUL round must show no
+   * persona label at all: the request is not evidence of the effect. If someone
+   * later "helpfully" falls back to `raw_input`, this is the test that reddens.
+   */
+  it("shows no persona label when none took effect, even though one was requested", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({
+          agent_type: "kiro",
+          task: "review",
+          subagent_type: "plan-reality-recon",
+        })}
+        output={outputWith({ status: "completed", text: "done" })}
+        state="output-available"
+      />
+    )
+    expect(screen.queryByTestId("delegation-persona-label")).toBeNull()
+    expect(screen.queryByTestId("delegation-requested-persona")).toBeNull()
+    expect(screen.queryByText(/plan-reality-recon/)).toBeNull()
+  })
+
+  /** Requirement 5.4: on a failure the nominated name IS shown, as an explicit
+   *  "requested" line on the existing error card — no new wire field. */
+  it("names the requested persona on a failure card", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({
+          agent_type: "kiro",
+          task: "review",
+          subagent_type: "plan-reality-recon",
+        })}
+        errorText={JSON.stringify({
+          status: "failed",
+          error_code: "invalid_persona",
+          message: "persona name violates grammar",
+        })}
+        state="output-error"
+      />
+    )
+    expect(
+      screen.getByTestId("delegation-requested-persona")
+    ).toHaveTextContent("requested: @plan-reality-recon")
+    // The request is NOT promoted into an effective-persona label.
+    expect(screen.queryByTestId("delegation-persona-label")).toBeNull()
+  })
+
+  it("renders no persona label for a legacy backend that omits the field", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({ agent_type: "codex", task: "review" })}
+        output={outputWith({ status: "running", child_conversation_id: 12 })}
+        state="output-available"
+      />
+    )
+    expect(screen.queryByTestId("delegation-persona-label")).toBeNull()
+  })
+})

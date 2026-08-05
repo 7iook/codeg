@@ -17,7 +17,10 @@
 //! `--custom-agents` optionally carries the `custom:<id>` slugs registered
 //! in the parent, so `delegate_to_agent`'s schema can offer them as targets;
 //! `--disabled-agents` optionally names the built-ins to drop from that
-//! schema so only agents enabled in settings are advertised.
+//! schema so only agents enabled in settings are advertised;
+//! `--persona-lists` optionally carries a base64 rendering of the personas
+//! defined on this host, spliced into `delegate_to_agent`'s `subagent_type`
+//! description so the LLM knows which personas it may nominate.
 //! Everything heavyweight — JSON-RPC dispatch, UDS round-trip, MCP tool
 //! schema, cancellation tracking — lives in
 //! `codeg_lib::acp::delegation::{companion, transport}` so it's
@@ -67,6 +70,15 @@ struct Args {
     /// only launchable targets are advertised. Omitted when nothing is
     /// disabled (disabled customs are simply left out of `--custom-agents`).
     disabled_agents: Option<String>,
+    /// Base64 (URL-safe, unpadded) rendered inventory of the personas defined
+    /// on this host, substituted into `delegate_to_agent`'s `subagent_type`
+    /// description in place of its `<<PERSONA_LISTS>>` marker. Base64 rather
+    /// than the CSV shape the two flags above use because persona
+    /// descriptions carry commas and newlines. Omitted when the host has no
+    /// personas at all (see `persona::render_persona_lists` — an empty
+    /// inventory must not send the flag, so a companion predating it keeps
+    /// working).
+    persona_lists: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -77,6 +89,7 @@ fn parse_args() -> Result<Args, String> {
     let mut features = None;
     let mut custom_agents = None;
     let mut disabled_agents = None;
+    let mut persona_lists = None;
 
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -126,9 +139,15 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| "--disabled-agents requires a value".to_string())?,
                 );
             }
+            "--persona-lists" => {
+                persona_lists = Some(
+                    iter.next()
+                        .ok_or_else(|| "--persona-lists requires a value".to_string())?,
+                );
+            }
             "--help" | "-h" => {
                 println!(
-                    "codeg-mcp --parent-connection-id <uuid> --socket-path <path> --token <secret> [--parent-pid <pid>] [--features delegation,feedback,ask,sessions,tasks] [--custom-agents custom:<id>,...] [--disabled-agents <agent>,...]"
+                    "codeg-mcp --parent-connection-id <uuid> --socket-path <path> --token <secret> [--parent-pid <pid>] [--features delegation,feedback,ask,sessions,tasks] [--custom-agents custom:<id>,...] [--disabled-agents <agent>,...] [--persona-lists <base64>]"
                 );
                 std::process::exit(0);
             }
@@ -144,6 +163,7 @@ fn parse_args() -> Result<Args, String> {
         features,
         custom_agents,
         disabled_agents,
+        persona_lists,
     })
 }
 
@@ -195,6 +215,10 @@ async fn main() -> ExitCode {
         features: CompanionFeatures::parse(args.features.as_deref()),
         custom_agents: parse_csv(args.custom_agents.as_deref()),
         disabled_agents: parse_csv(args.disabled_agents.as_deref()),
+        // Decode lives on the lib side (see `CompanionContext::decode_persona_lists`)
+        // so this binary stays a thin argv shim; an undecodable payload degrades
+        // to None rather than failing the launch.
+        persona_lists: CompanionContext::decode_persona_lists(args.persona_lists.as_deref()),
     };
 
     let stdin = tokio::io::stdin();

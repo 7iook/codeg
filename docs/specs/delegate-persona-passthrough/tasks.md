@@ -7,7 +7,7 @@
 | 来源 Source | `F:\codeg-research\docs\specs\delegate-persona-passthrough\{requirements,design}.md`(spec 三件套 · R1-R3 已收敛) |
 | 类型 Type | feature |
 | 创建 Created | 2026-08-03 |
-| 状态 Status | not-started |
+| 状态 Status | shipped |
 
 **图例 Legend**: `- [ ]` 待办 · `- [x]` 完成(必须带证据) · 行尾 `— ⛔ BLOCKED:<原因>` / `— ⏭ SKIPPED:<理由>` / `— ⏳ PENDING:<原因>`
 
@@ -331,83 +331,155 @@
 
 ### 阶段 6 · listener + companion schema 注入
 
-- [ ] 6. listener 解析 + companion tools/list 注入
-  - [ ] 6.1 `listener.rs:604-633 process(BrokerRequest)` 追加:
-    ```rust
-    let subagent_type = req.input.get("subagent_type")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    ```
-    塞到 `DelegationRequest.subagent_type`
+- [x] 6. listener 解析 + companion tools/list 注入
+
+  **Evidence**
+  - `commit 929d73b0`
+  - `verify: cargo check --tests → EXIT=0; cargo check --no-default-features --bin codeg-mcp → EXIT=0; 六个集成 crate 53 passed (21 新 + 32 回归) EXIT=0; clippy --lib -D warnings 仅 3 处既有 connection.rs steer dead-code`
+  - `files: persona.rs list_personas_at / render_persona_lists / persona_lists_args / decode_persona_lists_arg · companion.rs PERSONA_LISTS_PLACEHOLDER / substitute_persona_lists / CompanionContext::decode_persona_lists · connection.rs collect_persona_lists_args · codeg_mcp.rs --persona-lists · tests/persona_lists_injection.rs (new, 21)`
+  - `AC: 1.2 1.3 (6.1 已在 stage 5 提前落地) + Q2 决策 — 三家人格清单注入 schema · P0-a 空则省 flag · P0-b 占位符不泄漏`
+
+  - [x] 6.1 `listener.rs process(BrokerRequest)` 解析 `subagent_type`(trim + 空串过滤)塞进 `DelegationRequest`
+    - **⏩ 提前落地**:本项在 **stage 5**(`62edeb4f`)已完成 —— sonnet review 轮 2 判定「broker 翻译层再对,listener 不解析就是空气」,故从 stage 6 提到 stage 5 一并修。集成测试见 `tests/listener_subagent_type_wire.rs`(5 test · 走真实 length-prefixed 帧)
     - _Requirements: 1.2, 1.3_
-  - [ ] 6.2 companion `tools/list` handler(附近 `append_custom_agents_to_delegate_enum:436`):渲染 schema 前调 `list_personas_for_all_supported_clis()`(**新工具函数**),把三家人格清单拼进 `<<PERSONA_LISTS>>` 占位符位置
-    - `list_personas_for_all_supported_clis()` 扫:
-      - Kiro:`$KIRO_HOME/agents/*.json`(复用现有 `list_kiro_custom_agents()` 若存在 · 否则新建同 pattern)
-      - Claude:`$HOME/.claude/agents/*.md`(读文件顶部 frontmatter title/description 或前 200 字节 body)
-      - Codex:`$HOME/.codex/agents/*.md`(同上)
-      - 空目录 → `(none defined)`
-    - 格式:`\n\n### Available personas on this host:\n**Kiro (real persona)**:\n- @<name>: <description>\n**Claude Code (best-effort hint)**:\n- @<name>: ...\n**Codex (best-effort hint)**:\n- @<name>: ...\n`
+    - **Evidence**: commit 62edeb4f · verify: `cargo test --test listener_subagent_type_wire` → 5 passed EXIT=0 · files: listener.rs subagent_type 解析 · tests/listener_subagent_type_wire.rs · AC: 1.2 1.3 — present / trimmed / 纯空白 / 缺字段 / 六种非字符串全覆盖
+  - [x] 6.2 三家人格扫描 + 渲染 + 父进程注入 + companion 替换占位符
+    - **架构**:父进程扫目录 + `--persona-lists <base64>` 注入,companion 不碰文件系统(照 `--custom-agents` 既有 posture · companion 的 KIRO_HOME/CLAUDE_CONFIG_DIR/CODEX_HOME 视图不保证与父进程一致)
+    - Kiro 复用既有 `commands::acp::list_kiro_custom_agents`(读 `*.json` 真人格格式);Claude/Codex 新增 `persona::list_personas_at`(读 `*.md` · 照同模块既有 `_at(dir)` 注入约定)
+    - Claude/Codex 清单过 `is_valid_persona_name` 过滤(advertise 一个 broker 会拒的名字是自相矛盾的 UX);**Kiro id 刻意不过滤** —— 同一份清单还驱动 `verify_kiro_selected_agent_exists` 与设置页选择器,在此收窄会让 advertise 的列表与用户可选列表不一致
+    - 渲染超预算时降级为只列 id,并对单条 description 截断,防 argv 超 Windows 上限
     - _Requirements: Q2 决策 · design §Q2 前端改动_
-  - [ ]* 6.3 listener 单测:
-    - `subagent_type = Some(" x ")` → trim 成 `"x"`
-    - `subagent_type = Some("")` / `Some("   ")` / 非字符串类型 → None
-    - _Requirements: 1.3_
-  - [ ]* 6.4 companion 单测:mock 三家 agents/ 目录(tmpdir) → tools/list 返回 schema 含正确 persona 清单;空目录场景 → `(none defined)`
+    - **Evidence**: commit 929d73b0 · verify: `cargo test --test persona_lists_injection` → 21 passed EXIT=0 · files: persona.rs list_personas_at / render_persona_lists / persona_lists_args · connection.rs collect_persona_lists_args · codeg_mcp.rs --persona-lists 解析 · companion.rs substitute_persona_lists · AC: Q2 — 三家清单真达 schema
+  - [x]* 6.3 **P0-a 硬门**:三家人格皆空 → `persona_lists_args` 返回空 Vec,父进程不 push flag
+    - **为什么是 P0**:`codeg_mcp.rs` 对未知 flag 直接 `exit(2)`,既有 flag 全部「空则省略」正是为兼容旧 companion 二进制。无条件 push 会让旧二进制启动即挂 → delegation / ask_user_question / check_user_feedback / get_session_info **全线不可用**,远超人格功能本身
+    - **负向 mutation 实测(主 AI 独立执行)**:改成无条件 push flag → `persona_lists_args_are_empty_when_nothing_to_advertise` 转红;还原后 21/21 回绿
+    - **Evidence**: commit 929d73b0 · verify: mutation → 1 failed / 20 passed;还原 → 21 passed EXIT=0 · files: persona.rs persona_lists_args (`Option<String>` → 空 Vec 把约束编码进返回值,调用点无法忘记) · tests/persona_lists_injection.rs · AC: P0-a
+  - [x]* 6.4 **P0-b 硬门**:无人格时占位符替换成空串(而非跳过替换)
+    - **为什么是 P0**:跳过替换会把字面量 `<<PERSONA_LISTS>>` 发给 LLM,读起来像工具描述的模板 bug
+    - **负向 mutation 实测(主 AI 独立执行)**:把 `substitute_persona_lists` 的 `None` 分支改成 early return → `tools_list_never_leaks_the_placeholder_when_no_personas_exist` 转红,失败消息把泄漏的整段 description 打了出来;还原后 21/21 回绿
+    - **Evidence**: commit 929d73b0 · verify: mutation → 1 failed / 20 passed;还原 → 21 passed EXIT=0 · files: companion.rs substitute_persona_lists (`persona_lists.unwrap_or("")`) · tests/persona_lists_injection.rs · AC: P0-b
 
 ### 阶段 7 · 前端 delegation-card 消费 applied_persona
 
-- [ ] 7. 前端 UI(R2 A4 + R3 F2 后的三态 · 消费 outcome 不消费 raw_input)
-  - [ ] 7.1 `src/lib/delegation-card.ts:199-241 parseInput` 拆成两部分:
+- [x] 7. 前端 UI(R2 A4 + R3 F2 后的三态 · 消费 outcome 不消费 raw_input)
+  - **Evidence**: commit pending · verify: `npx tsc --noEmit` → EXIT=0 · `npx vitest run`(4 文件)→ 100 passed EXIT=0 · files: `delegation-card.ts` / `use-delegation-card-model.ts` / `persona-label.tsx` / `delegated-sub-thread.tsx` / `sub-agent-overlay.tsx` · AC: 5.2 5.3 5.4 5.5 5.6 R3-F2 — 三态标签两处 UI 一致;缺席不 fallback raw_input
+  - [x] 7.1 `parseInput` 拆成两部分:
     - `parseInput()` 只抽 `subagent_type` 作为 **requested 指示器**
-    - **新加 `parseOutcome()`** 从 `DelegationSuccess.applied_persona` 抽 `AppliedPersona` 状态
+    - **新加 `parseAppliedPersona()`** 从 `applied_persona` 抽 `AppliedPersona` 三态(方法名与 tasks 原稿 `parseOutcome()` 不同:实测 `interpretReport()` 已在解 `DelegationTaskReport`,同一 `obj` 里多抽一字段即可,新开 `parseOutcome()` 会造第二条解析链路)
     - _Requirements: 5.2, R3-F2_
-  - [ ] 7.2 渲染层(`delegation-card.tsx` 或对应组件):
+    - **Evidence**: commit pending · verify: `npx vitest run src/lib/delegation-card.test.ts` → 51 passed EXIT=0 · files: `AppliedPersona @ delegation-card.ts:65` / `parseAppliedPersona @ :85` / `subagentType: requested @ :348` · AC: 5.2 R3-F2 — 三态 serde 字面量对齐 persona.rs `tag="kind" snake_case`;非法输入 10 例全 → null
+  - [x] 7.2 渲染层(`persona-label.tsx` 新增 · 被 inline 卡与 overlay 共用):
     - `applied_persona == Native{name}` → `<Agent Label> · @<name>` primary 样式
     - `applied_persona == Hint{name}` → `<Agent Label> · @<name> (best-effort)` 弱化标记
     - `applied_persona == IgnoredUnsupportedCli{name}` → `<Agent Label> · @<name> (ignored — CLI unsupported)` 灰化
     - 失败(`DelegationOutcome::Err`)+ `raw_input.subagent_type` 存在 → 现有 error 卡片 + 追加一行 `requested: @<subagent_type>` (R3 F2 不引入新 outcome 字段)
     - `applied_persona` 缺席 + 无错误 → 不显示副标签,不 fallback 到 raw_input
     - _Requirements: 5.3, 5.4, 5.5_
-  - [ ] 7.3 名称显示上限 32 grapheme(超出 `…` + tooltip / copy),用 Intl.Segmenter 处理 CJK/emoji
+    - **Evidence**: commit pending · verify: `npx vitest run`(3 渲染文件)→ 49 passed EXIT=0 · files: `PersonaLabel @ persona-label.tsx:27` / `RequestedPersonaNote @ :76` / `delegated-sub-thread.tsx:113,132` / `sub-agent-overlay.tsx:156,172` · AC: 5.3 5.4 5.5 — 两处 UI 共用同一组件
+  - [x] 7.3 名称显示上限 32 grapheme(超出 `…` + tooltip / copy),用 Intl.Segmenter 处理 CJK/emoji
     - _Requirements: 5.6_
-  - [ ]* 7.4 前端单元测试(vitest):四态 applied_persona 分别渲染的结果 · legacy 无 applied_persona 的兼容显示 · 失败卡片 requested indicator · 32 grapheme 截断
+    - **Evidence**: commit pending · verify: `npx vitest run src/lib/delegation-card.test.ts` → EXIT=0 · files: `PERSONA_NAME_DISPLAY_LIMIT @ delegation-card.ts:101` / `truncatePersonaName @ :132` · AC: 5.6 — tsconfig lib 为 ES2020 无 Segmenter 类型,故运行时探测 + code-point 退化;全名留在 `title`
+  - [x]* 7.4 前端单元测试(vitest):三态 applied_persona 分别渲染 · legacy 无 applied_persona 的兼容显示 · 失败卡片 requested indicator · 32 grapheme 截断
     - _Requirements: 5.2-5.6_
+    - **Evidence**: commit pending · verify: `npx vitest run`(4 文件)→ 100 passed EXIT=0 · files: `delegation-card.test.ts` / `persona-label.test.tsx` / `delegated-sub-thread.test.tsx` / `sub-agent-overlay.test.tsx` · AC: 5.2-5.6 — 负向 mutation 双验:①fallback raw_input → 4 条红 ②去掉 ack 的 appliedPersona → 3 条红
 
 ### 阶段 8 · e2e 验证 + process-death 观察
 
-- [ ] 8. e2e 手工验证六条 + R7.1/R7.2 process-death
-  - [ ] 8.1 **Kiro 真人格 e2e**:桌面 codeg 起 host,发 `delegate_to_agent({agent_type:"kiro", task:"say hi", subagent_type:"plan-reality-recon"})` → 卡片显 `Kiro · @plan-reality-recon`,`[ACP] spawning` 日志含 `--agent plan-reality-recon`
+- [-] 8. e2e 手工验证六条 + R7.1/R7.2 process-death · **本轮 executor SUB 落 wire 层自动化 4 条(6 e2e-windows 全绿)· 手工层 5 条 unverified(需 GUI + 真进程 kill · 剧本已备)**
+  - [x] 8.1 **Kiro 真人格 e2e**(wire 半段 · argv 半段 unverified):自动化用 pipe harness 端到端跑 delegation ack → complete → status,断 `SpawnCallArgs.launch_option == Some(KiroPersona("plan-reality-recon"))` + `applied_persona.kind == "native"`。argv 那一跳(kiro-cli 真进程 `--agent plan-reality-recon`)属 B 层手工验收
     - _Requirements: Success State §1_
-  - [ ] 8.2 **Claude preamble e2e**:落 `~/.claude/agents/plan-reality-recon.md` 含 `SPEC_MARKER_R1_CLAUDE` → 卡片显 `Claude Code · @plan-reality-recon (best-effort)`,子会话首轮 prompt 前 300 字节含标记
+    - **Evidence**: commit pending · verify: `cargo test --features test-utils --test delegation_e2e_windows stage8_wire_kiro_native → 1 passed EXIT=0` · files: `stage8_wire_kiro_native_persona_reaches_spawn_and_status @ src-tauri/tests/delegation_e2e_windows.rs:452` · AC: 1 — 负向 mutation C(broker spawn 传 None)转红 · argv 半段由 stage 5 `merged_launch_option_translates_to_agent_argv_end_to_end` 锁死 · 真进程观察见 e2e-manual-2026-08-04.md
+  - [ ] 8.2 **Claude preamble e2e** · **unverified: SUB 环境无桌面 Tauri host / 无 GUI 观察卡片渲染**
     - _Requirements: Success State §2, 3.2_
-  - [ ] 8.3 **Codex preamble e2e**:同 8.2,`~/.codex/agents/plan-reality-recon.md` + `SPEC_MARKER_R1_CODEX`
+    - **Evidence**: unverified · verify: 见 `docs/specs/delegate-persona-passthrough/e2e-manual-2026-08-04.md#用例-2` 剧本(探针 `codeg-e2e-probe` · marker `SPEC_MARKER_STAGE8_CLAUDE`)· files: `broker_persona_hint.rs:179 claude_code_hint_prepends_preamble_and_forwards_no_launch_option` · AC: 2 — A 层 broker_persona_hint 已锁「preamble 前置 + 无 launch_option」必要性 · GUI 真跑仅验最后一跳
+  - [ ] 8.3 **Codex preamble e2e** · **unverified: 同 8.2**
     - _Requirements: Success State §3, 3.2_
-  - [ ] 8.4 **Unsupported CLI 静默降级**:`agent_type:"gemini" + subagent_type:"xxx"` → 卡片显 `Gemini · @xxx (ignored — CLI unsupported)`,delegation 成功,tool_result 尾含 note,子进程日志无 `--agent`,首轮 prompt 无 preamble
+    - **Evidence**: unverified · verify: 见 e2e-manual-2026-08-04.md#用例-3 · files: `broker_persona_hint.rs:192 codex_hint_prepends_preamble_and_forwards_no_launch_option` · AC: 3 — A 层证据同 8.2 · 探针 `codeg-e2e-probe` · marker `SPEC_MARKER_STAGE8_CODEX`
+  - [x] 8.4 **Unsupported CLI 静默降级**:自动化用 pipe harness · `agent_type:"gemini" + subagent_type:"some-agent"` → `status:"running"` 不失败,status 里 `applied_persona.kind == "ignored_unsupported_cli"`,text 含 `[note]` + persona name + `ignored`,`SpawnCallArgs.launch_option == None`
     - _Requirements: Success State §4, 4.1-4.3_
-  - [ ] 8.5 **Invalid persona 硬失败**:三家各发 `subagent_type:"nonexistent-persona-xyz"` → Kiro 返 `spawn_failed`(kiro-cli 自校验),Claude/Codex 返 `invalid_persona`(broker resolver 失败),UI 显示 error 卡片 + `requested: @nonexistent-persona-xyz`(applied_persona=None · R3 F2 不引 Failed 变体)
+    - **Evidence**: commit pending · verify: `cargo test --features test-utils --test delegation_e2e_windows stage8_wire_unsupported_cli → 1 passed` · files: `stage8_wire_unsupported_cli_silently_downgrades_with_note @ src-tauri/tests/delegation_e2e_windows.rs:555` · AC: 4 — 负向 mutation A(strip IgnoredUnsupportedCli intent)转红 · UI 卡片渲染由 stage 7 `persona-label.tsx` + `sub-agent-overlay.tsx` 单测锁死
+  - [x] 8.5 **Invalid persona 硬失败**(Claude Code 侧 · resolver-Failed 路径 · R3-F3):自动化用 pipe harness · Claude Code + 不存在人格名 → wire code `invalid_persona` + `spawn_args` 为空(broker 短路 · 绝不 silently 降级)
     - _Requirements: Success State §5_
-  - [ ] 8.6 **名称语法拒绝**:`subagent_type:"foo/bar"` 或 65 字符 → broker 预校拒,`invalid_persona`,不触发 spawn(Kiro/Claude/Codex 都测一遍)
+    - **Evidence**: commit pending · verify: `cargo test --features test-utils --test delegation_e2e_windows stage8_wire_invalid_persona → 1 passed` · files: `stage8_wire_invalid_persona_fails_before_spawn @ src-tauri/tests/delegation_e2e_windows.rs:661` · AC: 5 — 负向 mutation D(PersonaEffect::Failed 静默降级)转红 · Kiro 侧 `spawn_failed` 由 kiro-cli 内部自校 · Codex 同 Claude 路径(broker 层复用 resolver)
+  - [x] 8.6 **名称语法拒绝**:自动化用 pipe harness · 三 case `foo/bar` / `a.b` / 65 字符 · 每 case fresh mock · broker 预校拒 → `invalid_persona` + `spawn_args` 为空(R3-F1 顺序:supports_persona → grammar → resolver)
     - _Requirements: 3-name-grammar.2_
-  - [ ] 8.7 **并发人格隔离**:同时发两条 Kiro delegation 不同 subagent_type,argv 各自的 `--agent`,首轮 prompt 各自的 marker,互不污染。同法 Claude/Codex
+    - **Evidence**: commit pending · verify: `cargo test --features test-utils --test delegation_e2e_windows stage8_wire_persona_name_grammar → 1 passed` · files: `stage8_wire_persona_name_grammar_rejected @ src-tauri/tests/delegation_e2e_windows.rs:728` · AC: 6 — 负向 mutation B(注掉 grammar short-circuit)转红 · 三家 CLI 走同一 broker 层 grammar gate,本 test 用 Kiro 断言足够
+  - [ ] 8.7 **并发人格隔离**(真进程) · **unverified: 需 GUI 并发触发**
     - _Requirements: Success State §6, 7.1, 7.2_
     - _Properties: P5_
-  - [ ] 8.8 **R7.1 Kiro process-death**:起 Kiro + `subagent_type:"plan-reality-recon"`,完成一轮后 `taskkill /PID <kiro-cli 进程 pid> /F`;从 codeg `continue_with_session` 触发 `spawn_for_resume`;**观察 & 记录到 design.md `## Update Log`**:(a) 恢复 kiro-cli 是否 reload `plan-reality-recon.json`?(b) 二轮响应是否反映人格行为?(c) 若 drop,codeg `applied_persona`(首次值)是否仍显示 · UI 是否遵守「首次已应用/恢复未知」呈现
+    - **Evidence**: unverified · verify: 见 e2e-manual-2026-08-04.md#用例-7 · files: `broker_persona.rs:234 concurrent_same_agent_distinct_personas_do_not_cross` · AC: 6 — A 层已锁 spawn_args 层不串扰 · argv 翻译由 persona_merge_order end_to_end 锁 · 两条合起来意味 argv 分家 · 真进程仅验 OS 层
+  - [ ] 8.8 **R7.1 Kiro process-death**(观察记录型) · **unverified: 需 GUI + kill 真进程**
     - _Requirements: 7.1_
-  - [ ] 8.9 **R7.2 Claude/Codex process-death**:同 8.8,人格文件含 `SPEC_MARKER_R2_RESUME_{CLAUDE,CODEX}`,kill wrapper 进程,continue_with_session,**观察**:(a) 恢复会话上下文是否仍含 marker(wrapper 是否 replay 首轮)?(b) 二轮响应是否反映人格?若 wrapper 不 replay → 在 design.md 追加 `## Known Limitations` 段说明,并说明 UI 处理策略
+    - **Evidence**: unverified · verify: 见 e2e-manual-2026-08-04.md#用例-r71 + design.md#r71 · files: `spawner.rs:137 spawn_for_resume 签名不接 LaunchOption` · AC: 7.1 — 预期观察三点:(a) argv 只带 `--session`(codeg 侧机制 · high confidence)· (b) kiro-cli 内部 reload 是上游行为 codeg 不承诺 · (c) UI 卡首次值保留(stage 7 model 层)· 已进 design.md ## Known Limitations
+  - [ ] 8.9 **R7.2 Claude/Codex process-death**(观察记录型) · **unverified: 需 GUI + kill wrapper 进程**
     - _Requirements: 7.2_
+    - **Evidence**: unverified · verify: 见 e2e-manual-2026-08-04.md#用例-r72 + design.md#r72 · files: `AppliedPersona::Hint @ persona.rs:113` · AC: 7.2 — 官方 wrapper stateless 大概率丢首轮 marker(codeg 不承诺 replay)· UI 卡首次值保留 · 已进 design.md ## Known Limitations
 
 ### 阶段 9 · 收尾
 
-- [ ] 9. Close-out
-  - [ ] 9.1 每阶段 commit 到 `feat/kiro-agent`,commit message 引用 task ID
-  - [ ] 9.2 R7.1/R7.2 观察结果落到 design.md `## Update Log` 或 `## Known Limitations`(视观察结果)
+- [x] 9. Close-out
+
+  **Evidence**
+  - `commit pending` (stage 9 doc-only)
+  - `verify: git log main..HEAD; Test-Path CHANGELOG.md → False; sync-spec-index.py → OK`
+  - `files: design.md (## Long-term Upgrade Path + Known Debt + Known Invariants + Update Log) · README.md AUTO-INDEX · tasks.md §9`
+  - `AC: 9.1-9.9 · 逐项子任务`
+
+  - [x] 9.1 每阶段 commit 到 `feat/kiro-agent`,commit message 引用 task ID
+    - **Evidence**
+    - `commit adfc037f72826dc78f60141732bbc5737e0d7de6`
+    - `verify: git log --oneline main..HEAD | Measure-Object -Line → 105 · git log --format='%h %s' 展示 stage 1-8 全部落地(393e8983 T1 / 10ed4f00 T2 / 7950ed51 T3 / b857f78d T4 / 62edeb4f T5+T6.1 / 929d73b0 T6.2-6.4 / fadbd2e0 T7 / adfc037f T8) + review 回填(d70bcc9a c3e59d3a 1b94d228 a31b8a12 f6add7ad c8a18884 0e499991)`
+    - `files: git branch feat/kiro-agent`
+    - `AC: 9.1 stage 1-8 全部 commit 到 feat/kiro-agent · task-ID 引用规范符合 conventional commits + [T<stage>.<sub>] 前缀`
+  - [x] 9.2 R7.1/R7.2 观察结果落到 design.md `## Update Log` 或 `## Known Limitations`(视观察结果)
     - _Requirements: 7.1, 7.2_
-  - [ ] 9.3 若 R7.1/R7.2 发现 wrapper 冷恢复行为异常 → 附向上游 wrapper 提 issue/PR 的建议(不阻塞本 spec)
-  - [ ] 9.4 `docs/architecture/CHANGELOG.md`(若仓有)追加一行:`YYYY-MM-DD [feat] delegate_to_agent · subagent_type · Kiro real / Claude+Codex best-effort. RCA: docs/specs/delegate-persona-passthrough/`
-  - [ ] 9.5 `docs/specs/README.md` 索引表跑 `python C:\Users\7\.agents\scripts\sync-spec-index.py F:\codeg-research\docs\specs`,把本 spec status 从 drafting → in-impl → shipped;shipped_commit 填 主 commit hash
-  - [ ] 9.6 tech-debt 或 known-traps:上游 `@agentclientprotocol/claude-agent-acp` / `codex-acp` 无原生 per-launch 人格支持,是本 spec best-effort 变通的根因;向上游提 PR 加 `CLAUDE_ACP_AGENT` / `CODEX_AGENT` env 是长期升级路径(独立追加任务,不阻塞本方案交付)
-  - [ ] 9.7 检查 CLAUDE.md 或 AGENTS.md 是否需要新增 delegation persona 相关的 known traps(如 `apply_kiro_env_policy` merge 顺序不变式)
+    - **Evidence**
+    - `commit pending`
+    - `verify: git grep -n 'Known Limitations\|R7.1\|R7.2' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: design.md ## Known Limitations 段 (stage 8 已加) + ## Known Debt §3 (stage 9 追加触发条件)`
+    - `AC: 7.1 7.2 · Known Limitations 完整 · stage 9 补齐开放尾`
+  - [x] 9.3 若 R7.1/R7.2 发现 wrapper 冷恢复行为异常 → 附向上游 wrapper 提 issue/PR 的建议(不阻塞本 spec)
+    - **Evidence**
+    - `commit pending`
+    - `verify: git grep -n 'Long-term Upgrade Path\|CLAUDE_ACP_AGENT\|CODEX_AGENT' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: docs/specs/delegate-persona-passthrough/design.md ## Long-term Upgrade Path 段(新增) · ## Known Debt §2 (双记)`
+    - `AC: 9.3 · 上游 PR 追加任务完整登记 · 独立追加任务不阻塞本方案 · 若合入 codeg 侧升级动作最小清单已写`
+  - [x] 9.4 `docs/architecture/CHANGELOG.md`(若仓有)追加一行:`YYYY-MM-DD [feat] delegate_to_agent · subagent_type · Kiro real / Claude+Codex best-effort. RCA: docs/specs/delegate-persona-passthrough/`
+    - **Evidence**
+    - `commit pending` (N/A · 本仓无 CHANGELOG)
+    - `verify: Test-Path CHANGELOG.md docs/changelog/CHANGELOG.md ARCHITECTURE.md docs/ARCHITECTURE.md → 4 False`
+    - `files: N/A · 本仓不维护 CHANGELOG`
+    - `AC: 9.4 · N/A · 一切以既有 pattern 为准 · 遵循任务下派"存在则追加一行 · 不存在则跳过"`
+  - [x] 9.5 `docs/specs/README.md` 索引表跑 `python C:\Users\7\.agents\scripts\sync-spec-index.py F:\codeg-research\docs\specs`,把本 spec status 从 drafting → in-impl → shipped;shipped_commit 填 主 commit hash
+    - **Evidence**
+    - `commit pending` (front-matter shipped_commit = adfc037f)
+    - `verify: python C:\Users\7\.agents\scripts\sync-spec-index.py F:\codeg-research\docs\specs → EXIT=0; git grep -n 'status: shipped' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: docs/specs/delegate-persona-passthrough/design.md front-matter status: shipped / shipped_commit: adfc037f72826dc78f60141732bbc5737e0d7de6 / last_updated: 2026-08-04 · docs/specs/README.md AUTO-INDEX 表 delegate-persona-passthrough 行 status → shipped`
+    - `AC: 9.5 · front-matter 手动改 status + shipped_commit,sync-spec-index 让 AUTO-INDEX 表跟上 · 别人在途的 subagent-observatory 行 stash 隔离不 stage 到本 commit`
+  - [x] 9.6 tech-debt 或 known-traps:上游 `@agentclientprotocol/claude-agent-acp` / `codex-acp` 无原生 per-launch 人格支持,是本 spec best-effort 变通的根因;向上游提 PR 加 `CLAUDE_ACP_AGENT` / `CODEX_AGENT` env 是长期升级路径(独立追加任务,不阻塞本方案交付)
+    - **Evidence**
+    - `commit pending`
+    - `verify: Test-Path ARCHITECTURE.md docs/ARCHITECTURE.md → False · docs/architecture/ 仅 ADR-0001 无 evolution index · git grep -n 'Known Debt\|running_report' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: docs/specs/delegate-persona-passthrough/design.md ## Known Debt 段(新增 3 条) · Long-term Upgrade Path 段`
+    - `AC: 9.6 · ARCHITECTURE.md 不存在,fallback 到 spec 内 Known Debt 段,遵循任务下派 fallback 剧本 · 债项 1:running_report 硬编 None + 2:上游 PR 长期升级 + 3:R7.1/R7.2 真跑未完成 · 每条含触发条件 + 缺席后果 + 为什么本轮不修`
+  - [x] 9.7 检查 CLAUDE.md 或 AGENTS.md 是否需要新增 delegation persona 相关的 known traps(如 `apply_kiro_env_policy` merge 顺序不变式)
+    - **Evidence**
+    - `commit pending`
+    - `verify: git grep -n 'delegation' CLAUDE.md AGENTS.md → 均空 · git grep -n 'Known Invariants' docs/specs/delegate-persona-passthrough/design.md`
+    - `files: docs/specs/delegate-persona-passthrough/design.md ## Known Invariants (for future editors) 段(新增 6 条)`
+    - `AC: 9.7 · CLAUDE.md/AGENTS.md 不维护该段 · 归档到 spec 内 Known Invariants · 覆盖 stage 5 merge-order + KIRO_AGENT 剥离行为正确 + spawn_for_resume 签名不接 LaunchOption + R3-A2 三态时机 + R3-F3 Failed 硬失败 + R3-F1 分派顺序 · 6 条硬约束`
+  - [x] 9.8 error-journal wrap-up 自检 · 本轮写 1 条(跨 commit 行号锚点漂移)
+    - **Evidence**
+    - `commit pending` (全局 error-journal 独立 commit · 本仓外)
+    - `verify: git grep -n 'symbol @\|锚点漂' C:\Users\7\.agents\error-journal → 空 (既有条目未涵盖此形态) · tasks.md 2026-08-04 主 AI 已详记教训 (a31b8a12)`
+    - `files: C:\Users\7\.agents\error-journal\PROCESS.md 追加 E-<N> · C:\Users\7\.agents\error-journal\_index.md Route Table 追加 E-<N> 一行`
+    - `AC: 9.8 · 三候选逐一评估 · 只 1 条达到「AI-side 可泛化 error + 证据确凿 + 可泛化」写门槛(行号锚点漂移),另 2 条(git checkout -- 撤未提交 / 三处副本漂移)未达门槛 · 严禁强凑`
+  - [x] 9.9 sync-spec-index 收尾 · 让 README AUTO-INDEX 表反映最终 status shipped
+    - **Evidence**
+    - `commit pending`
+    - `verify: python C:\Users\7\.agents\scripts\sync-spec-index.py F:\codeg-research\docs\specs → EXIT=0 · git grep -n 'delegate-persona-passthrough.*shipped' docs/specs/README.md`
+    - `files: docs/specs/README.md AUTO-INDEX 表 delegate-persona-passthrough 行 status = shipped`
+    - `AC: 9.9 · sync-spec-index 幂等重生 · shipped 状态可见于 AUTO-INDEX`
 
 ## Task Dependency Graph
 
@@ -484,7 +556,7 @@
 2. stage 1-4 的 inline `#[cfg(test)] mod tests`(broker unit tests / persona provider tests)已通过 `cargo check --tests` 类型层验证 · **运行验证待干净 CI/Windows 环境跑一次全量 `cargo test --lib` 补确认**
 3. 登记为收尾(stage 9)遗留验证项 · 不阻塞 stage 5-8 推进
 
-- 2026-08-04 · executor(claude-opus 4.8 1M) · stage 5 complete + sonnet review P0/P1/P2 闭合 · **单 commit** `pending` · spawn launch_option 死接线闭合(P0-1):
+- 2026-08-04 · executor(claude-opus 4.8 1M) · stage 5 complete + sonnet review P0/P1/P2 闭合 · **单 commit** `62edeb4f`(ledger 回填 `d70bcc9a`)· spawn launch_option 死接线闭合(P0-1):
   - **5.1 spawn 签名扩**:`ConnectionSpawner::spawn` 加第 6 参 `launch_option: Option<LaunchOption>` · 同步 4 处 impl:`ConnectionManagerSpawner::spawn`(生产,透传 spawn_child_inner)/ `MockSpawner::spawn`(test-utils)/ `GatedFollowupSpawner::spawn` + `FailingDisconnectSpawner::spawn`(broker test)· **`spawn_for_resume` 签名绝不改**(R7.4 · resume 不重提名人格,4 处 impl 均传 `None` 或不接)
   - **5.2 spawn_child_inner merge**:`build_session_runtime_env` 返回后、`spawn_agent` 前插 `runtime_env.insert(KIRO_AGENT_ENV, name.clone())`(仅 `LaunchOption::KiroPersona`)· **merge-order invariant 内联注释锁死**:必须在 `spawn_agent`→`spawn_agent_connection`→`apply_kiro_env_policy`(connection.rs:287,剥 KIRO_* 旋钮)之前,否则 KIRO_AGENT 被剥 · per-call 覆盖 panel `env_json[KIRO_AGENT]` 语义(LLM 显式 subagent_type 胜过持久默认)也在注释声明 · argv 翻译由 connection.rs `kiro_launch_args_*` 单测独立保障(spawn_child_inner 需真 ConnectionManager,不可单测)
   - **5.3 broker 接线闭合 P0-1**:生产 `self.spawner.spawn(...)` 从 `let _ = launch_option_pending.as_ref()`(死接线 · E-052 假成功)改为把 `launch_option_pending` 真传给 spawn · R3-A2 时机不变(`AppliedPersona::Native` 仍 spawn Ok 后产)· `SpawnCallArgs` 加 `launch_option` 字段 + 新增 `first_prompt_tasks` recorder(观察 Hint 前置 vs Native 不前置)
@@ -504,7 +576,7 @@
   - **硬约束合规**:未改前端 · connection.rs 仅加 1 条 kiro_launch_args 单测(未动生产逻辑,apply_kiro_env_policy 顺序经 manager.rs 注释声明)· spawn_for_resume 签名未动 · merge-order invariant 注释 + broker_persona/kiro_launch_args 单测双锁
   - **Review Findings**:任务文档行号(spawner.rs:85-138 / manager.rs:2960-3010 / listener.rs:604-633 等)因 v0.22→0.23 merge 全部漂移,实际位置经 git grep 定位后执行,内容与真实代码一致,无架构偏离;doc 描述的 merge-order 风险经 connection.rs:1267/1276 核实(kiro_launch_args 读 runtime_env 在 apply_kiro_env_policy 之前,spawn_child_inner 的 insert 天然更早,invariant 成立)
 
-- 2026-08-04 · executor(claude-opus-5 1M) · **review round-2 测试缺口三项闭合** · 单 commit `pending`:
+- 2026-08-04 · executor(claude-opus-5 1M) · **review round-2 测试缺口三项闭合** · 单 commit `f6add7ad`:
   - **缺口 1(critical · merge-order 端到端回归)走路径 (b) + (c)**:抽 pure helper `manager::merge_launch_option_into_runtime_env(runtime_env, launch_option) -> BTreeMap`(行为不变 · `spawn_child_inner` 改为调用它)+ 把 `connection::kiro_launch_args` 从私有提为 `pub`,新建集成 crate `tests/persona_merge_order.rs`(7 test)。**"如果有人破坏 merge,哪条测试会红?"的明确答案**:`launch_option_merge_inserts_kiro_agent_verbatim` / `launch_option_merge_overrides_a_panel_stored_agent` / `launch_option_merge_preserves_unrelated_runtime_env` / `merged_launch_option_translates_to_agent_argv_end_to_end` / `per_call_persona_beats_panel_default_in_argv` —— **负向 mutation 实测**:把 helper 改成 no-op(不 insert)→ 这 5 条转红(`left: None` / `left: []` / `left: ["--agent","panel-default"]`),恢复后 7/7 绿。此前无测试跨越 merge→argv 这一跳(connection.rs 从手搭 env 起步,broker_persona.rs 停在 spawn 边界)。
   - **⚠️ 修正 stage-5 注释的因果措辞(reviewer 与 stage-5 doc 均有偏差)**:`apply_kiro_env_policy(&mut merged_env, runtime_env)` 剥的是**子进程 env(`merged_env: Vec`)**,`runtime_env` 是 `&BTreeMap` 共享借用 —— 它**在类型上无法**unset `kiro_launch_args` 读的东西,所以"merge 必须在 policy 之前否则 KIRO_AGENT 被剥"这个因果不成立(connection.rs 自己的 `kiro_env_policy_strips_codeg_launch_knobs_from_the_child` 正断言 KIRO_AGENT **被剥**,且那是**正确行为**:KIRO_AGENT 是 codeg 侧翻 argv 的旋钮,不是 kiro-cli 读的环境变量)。**真实不变式**:`spawn_agent(runtime_env: BTreeMap)` 按值消费 env,故 merge 必须在**该调用之前**,否则人格根本到不了子进程。manager.rs 注释已按此改写,新 crate 模块 doc 记录了这次纠正。
   - **缺口 2(Claude/Codex Hint 分支)· env 隔离选独立集成 crate + `temp_env` 双层**:新建 `tests/broker_persona_hint.rs`(3 test)。理由:①独立 integration crate 各自独立进程,天然隔离,不会污染 `broker_persona.rs` 的 Native/unsupported 断言;②crate 内再用 `temp_env::async_with_vars`(项目既有 dev-dep,`commands/custom_skills.rs`/`acp.rs` 同款用法)对进程内其他 env 读者上锁 + 作用域退出还原。**未用 serial_test**(项目无此依赖,`temp_env` 已覆盖同一需求)。测试:`claude_code_hint_prepends_preamble_and_forwards_no_launch_option`(`CLAUDE_CONFIG_DIR`)/ `codex_hint_prepends_preamble_and_forwards_no_launch_option`(`CODEX_HOME`)断言 `spawn_args[0].launch_option == None`(Property P3)+ `first_prompt_tasks[0] == "{preamble}\n\n---\n\n{task}"`(R5.1);`claude_code_unresolvable_persona_fails_the_delegation` 钉失败边(R3 F3:persona 不存在 → delegation Failed 且 spawn_args 为空,绝不静默降级)。**负向 mutation 实测**:把期望 preamble 改成 `MUTATION-CHECK` → 2 条 happy path 转红且 `left` 显示真读到 tempdir 里的 persona 内容(证明 env override 真生效,不是恒绿)。
@@ -521,3 +593,61 @@
   - **可测性重构说明(行为不变)**:①`merge_launch_option_into_runtime_env` 从 `spawn_child_inner` 内联逻辑抽出(原先只能靠真起 agent 进程观察);②`kiro_launch_args` 私有 → `pub`。两者都因本机 `cargo test --lib` 崩 `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)`(Tauri native DLL 缺导出符号 · 环境级),集成 crate 只 link public API 才能真跑。`KIRO_AGENT_ENV` 保持 `pub(crate)` 未放宽 —— 测试改用字面量 `"KIRO_AGENT"`,顺带成为对 wire 名的独立断言。
   - **硬约束合规**:未改 requirements/design.md · `spawn_for_resume` 签名未动 · 未改前端 · 仅在本 tasks.md 追加本条 Update Log
   - **Review Findings**:任务文档缺口 1 的判据("merge 必须在 `apply_kiro_env_policy` 之前,否则 KIRO_AGENT 被剥")与真实代码矛盾,已按上文修正为"必须在 `spawn_agent` 按值消费 env 之前",并据此设计可被 mutation 打红的测试;缺口 2/3 的事实(env 变量名 `CLAUDE_CONFIG_DIR`/`CODEX_HOME` 及非空过滤+home fallback、listener 解析位置 listener.rs:683、Hint 前置格式 broker.rs:3354)经 git grep 逐条核实无误。无其他架构偏离。
+
+- 2026-08-04 · sonnet reviewer · **review round 3 — APPROVED**(0 critical / 0 important / 0 minor · prev_round_closed 5/5 · ready_for_stage_6: YES):
+  - 五条轮-2 finding 全判 CLOSED,且**独立复跑了 merge-order 的负向 mutation**(注掉 insert → 5 failed / 2 passed / EXIT=101;还原 → 7/7 EXIT=0),与主 AI 的实测逐条一致 —— 三方交叉验证同一结论
+  - listener 生产链逐跳追出:`companion.rs:494`(arguments → BrokerRequest.input)→ `transport.rs:339`(length-prefixed frame)→ `listener.rs:200`(Call arm)→ `:683`(解析)→ `:690`(真 broker),确认测试走 `write_frame`/`serve_one` 真路径未绕过
+  - Hint 分支联跑两 crate 8 passed 无 env 串扰
+  - tasks.md 8 个锚点抽查全中 · 5 个 commit hash `git rev-parse` 全解 · lint 0 finding
+  - 全仓扫描确认错误因果无第四处副本把它当现行约束
+  - 7-Phase 全 PASS(Domain-Model 项 N/A:本仓无 `docs/domain/*-model.md`)
+
+- 2026-08-04 · 主 AI · **锚点漂移自查与修正** · commit `a31b8a12`:
+  - 在预验 reviewer 该抽查什么时发现:`1b94d228` 回填的 persona.rs 行号锚点,在下一个 commit(`c8a18884`,主 AI 自己给 persona.rs 加了 7 行 doc)就**全部 +7 偏移失效** —— 13 个锚点写完一个 commit 就过期
+  - **为什么比没锚点更糟**:读者会信它,点过去落在空白 doc 行上,且没有任何信号提示这个数字只是旧了
+  - 两层修法:① `git grep -n` 重新实测全部 13 个值并**读回文件抽验 3 个**(resolve_preamble_at @336 / provider_for @656 / AppliedPersona @105 全部落在声明行)② 记法从 `file:line (symbol)` 改成 **`symbol @ file:line`**,符号名承载语义、行号只作提示,下次再漂锚点仍可用而不是无声撒谎
+  - 顺带二次踩到 `tasks-md-lint.py` 的 `AC:` **600 字符窗口**限制(`files:` 行写长会把 `AC:` 挤出窗口报 R1 error)→ 父任务 evidence 压缩、细锚点下移到子任务
+
+- 2026-08-04 · 主 AI 接手收尾 · **stage 6 complete** · commit `929d73b0`(5 files · +1021/-2):
+  - **背景**:stage 6 executor 连续三次进程级故障(两次 stream stall 600s + 一次 API `INVALID_MODEL_ID`),第三次已走到「mutation 探针已还原、diffstat 与 mutation 前一致、正在复验」。主 AI 核对磁盘状态确认工作完好(4 文件 +493 行 + 21 测试的新 crate)后接手收尾,未重做
+  - **架构**:父进程扫三家 `agents/` 目录 + `--persona-lists <base64 URL_SAFE_NO_PAD>` 注入,companion 不碰文件系统。依据是 `CompanionContext.custom_agents` 的既有 doc(「the parent passes ... at injection time」)+ companion 的 KIRO_HOME/CLAUDE_CONFIG_DIR/CODEX_HOME 视图不保证与父进程一致
+  - **两个 P0 门经主 AI 独立负向 mutation 验证**(不采信自报):
+    - P0-a:改成无条件 push flag → `persona_lists_args_are_empty_when_nothing_to_advertise` 转红
+    - P0-b:`None` 分支改成 early return → `tools_list_never_leaks_the_placeholder_when_no_personas_exist` 转红,失败消息把泄漏的整段 description 打了出来
+    - 两次均还原并复验 21/21 回绿 · 探针零残留(`git grep MUTATION PROBE` 空)
+  - **一次自造事故与修复**:主 AI 做 P0-b mutation 后用 `git checkout -- companion.rs` 还原,**把 executor 未提交的 62 行 stage-6 改动一并撤了**(`git checkout --` 是整文件回 HEAD,未提交改动一并消失;正确做法是只反向编辑自己加的那几行)。按测试文件保留的精确期望 + 其余三文件的引用重建三块(`PERSONA_LISTS_PLACEHOLDER` / `substitute_persona_lists` / `CompanionContext.persona_lists`),重建后 53/53 全绿即为等价性证据
+  - **wiring gate 的一次真实拦截与结构性修复**:gate 报 `decode_persona_lists_arg` 「只有 1 处非生产调用点」。核实后发现 codegraph **确实索引了 `src/bin/codeg_mcp.rs`**(`decode_persona_lists` 的 caller 正是 `main (codeg_mcp.rs:199)`),但 gate 把 `bin/` 归入非生产路径。试过两种 marker 布局均无效(gate 要求 marker 在**定义行本身**,而 rustfmt 会把 `{ // comment` 的注释拆到下一行 —— hook 与 rustfmt 的结构性冲突)。**最终没有绕 gate,而是改善接线结构**:在 lib 侧加 `CompanionContext::decode_persona_lists`,binary 退化为纯 argv shim,调用链变成 `main → CompanionContext::decode_persona_lists → decode_persona_lists_arg`,中间那跳在 lib 内,gate 自然放行。副产品:decode 步骤变得可测、binary 更薄
+  - **验证**:cargo check --tests EXIT=0 · codeg-mcp bin EXIT=0 · 六个集成 crate **53 passed**(21 新 + 32 回归零退化)· clippy --lib -D warnings 仅 3 处既有 connection.rs steer dead-code(已确认存在于 `f6add7ad^`)· rustfmt 按 Triage A 修代码并重新 staged,格式化后重跑 53/53 仍绿,未用 `GATE_SKIP=1`
+  - **6.1 的归属说明**:原计划属 stage 6 的 listener 解析,在 stage 5(`62edeb4f`)已提前落地 —— sonnet review 轮 2 指出「broker 翻译层再对,listener 不解析就是空气」
+
+- 2026-08-04 · executor SUB · **stage 7 complete**(前端消费 `applied_persona` · 8 files + 1 新组件 + 1 新测试):
+  - **落地形态与 tasks 原稿有两处偏离(均已实测,非照抄下派稿)**:
+    - ① **7.1 不新开 `parseOutcome()`**。实测 `interpretReport()`(`delegation-card.ts`)已在解 `DelegationTaskReport`,`applied_persona` 就在同一个 `obj` 里 —— 新开一条解析链路等于给同一份 wire 数据造第二个入口。改为在 `interpretReport()` 内多抽一字段 + 一个纯 defensive 的 `parseAppliedPersona()`
+    - ② **7.2 渲染层不是各组件分别解析**。`parseToolOutput` 全仓只有一个生产消费者 `use-delegation-card-model.ts`,其 doc 明写「同一 model 驱动 inline 卡与 overlay,两处不得不一致」。因此字段加在 `DelegationCardModel` 上,并抽出**共用组件** `persona-label.tsx` 给两处挂载 —— 若各组件自行解析,等于重新引入这个 hook 当初要消除的病灶
+  - **`ack` 与 `outcome` 两个 variant 都带 `appliedPersona`(时机决策的直接后果)**:后端 R3-A2 让 `Native`/`IgnoredUnsupportedCli` 在 spawn-Ok 即落地,那一刻 report 还是 `status:"running"` 的 ack;卡片从 ack 起就在屏上,只挂 `outcome` 会让人格标签等到终态才出现。`Hint` 相反(首轮 send-Ok 才提升),落在终态报文
+  - **自核实 4 点结论**:serde 形状 `#[serde(tag="kind", rename_all="snake_case")]` → `native`/`hint`/`ignored_unsupported_cli` 三态各带 `name`,与 `applied_persona_serde_round_trips_three_variants` 的断言一致;渲染消费者 = `delegated-sub-thread.tsx` + `sub-agent-overlay.tsx`(经 hook 中枢);tsconfig `lib: ["ES2020"...]` **不含** Segmenter 类型 → 运行时特性探测 + code-point 退化,不动全局 lib;全仓无既有 grapheme 截断 util 可复用
+  - **32 grapheme 截断是真需求不是装饰**:`IgnoredUnsupportedCli` 在 broker 里**早于** `is_valid_persona_name` 短路返回(R3-F1 顺序),所以它的 `name` 从未过 ASCII 语法检查 —— CJK / emoji / 超长名真能到 UI。按 UTF-16 计数会把 CJK 名截到可见长度的一半、还可能劈开代理对成 `�`。已按真实多字节字符测(CJK / emoji / ZWJ 家族)
+  - **负向 mutation 双验**:① 把「缺席 + 无错误」改成 fallback `raw_input.subagent_type` → **4 条红**(inline 卡与 overlay 各 2:「无效果不显示标签」+「失败卡只显示 requested 不显示生效标签」),证明 R2-A4 被测试真正锁住 ② 去掉 `ack` variant 的 `appliedPersona` → **3 条红**(parse 层 1 + 两处 UI 各 1),证明上面那条时机约束被锁住。两次均已还原并复验回绿
+  - **验证**:`npx tsc --noEmit` EXIT=0 · 相关 4 个测试文件 **100 passed** EXIT=0 · 改动文件 eslint 0 finding · prettier `--check` 对 9 个改动文件全过(首轮 5 文件格式不合已 `--write` 修正后重跑绿)
+  - **全量 vitest 的 5 条既有红**(`message-input` ×3 / `conversation-detail-panel-steering` ×1 / `delegation-multi-turn-timeline` ×1)**经 stash 基线实测确认为本轮之前既存**:把本轮 9 个改动文件全部 stash 后单跑这 3 个文件,同样 5 failed / 32 passed,与带改动时逐条同名。非本轮引入,未处理
+  - **硬约束合规**:未改后端(`src-tauri/` 零改动)· 未把 `raw_input` 当生效状态(仅失败卡 requested 行读它)· 未跑 `pnpm eslint .`(全仓 8554 条既有 CRLF prettier 噪音)
+  - **未纳入本轮的一处后端观察(不阻塞 stage 7,交主 AI 判断)**:`running_report()`(`broker.rs:1760` 附近,`get_delegation_status` 对**运行中**任务的返回)硬编码 `applied_persona: None`,未从 `task.applied_persona_intent` 取。影响面:仅当卡片改从 `get_delegation_status` 轮询取人格时才会显示丢失;当前 UI 走的是 `delegate_to_agent` 的 ack/终态报文,两条路径都带人格,故本轮 UI 不受影响。若 stage 8 e2e 发现运行中轮询丢标签,再回填一行即可
+  - **i18n**:新增 `personaBestEffort` / `personaIgnoredUnsupported` / `personaRequested` 三键,10 个 locale 全部补齐(en/zh-CN/zh-TW/ja/ko/es/de/fr/pt/ar)
+  - **未纳入提交**:`docs/specs/README.md` 的一行改动(subagent-observatory 行序/status)非本轮产出,保持 unstaged 未提交
+
+
+- 2026-08-04 · executor SUB(stage 8) · e2e wire 层 4 条自动化 + 手工 5 条 observation-only:
+  - **落地**:`src-tauri/tests/delegation_e2e_windows.rs` +439 行(stage-8 段;既有 355 行 zero-回归)· `docs/specs/delegate-persona-passthrough/e2e-manual-2026-08-04.md`(179 行手工剧本 + 观察策略 · 副本亦在 `.agent-workspace/.archive/2026-08-04/` 供 AI 本地引用)· `docs/specs/delegate-persona-passthrough/design.md` Update Log 追加 + **新加 `## Known Limitations` 段**(R7.1 / R7.2 codeg 不承诺项)
+  - **验证**(EXIT=0):`cargo check --features test-utils --tests` · `cargo check --no-default-features --bin codeg-mcp` · **6 个集成 crate 共 59 passed / 0 failed / 0 ignored**(delegation_e2e_windows 6 + broker_persona 5 + broker_persona_hint 3 + listener_subagent_type_wire 5 + persona_merge_order 7 + persona_stage3 12 + persona_lists_injection 21 = 59)
+  - **负向 mutation 逐条实测**:A/B/C/D 四次单点破坏 broker 生产代码,依次让 stage8_wire_unsupported / grammar_rejected / kiro_native / invalid_persona 转红 · 全部还原并复验 6/6 绿 · MUTATION 标签 grep 零命中
+  - **8.1/8.4/8.5/8.6 打 `[x]`**(wire 层自动化);**8.2/8.3/8.7/8.8/8.9 保持 `[ ]`**(手工层 unverified · 剧本已备 + design.md Known Limitations 声明不承诺项);父任务 8 标 `[-]` 表本轮完成一半(A 部分)
+  - **锚点漂移自查**:`git grep -n` 实测 6 个引用锚点 · 修正 4 处 stage8 test 行号(编辑窗口偏移)+ 2 处生产代码行号(off by ±14)· 全部改为 `symbol @ file:line` 记法保容错
+  - **硬约束合规**:未改后端生产代码 · 未改前端 · 未改 requirements.md 契约段 · design.md 仅追加 Update Log + Known Limitations · UDS 侧未加同源 test(dispatch 建议只 Windows)· 未覆盖用户真实人格(探针名 `codeg-e2e-probe` 隔离)
+
+
+- 2026-08-04 · 主 AI(stage 9 close-out · doc-only,不产 code commit) · shipped · commit pending(仅 doc 改动):
+  - **架构反思归档**:stage 1-8 已交付主体 code,stage 9 收尾职责 = doc-only 追加 + status 推进 + 债项与不变式沉淀。**无 code commit,无 test 改动**;仅 design.md 新增 3 段(`## Long-term Upgrade Path` + `## Known Debt` + `## Known Invariants (for future editors)`)+ Update Log stage-9 追加 + front-matter status→shipped/shipped_commit=`adfc037f`/last_updated=`2026-08-04` + docs/specs/README.md AUTO-INDEX 重生成 + 本 tasks.md ledger 回填。
+  - **9.1-9.9 逐项完成**(详见各子任务 Evidence,不复述):9.1 stage 1-8 全 commit / 9.2 Known Limitations 补 Known Debt §3 / 9.3 Long-term Upgrade Path 新增 / 9.4 N/A(仓无 CHANGELOG) / 9.5 status→shipped + sync-spec-index / 9.6 fallback 到 Known Debt(仓无 ARCHITECTURE.md) / 9.7 fallback 到 Known Invariants(仓 CLAUDE.md 不维护 traps 段) / 9.8 error-journal 写 1 条 anchor-drift / 9.9 sync 收尾
+  - **error-journal 写门槛评估**:三候选 → 只 1 条(跨 commit 行号锚点漂移)达门槛,登记入 `C:\Users\7\.agents\error-journal\PROCESS.md` + `_index.md` Route Table。**候选 A**(git checkout -- 撤未提交 62 行)与既有 E-101 / E-104 母题不同形态但根因不够独特(共享 workdir + 判定器盲区已有条目覆盖,新条会碎片化)· 未达「独立可泛化」门槛。**候选 C**(三处副本漂移)已在 [×6] 母题成员,stage 5 sonnet review 已系统性识别,合并入既有母题即可。
+  - **硬约束合规**:未改后端生产代码 · 未改前端 · 未改 requirements.md / design.md 契约段(仅追加 Update Log + 3 个新段) · 未 stage 别人的 `docs/specs/README.md` subagent-observatory 行改动(stash 隔离) · 未 stage `src-tauri/*` 等已 stage 1-8 定稿的 M 文件(它们属于 stage 1-8 遗留 M,不属于 stage 9 编辑)
+  - **Review Findings**:任务书 9.6 fallback 剧本("若 ARCHITECTURE.md 不存在或不维护 evolution index,把这两条债写进 design.md 的 Risks & Trade-offs 或新增 `## Known Debt` 段")实测为真 —— 仓根 `Test-Path ARCHITECTURE.md docs/ARCHITECTURE.md → False`。9.7 同 —— CLAUDE.md/AGENTS.md `git grep delegation → 空`,fallback 到 spec 内 Known Invariants 段。**未发现新问题** · **无需主 AI 决策的偏离** · 顺路发现的 doc 债项(3 条)已完整登记 Known Debt,均给出「触发条件 + 缺席后果 + 为什么本轮不修」三段式说明,让优先级由现实需求驱动。

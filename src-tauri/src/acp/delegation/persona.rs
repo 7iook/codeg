@@ -676,6 +676,363 @@ pub fn provider_for(agent_type: AgentType) -> &'static dyn PersonaCapability {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// STAGE 6 · HOST PERSONA INVENTORY → `delegate_to_agent` SCHEMA
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Stages 1-5 made a NOMINATED persona work end to end. This stage closes the
+// discovery half: the calling LLM cannot nominate `@plan-reality-recon` unless
+// something tells it that persona exists on this host. The tool schema's
+// `subagent_type` description carries a `<<PERSONA_LISTS>>` placeholder (stage
+// 1) that the companion substitutes at `tools/list` time.
+//
+// **The PARENT scans, the companion does not.** `CompanionContext` already
+// establishes this for `custom_agents` / `disabled_agents`: the companion is a
+// pure stdio translation layer and the parent decides what to advertise. Two
+// concrete reasons it must stay that way here:
+//
+// 1. The companion's env view (`KIRO_HOME` / `CLAUDE_CONFIG_DIR` /
+//    `CODEX_HOME`) is not guaranteed to match the parent's, so a
+//    companion-side scan could advertise an inventory the broker then resolves
+//    differently — the advertisement contradicting the resolution.
+// 2. The parent already owns "what is advertised" (it subtracts disabled
+//    built-ins, appends registered customs). Splitting that decision across
+//    two processes would give the schema two sources of truth.
+//
+// The transport is therefore an argv flag, exactly like `--custom-agents`,
+// with one difference: descriptions contain commas and newlines, so the CSV
+// shape does not survive. The rendered markdown fragment is base64'd into a
+// single argv token instead (URL_SAFE_NO_PAD — no `=` padding and no `+` / `/`
+// to survive quoting on any platform).
+
+/// One advertisable persona: a `subagent_type`-nominable id plus a short
+/// blurb, as scanned out of a CLI's `agents/` directory.
+///
+/// Deliberately the same SHAPE as `commands::acp::KiroCustomAgent` (`id` =
+/// file stem = the nominable value, `description` = optional blurb) so the
+/// Kiro inventory — which already has a scanner predating this stage, over
+/// `*.json` rather than `*.md` — maps in with a field-wise conversion instead
+/// of a second scanner. Keeping this type free of any `commands::` dependency
+/// keeps [`render_persona_lists`] callable from anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonaListEntry {
+    /// File stem, already cleared through [`is_valid_persona_name`] — exactly
+    /// the value that goes into `delegate_to_agent`'s `subagent_type`.
+    pub id: String,
+    /// Frontmatter `description` (or `name`, or a leading-body summary), capped
+    /// at [`DESCRIPTION_CAP`] characters. `None` when the file could not be
+    /// read or carries nothing usable — the entry is still advertised, because
+    /// the stem alone is enough to nominate it.
+    pub description: Option<String>,
+}
+
+/// Per-entry description ceiling. User-authored persona blurbs run to
+/// paragraphs (`KIRO_AGENT_DESCRIPTION_CAP` in `commands::acp` exists for the
+/// same reason), and every byte here is multiplied by the number of personas
+/// and then inflated a third by base64 before it hits the argv budget.
+const DESCRIPTION_CAP: usize = 200;
+
+/// Total ceiling on the rendered fragment, before base64. argv is capped
+/// around 32 KiB on Windows and base64 inflates by ~33%, so 16 KiB of payload
+/// leaves the other flags (socket path, token, features) comfortable room.
+/// Exceeding it degrades to ids-only rather than truncating mid-entry.
+const RENDER_BUDGET: usize = 16 * 1024;
+
+/// The argv flag carrying the rendered inventory to the companion.
+///
+/// Public so the parent-side builder and the companion-side parser cannot
+/// drift apart on the spelling.
+pub const PERSONA_LISTS_FLAG: &str = "--persona-lists";
+
+/// Scan one CLI's `agents/` directory for advertisable `*.md` personas.
+///
+/// Mirrors `commands::acp::list_kiro_custom_agents_at`'s posture — a missing
+/// directory yields an empty list rather than an error (the common case on a
+/// fresh install), a single unusable file never hides the others, extension
+/// casing is the filesystem's business — with one gate the Kiro scanner does
+/// not need:
+///
+/// **Every advertised id must pass [`is_valid_persona_name`].** A stem like
+/// `foo.bar` is a legal filename but an illegal `subagent_type`, so
+/// advertising it would have the model nominate a name the broker then rejects
+/// with `invalid_persona` — an inventory that contradicts itself. Filtering
+/// here is the only place that can prevent it.
+///
+/// Unlike [`resolve_preamble_at`], a file that cannot be read or parsed is
+/// still LISTED (description-less): the stem is the identifier and it is
+/// valid, so the persona may well resolve at delegation time. Dropping it
+/// would hide a usable persona on the strength of a description we merely
+/// failed to summarize.
+///
+/// Takes the directory explicitly (`_at` convention, as used throughout this
+/// module and `commands::acp`) so tests can point it at a tempdir.
+pub fn list_personas_at(dir: &Path) -> Vec<PersonaListEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<PersonaListEntry> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| !e.eq_ignore_ascii_case("md"))
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // The self-consistency gate: only advertise what `subagent_type` will
+        // accept. Silent by design — a stray `README.notes.md` in the agents
+        // directory is not a misconfiguration worth warning about on every
+        // single launch.
+        if !is_valid_persona_name(id) {
+            continue;
+        }
+        // Description is best-effort: an unreadable / non-UTF-8 file still
+        // yields an advertisable entry.
+        let description = match std::fs::read_to_string(&path) {
+            Ok(raw) => summarize_persona_markdown(&raw),
+            Err(_) => {
+                tracing::warn!(
+                    "[persona] listing {} without a description (unreadable or not UTF-8)",
+                    path.display()
+                );
+                None
+            }
+        };
+        found.push(PersonaListEntry {
+            id: id.to_string(),
+            description,
+        });
+    }
+    // Stable order so the advertised schema does not reshuffle between reads —
+    // a churning tool description would look like a changing contract to any
+    // client that caches or diffs it.
+    found.sort_by(|a, b| a.id.cmp(&b.id));
+    found
+}
+
+/// Best-effort one-line blurb for a persona file: frontmatter `description`,
+/// else frontmatter `name`, else a summary of the leading body prose.
+///
+/// Hand-rolled rather than `serde_yaml`-parsed on purpose. The frontmatter here
+/// is arbitrary user YAML whose OTHER keys we have no business interpreting,
+/// and a strict parse would turn one malformed key into a lost description —
+/// whereas a line scan just misses the key it was looking for. This is also
+/// why a malformed fence is not an error: [`resolve_preamble_at`] hard-fails
+/// there because the frontmatter would otherwise flow into a PROMPT, but here
+/// nothing flows anywhere except a capped display string.
+fn summarize_persona_markdown(raw: &str) -> Option<String> {
+    let text = raw.strip_prefix('\u{FEFF}').unwrap_or(raw);
+
+    // Frontmatter region: between the opening fence and the closing lone
+    // `---`. An unclosed fence yields no region at all (rather than treating
+    // the whole file as frontmatter), so raw YAML can never reach the schema.
+    let front = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+        .and_then(|rest| {
+            rest.split_inclusive('\n')
+                .position(|line| line.trim_end_matches(['\r', '\n']).trim() == "---")
+                .map(|idx| {
+                    let end: usize = rest
+                        .split_inclusive('\n')
+                        .take(idx)
+                        .map(|line| line.len())
+                        .sum();
+                    &rest[..end]
+                })
+        });
+
+    if let Some(front) = front {
+        // `description` wins over `name`: it is the field written to describe
+        // the persona, whereas `name` is a label that often just restates the
+        // stem.
+        for key in ["description", "name"] {
+            if let Some(value) = front.lines().find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.trim() != key {
+                    return None;
+                }
+                let v = v.trim().trim_matches(['"', '\'']).trim();
+                (!v.is_empty()).then(|| v.to_string())
+            }) {
+                return Some(cap_description(&value));
+            }
+        }
+    }
+
+    // No usable frontmatter — summarize the body. Skip blank lines and
+    // markdown heading syntax, which describes the document's structure rather
+    // than the persona.
+    let body = front.map(|f| &text[f.len() + 4..]).unwrap_or(text);
+    let summary: String = body
+        .lines()
+        .map(|line| line.trim_start_matches('#').trim())
+        .filter(|line| !line.is_empty() && *line != "---")
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!summary.is_empty()).then(|| cap_description(&summary))
+}
+
+/// Truncate a description to [`DESCRIPTION_CAP`] characters (never bytes — a
+/// byte slice could split a multi-byte char and panic).
+fn cap_description(value: &str) -> String {
+    let flattened = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= DESCRIPTION_CAP {
+        return flattened;
+    }
+    let head: String = flattened.chars().take(DESCRIPTION_CAP).collect();
+    format!("{head}…")
+}
+
+/// Render the three inventories into the markdown fragment substituted into
+/// `delegate_to_agent`'s `subagent_type` description.
+///
+/// # `None` is load-bearing (P0-a)
+///
+/// Returning `None` for "all three empty" is what makes
+/// [`persona_lists_args`] omit the flag entirely. `codeg_mcp::parse_args` ends
+/// in `other => return Err(...)`, so an OLDER companion binary — a parent
+/// upgraded while the companion came from a previous install — exits 2 on an
+/// unknown flag, taking down delegation, `ask_user_question`,
+/// `check_user_feedback` and `get_session_info` wholesale. `connection.rs`
+/// omits `--custom-agents` / `--disabled-agents` when empty for exactly this
+/// reason. Encoding it as `Option` rather than an empty `String` means a caller
+/// cannot forget the check: there is nothing to push in the `None` arm.
+///
+/// # Why each family gets a line even when empty
+///
+/// A `(none defined)` line tells the model "this CLI has no personas", which is
+/// different information from a family's absence ("this CLI was not scanned").
+/// Only the all-three-empty case collapses, which returns the schema to
+/// byte-identical with the embedded file — the same semantics
+/// `custom_agents`'s empty case has.
+///
+/// The tier labels are not decoration: `kiro` genuinely reloads the persona
+/// definition (permissions, tools, prompt), while `claude_code` / `codex` get
+/// the markdown body prepended as a first-turn hint with no authority change.
+/// A model choosing a delegation target needs that distinction, and the
+/// `subagent_type` prose above the inventory already draws it.
+pub fn render_persona_lists(
+    kiro: &[PersonaListEntry],
+    claude: &[PersonaListEntry],
+    codex: &[PersonaListEntry],
+) -> Option<String> {
+    if kiro.is_empty() && claude.is_empty() && codex.is_empty() {
+        return None;
+    }
+    let families: [(&str, &[PersonaListEntry]); 3] = [
+        ("kiro (real persona)", kiro),
+        ("claude_code (best-effort hint)", claude),
+        ("codex (best-effort hint)", codex),
+    ];
+
+    let full = render_families(&families, true);
+    // Degrade to ids-only rather than truncating mid-entry (a half-written
+    // description reads as a corrupted schema) or dropping the inventory
+    // (which would lose it precisely on the hosts that have the most
+    // personas).
+    if full.len() <= RENDER_BUDGET {
+        return Some(full);
+    }
+    let ids_only = render_families(&families, false);
+    Some(ids_only)
+}
+
+/// Shared body of [`render_persona_lists`], with descriptions on or off.
+fn render_families(families: &[(&str, &[PersonaListEntry]); 3], with_descriptions: bool) -> String {
+    let mut out = String::from("\n\nPersonas defined on THIS host (scanned at launch):");
+    for (label, entries) in families {
+        out.push_str("\n- ");
+        out.push_str(label);
+        out.push_str(": ");
+        if entries.is_empty() {
+            out.push_str("(none defined)");
+            continue;
+        }
+        let rendered: Vec<String> = entries
+            .iter()
+            .map(|e| match (with_descriptions, e.description.as_deref()) {
+                (true, Some(d)) => format!("@{} — {}", e.id, d),
+                _ => format!("@{}", e.id),
+            })
+            .collect();
+        out.push_str(&rendered.join("; "));
+    }
+    out.push('\n');
+    out
+}
+
+/// Build the argv tokens carrying the inventory, or an EMPTY vector when there
+/// is nothing to advertise.
+///
+/// The empty return is P0-a (see [`render_persona_lists`]): the caller extends
+/// its arg vector with this unconditionally, so "omit the flag" needs no
+/// branch at the call site and cannot be forgotten there.
+pub fn persona_lists_args(
+    kiro: &[PersonaListEntry],
+    claude: &[PersonaListEntry],
+    codex: &[PersonaListEntry],
+) -> Vec<String> {
+    match render_persona_lists(kiro, claude, codex) {
+        Some(rendered) => vec![
+            PERSONA_LISTS_FLAG.to_string(),
+            encode_persona_lists_arg(&rendered),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// Base64-encode a rendered fragment for argv transport.
+///
+/// `URL_SAFE_NO_PAD`: no `=` padding and no `+` / `/`, so the token is a single
+/// shell-safe word on every platform. The payload itself contains newlines,
+/// em-dashes and arbitrary user prose, none of which survives raw in argv
+/// across Windows' `CommandLineToArgvW` quoting rules.
+fn encode_persona_lists_arg(rendered: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine as _};
+    B64.encode(rendered)
+}
+
+/// Decode a `--persona-lists` value back into the fragment to substitute.
+///
+/// Degrades to `None` on anything unusable (invalid base64, non-UTF-8, empty)
+/// instead of failing the launch. The parent always encodes correctly, so this
+/// only fires on a parent/companion version skew — and serving the schema
+/// without the inventory is strictly better than serving no tools at all,
+/// which is the same defensive posture `append_custom_agents_to_delegate_enum`
+/// takes on a shape mismatch.
+///
+/// Consumed through `CompanionContext::decode_persona_lists`, which the
+/// `codeg-mcp` binary calls while assembling its context from argv.
+pub fn decode_persona_lists_arg(raw: &str) -> Option<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine as _};
+    if raw.is_empty() {
+        return None;
+    }
+    let bytes = B64
+        .decode(raw)
+        .map_err(|e| {
+            tracing::warn!("[persona] ignoring undecodable --persona-lists value: {e}");
+        })
+        .ok()?;
+    let text = String::from_utf8(bytes)
+        .map_err(|e| {
+            tracing::warn!("[persona] ignoring non-UTF-8 --persona-lists value: {e}");
+        })
+        .ok()?;
+    (!text.is_empty()).then_some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
