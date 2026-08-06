@@ -1457,6 +1457,7 @@
       "sectionOrderFoldersFirst": "資料夾在上",
       "sectionOrderChatsFirst": "聊天在上",
       "statusRunningBadge": "運行中",
+      "runningCountBadge": "{count} 個會話進行中",
       "statusCancelledBadge": "已取消",
       "worktreeRemovedBadge": "來源 worktree 已刪除",
       "conversationCountUnit": "{count} 條",

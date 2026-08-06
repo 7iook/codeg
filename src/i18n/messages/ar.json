@@ -1457,6 +1457,7 @@
       "sectionOrderFoldersFirst": "المجلدات في الأعلى",
       "sectionOrderChatsFirst": "المحادثة في الأعلى",
       "statusRunningBadge": "قيد التشغيل",
+      "runningCountBadge": "{count} جلسة قيد التشغيل",
       "statusCancelledBadge": "ملغى",
       "worktreeRemovedBadge": "تمت إزالة شجرة العمل الأصلية",
       "conversationCountUnit": "{count} محادثة",

@@ -1457,6 +1457,7 @@
       "sectionOrderFoldersFirst": "フォルダを上に",
       "sectionOrderChatsFirst": "チャットを上に",
       "statusRunningBadge": "実行中",
+      "runningCountBadge": "{count} 件の会話が実行中",
       "statusCancelledBadge": "キャンセル済み",
       "worktreeRemovedBadge": "元の worktree は削除済み",
       "conversationCountUnit": "{count} 件",

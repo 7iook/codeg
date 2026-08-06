@@ -1457,6 +1457,7 @@
       "sectionOrderFoldersFirst": "Dossiers en haut",
       "sectionOrderChatsFirst": "Discussion en haut",
       "statusRunningBadge": "En cours",
+      "runningCountBadge": "{count, plural, one {# session en cours} other {# sessions en cours}}",
       "statusCancelledBadge": "Annulé",
       "worktreeRemovedBadge": "Worktree d'origine supprimé",
       "conversationCountUnit": "{count, plural, one {# conversation} other {# conversations}}",

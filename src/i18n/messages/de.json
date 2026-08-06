@@ -1457,6 +1457,7 @@
       "sectionOrderFoldersFirst": "Ordner oben",
       "sectionOrderChatsFirst": "Chat oben",
       "statusRunningBadge": "Läuft",
+      "runningCountBadge": "{count, plural, one {# laufende Sitzung} other {# laufende Sitzungen}}",
       "statusCancelledBadge": "Abgebrochen",
       "worktreeRemovedBadge": "Quell-Worktree entfernt",
       "conversationCountUnit": "{count, plural, one {# Konversation} other {# Konversationen}}",
