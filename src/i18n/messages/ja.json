@@ -2638,7 +2638,9 @@
             "description": "設定で有効にすると、ここで使用できます。",
             "action": "有効にする",
             "hint": "スキルが無効です"
-          }
+          },
+          "scrollPrev": "前のスキルを表示",
+          "scrollNext": "次のスキルを表示"
         }
       },
       "agentSelector": {

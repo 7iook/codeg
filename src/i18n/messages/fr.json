@@ -2638,7 +2638,9 @@
             "description": "Activez-la dans les Paramètres pour l’utiliser ici.",
             "action": "Activer",
             "hint": "Compétence non activée"
-          }
+          },
+          "scrollPrev": "Afficher les compétences précédentes",
+          "scrollNext": "Afficher plus de compétences"
         }
       },
       "agentSelector": {

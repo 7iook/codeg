@@ -2638,7 +2638,9 @@
             "description": "Ative-a nas Configurações para usá-la aqui.",
             "action": "Ativar",
             "hint": "Habilidade não ativada"
-          }
+          },
+          "scrollPrev": "Mostrar habilidades anteriores",
+          "scrollNext": "Mostrar mais habilidades"
         }
       },
       "agentSelector": {

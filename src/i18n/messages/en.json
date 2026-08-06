@@ -2638,7 +2638,9 @@
             "description": "Enable it in Settings to use it here.",
             "action": "Enable",
             "hint": "Skill not enabled"
-          }
+          },
+          "scrollPrev": "Show previous skills",
+          "scrollNext": "Show more skills"
         }
       },
       "agentSelector": {

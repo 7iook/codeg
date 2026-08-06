@@ -2638,7 +2638,9 @@
             "description": "Aktiviere ihn in den Einstellungen, um ihn hier zu nutzen.",
             "action": "Aktivieren",
             "hint": "Skill nicht aktiviert"
-          }
+          },
+          "scrollPrev": "Vorherige Skills anzeigen",
+          "scrollNext": "Weitere Skills anzeigen"
         }
       },
       "agentSelector": {

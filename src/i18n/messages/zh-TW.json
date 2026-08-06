@@ -2638,7 +2638,9 @@
             "description": "前往設定啟用後即可在此使用。",
             "action": "前往啟用",
             "hint": "技能未啟用"
-          }
+          },
+          "scrollPrev": "顯示上一組技能",
+          "scrollNext": "顯示下一組技能"
         }
       },
       "agentSelector": {
