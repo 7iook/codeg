@@ -4551,7 +4551,6 @@
     "syncDone": "{synced}개 세션을 집계했습니다",
     "syncFailed": "일부 세션을 읽지 못했습니다",
     "syncBusy": "이미 새로 고침이 진행 중입니다",
-    "staleHint": "아직 집계되지 않은 세션이 {count}개 있습니다.",
     "lastSynced": "{time}에 업데이트",
     "lastSyncedNever": "집계된 적 없음",
     "tileTotal": "총 토큰",

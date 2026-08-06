@@ -4551,7 +4551,6 @@
     "syncDone": "已统计 {synced} 个会话",
     "syncFailed": "部分会话读取失败",
     "syncBusy": "已有一次刷新在进行中",
-    "staleHint": "还有 {count} 个会话尚未统计。",
     "lastSynced": "更新于 {time}",
     "lastSyncedNever": "尚未统计",
     "tileTotal": "总 Token",

@@ -4551,7 +4551,6 @@
     "syncDone": "已統計 {synced} 個工作階段",
     "syncFailed": "部分工作階段讀取失敗",
     "syncBusy": "已有一次重新整理進行中",
-    "staleHint": "還有 {count} 個工作階段尚未統計。",
     "lastSynced": "更新於 {time}",
     "lastSyncedNever": "尚未統計",
     "tileTotal": "總 Token",

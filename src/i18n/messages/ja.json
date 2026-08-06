@@ -4551,7 +4551,6 @@
     "syncDone": "{synced} 件のセッションを集計しました",
     "syncFailed": "一部のセッションを読み取れませんでした",
     "syncBusy": "すでに更新が実行中です",
-    "staleHint": "未集計のセッションが {count} 件あります。",
     "lastSynced": "{time} に更新",
     "lastSyncedNever": "未集計",
     "tileTotal": "合計トークン",

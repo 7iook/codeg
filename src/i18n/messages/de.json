@@ -4551,7 +4551,6 @@
     "syncDone": "{synced} Sitzungen gezählt",
     "syncFailed": "Einige Sitzungen konnten nicht gelesen werden",
     "syncBusy": "Eine Aktualisierung läuft bereits",
-    "staleHint": "{count} Sitzungen sind noch nicht gezählt.",
     "lastSynced": "Aktualisiert {time}",
     "lastSyncedNever": "Noch nie aktualisiert",
     "tileTotal": "Tokens gesamt",

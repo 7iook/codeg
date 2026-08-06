@@ -4551,7 +4551,6 @@
     "syncDone": "تم حساب {synced} جلسة",
     "syncFailed": "تعذّرت قراءة بعض الجلسات",
     "syncBusy": "هناك تحديث قيد التشغيل بالفعل",
-    "staleHint": "ما زالت {count} جلسة غير محسوبة.",
     "lastSynced": "حُدّث {time}",
     "lastSyncedNever": "لم يُحدَّث بعد",
     "tileTotal": "إجمالي الرموز",

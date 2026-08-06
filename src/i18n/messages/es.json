@@ -4551,7 +4551,6 @@
     "syncDone": "{synced} sesiones contabilizadas",
     "syncFailed": "No se pudieron leer algunas sesiones",
     "syncBusy": "Ya hay una actualización en curso",
-    "staleHint": "Quedan {count} sesiones sin contabilizar.",
     "lastSynced": "Actualizado {time}",
     "lastSyncedNever": "Nunca actualizado",
     "tileTotal": "Tokens totales",

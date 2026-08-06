@@ -4551,7 +4551,6 @@
     "syncDone": "Counted {synced} sessions",
     "syncFailed": "Could not read some sessions",
     "syncBusy": "A refresh is already running",
-    "staleHint": "{count} sessions haven't been counted yet.",
     "lastSynced": "Updated {time}",
     "lastSyncedNever": "Never updated",
     "tileTotal": "Total tokens",
