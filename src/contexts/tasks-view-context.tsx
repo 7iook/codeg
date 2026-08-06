@@ -26,6 +26,11 @@ interface TasksViewContextValue {
   tasks: WorkTask[]
   /** Count of tasks waiting on the user — the sidebar badge. */
   attentionCount: number
+  /** True until the first fetch settles (success OR failure). Lets the board
+   *  tell "still loading" from "genuinely empty" and show a skeleton instead of
+   *  flashing the empty state. Never flips back on later refetches — those
+   *  update an already-painted board. */
+  loading: boolean
   refetch: () => Promise<void>
 }
 
@@ -57,6 +62,7 @@ export function TasksViewProvider({ children }: { children: ReactNode }) {
     tRef.current = t
   }, [t])
   const [tasks, setTasks] = useState<WorkTask[]>([])
+  const [loading, setLoading] = useState(true)
   const reqRef = useRef(0)
   // Statuses as of the last successful fetch; null until then, so the first
   // load (pure history) never notifies.
@@ -74,8 +80,12 @@ export function TasksViewProvider({ children }: { children: ReactNode }) {
         list.map((task) => [task.id, task.status])
       )
       setTasks(list)
+      setLoading(false)
     } catch {
-      // ignore — a later event/refetch recovers
+      // ignore — a later event/refetch recovers. A failed FIRST fetch still
+      // ends the loading state (unless a newer one is already in flight): the
+      // board falls back to its empty state rather than pulsing forever.
+      if (id === reqRef.current) setLoading(false)
     }
   }, [])
 
@@ -115,8 +125,8 @@ export function TasksViewProvider({ children }: { children: ReactNode }) {
   )
 
   const value = useMemo<TasksViewContextValue>(
-    () => ({ tasks, attentionCount, refetch }),
-    [tasks, attentionCount, refetch]
+    () => ({ tasks, attentionCount, loading, refetch }),
+    [tasks, attentionCount, loading, refetch]
   )
 
   return (

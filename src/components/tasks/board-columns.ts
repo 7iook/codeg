@@ -12,6 +12,23 @@ export const BOARD_COLUMN_IDS: BoardColumnId[] = [
 ]
 
 /**
+ * The exact statuses behind each column, in the order the list view's status
+ * filter offers them. `columnForStatus` stays the single source of truth for
+ * the mapping — board-columns.test.ts asserts the two agree and that every
+ * `WorkTaskStatus` appears here exactly once.
+ */
+export const STATUSES_BY_COLUMN: Record<BoardColumnId, WorkTaskStatus[]> = {
+  todo: ["todo", "queued"],
+  inProgress: ["preparing", "running"],
+  attention: ["awaiting_input", "review", "merging", "failed"],
+  done: ["done", "canceled"],
+}
+
+/** Every status, column order — the list view's filter menu reads this. */
+export const ALL_WORK_TASK_STATUSES: WorkTaskStatus[] =
+  BOARD_COLUMN_IDS.flatMap((col) => STATUSES_BY_COLUMN[col])
+
+/**
  * DB status → board column. `canceled` lives in the Done column but is hidden
  * unless the "show canceled" toggle is on (filtered by `groupTasksByColumn`).
  */
@@ -70,9 +87,36 @@ export function groupTasksByColumn(
     grouped[columnForStatus(task.status)].push(task)
   }
   for (const column of BOARD_COLUMN_IDS) {
-    grouped[column].sort(
-      (a, b) => parseTimestamp(b.updated_at) - parseTimestamp(a.updated_at)
-    )
+    grouped[column].sort(byFreshest)
   }
   return grouped
+}
+
+/** Freshest-first, the order every board column and the list view read in. */
+function byFreshest(a: WorkTask, b: WorkTask): number {
+  return parseTimestamp(b.updated_at) - parseTimestamp(a.updated_at)
+}
+
+/**
+ * The list view's rows: one flat, freshest-first sequence instead of four
+ * columns. `statuses` is the list-only status filter (`null` = every status,
+ * which is the default), and archived tasks stay hidden unless `showArchived`.
+ *
+ * The board's "show canceled" toggle deliberately has no say here — in list
+ * mode `canceled` is just one more status checkbox, so there is exactly one
+ * control per status rather than two that can contradict each other.
+ */
+export function filterTasksForList(
+  tasks: WorkTask[],
+  statuses: WorkTaskStatus[] | null,
+  showArchived: boolean
+): WorkTask[] {
+  const allowed = statuses == null ? null : new Set(statuses)
+  return tasks
+    .filter(
+      (task) =>
+        (task.archived_at == null || showArchived) &&
+        (allowed == null || allowed.has(task.status))
+    )
+    .sort(byFreshest)
 }
