@@ -12,7 +12,17 @@ import { createPortal } from "react-dom"
 import { Reorder, type PanInfo } from "motion/react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
-import { Folder, Funnel, Play, Plus, Settings2, ListTodo } from "lucide-react"
+import {
+  Folder,
+  Funnel,
+  Kanban,
+  List,
+  Play,
+  Plus,
+  Settings2,
+  ListTodo,
+  Tag,
+} from "lucide-react"
 import { useTasksView } from "@/contexts/tasks-view-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import {
@@ -32,7 +42,12 @@ import {
 import {
   DEFAULT_TASKS_BOARD_FILTER,
   loadTasksBoardFilter,
+  loadTasksStatusFilter,
+  loadTasksViewMode,
   saveTasksBoardFilter,
+  saveTasksStatusFilter,
+  saveTasksViewMode,
+  type TasksViewMode,
 } from "@/lib/tasks-board-filter-storage"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -51,20 +66,26 @@ import {
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import {
+  ALL_WORK_TASK_STATUSES,
   BOARD_COLUMN_IDS,
+  filterTasksForList,
   groupTasksByColumn,
+  STATUSES_BY_COLUMN,
   type BoardColumnId,
 } from "./board-columns"
 import { TaskCancelDialog } from "./task-cancel-dialog"
-import { StatusChip, TaskCard } from "./task-card"
+import { StatusChip, statusLabelKey, TaskCard } from "./task-card"
+import type { TaskActionHandlers } from "./task-actions"
 import { TaskCompleteDialog } from "./task-complete-dialog"
 import { TaskDetailSheet } from "./task-detail-sheet"
 import { TaskEditorDialog } from "./task-editor-dialog"
 import { TaskMergeDialog } from "./task-merge-dialog"
 import { TaskRestartDialog, type TaskRestartKind } from "./task-restart-dialog"
+import { TaskRow } from "./task-row"
 import { TaskSettingsDialog } from "./task-settings-dialog"
+import { TasksSkeleton } from "./tasks-skeleton"
 import { TaskTranscriptDialog } from "./task-transcript-dialog"
-import type { WorkTask, WorkTaskDraft } from "@/lib/types"
+import type { WorkTask, WorkTaskDraft, WorkTaskStatus } from "@/lib/types"
 
 const COLUMN_LABEL_KEYS = {
   todo: "colTodo",
@@ -133,7 +154,7 @@ export function TasksPageTitle() {
  */
 export function TasksPage() {
   const t = useTranslations("Tasks")
-  const { tasks, refetch } = useTasksView()
+  const { tasks, loading, refetch } = useTasksView()
   const folders = useAppWorkspaceStore((s) => s.folders)
   const projectFolders = useMemo(
     () => folders.filter((f) => f.parent_id == null && f.kind === "regular"),
@@ -153,6 +174,18 @@ export function TasksPage() {
   useEffect(() => {
     saveTasksBoardFilter(boardFilter)
   }, [boardFilter])
+  // Board ⇄ list, and the list's own status selection (`null` = every status).
+  // Both restored synchronously for the same reason as the filter above.
+  const [viewMode, setViewMode] = useState<TasksViewMode>(loadTasksViewMode)
+  useEffect(() => {
+    saveTasksViewMode(viewMode)
+  }, [viewMode])
+  const [statusFilter, setStatusFilter] = useState<WorkTaskStatus[] | null>(
+    loadTasksStatusFilter
+  )
+  useEffect(() => {
+    saveTasksStatusFilter(statusFilter)
+  }, [statusFilter])
   // Dragging a pending card is always available: dropping it on In-progress
   // starts the task and needs no order at all. Only the REORDER half waits on
   // a folder — sort_order is per folder, so a mixed-folder列 has nothing it
@@ -259,6 +292,32 @@ export function TasksPage() {
       ),
     [visibleTasks, boardFilter]
   )
+  // The list view's rows: one flat, freshest-first sequence, narrowed by the
+  // status selection instead of the board's "show canceled" toggle.
+  const listTasks = useMemo(
+    () =>
+      filterTasksForList(visibleTasks, statusFilter, boardFilter.showArchived),
+    [visibleTasks, statusFilter, boardFilter.showArchived]
+  )
+  const selectedStatuses = statusFilter ?? ALL_WORK_TASK_STATUSES
+  // Unchecking the last selected status falls back to "every status" rather
+  // than to a list that can only be empty — same collapse the storage layer
+  // applies, so the selection survives a reload unchanged.
+  const toggleStatus = useCallback((status: WorkTaskStatus, on: boolean) => {
+    setStatusFilter((prev) => {
+      const current = new Set(prev ?? ALL_WORK_TASK_STATUSES)
+      if (on) current.add(status)
+      else current.delete(status)
+      if (
+        current.size === 0 ||
+        current.size === ALL_WORK_TASK_STATUSES.length
+      ) {
+        return null
+      }
+      return ALL_WORK_TASK_STATUSES.filter((s) => current.has(s))
+    })
+  }, [])
+
   const dragEnabled = folderFilter != null
   // Optimistic order while a drag is live; server order otherwise.
   const todoTasks = useMemo(() => {
@@ -337,6 +396,26 @@ export function TasksPage() {
     setEditorTask(null)
     setEditorOpen(true)
   }, [])
+
+  // One handler set, wired the same way for a board card and a list row.
+  const handlersFor = useCallback(
+    (task: WorkTask): TaskActionHandlers => ({
+      onStart: () => void act(() => workTaskStart(task.id)),
+      onCancel: () => openCancel(task),
+      onRetry: () => openRestart(task, "retry"),
+      onRequeue: () => openRestart(task, "requeue"),
+      onViewSession: () => openSession(task),
+      onMerge: () => openMerge(task),
+      onComplete: () => openComplete(task),
+      onArchive: () =>
+        void act(() => workTaskArchive(task.id, task.archived_at == null)),
+      onEdit: () => {
+        setEditorTask(task)
+        setEditorOpen(true)
+      },
+    }),
+    [act, openCancel, openComplete, openMerge, openRestart, openSession]
+  )
 
   const positionGhost = useCallback((x: number, y: number) => {
     const el = ghostRef.current
@@ -509,15 +588,22 @@ export function TasksPage() {
   }, [act, columns.done])
 
   // The badge counts deviations from the DEFAULT view (canceled shown,
-  // archived hidden), not checked boxes — a pristine board shows no badge.
+  // archived hidden), not checked boxes — a pristine board shows no badge. In
+  // list mode "show canceled" isn't offered (the status filter owns that
+  // axis), so it can't deviate either.
+  const isList = viewMode === "list"
   const activeFilters =
-    (boardFilter.showCanceled === DEFAULT_TASKS_BOARD_FILTER.showCanceled
+    (isList ||
+    boardFilter.showCanceled === DEFAULT_TASKS_BOARD_FILTER.showCanceled
       ? 0
       : 1) +
     (boardFilter.showArchived === DEFAULT_TASKS_BOARD_FILTER.showArchived
       ? 0
       : 1)
   const hasAnyTask = tasks.length > 0
+  // Nothing has arrived yet: draw the page's own shape instead of flashing the
+  // "no tasks yet" empty state at someone who has plenty.
+  const showSkeleton = loading && !hasAnyTask
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -587,15 +673,23 @@ export function TasksPage() {
               align="start"
               className="w-52 gap-0.5 rounded-xl p-1.5"
             >
-              <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-accent/50">
-                <Checkbox
-                  checked={boardFilter.showCanceled}
-                  onCheckedChange={(v) =>
-                    setBoardFilter((f) => ({ ...f, showCanceled: v === true }))
-                  }
-                />
-                {t("showCanceled")}
-              </label>
+              {/* Canceled is a status like any other in list mode, where the
+                  status filter checkbox governs it — offering a second,
+                  overlapping control here would only let the two disagree. */}
+              {isList ? null : (
+                <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-accent/50">
+                  <Checkbox
+                    checked={boardFilter.showCanceled}
+                    onCheckedChange={(v) =>
+                      setBoardFilter((f) => ({
+                        ...f,
+                        showCanceled: v === true,
+                      }))
+                    }
+                  />
+                  {t("showCanceled")}
+                </label>
+              )}
               <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-accent/50">
                 <Checkbox
                   checked={boardFilter.showArchived}
@@ -608,7 +702,98 @@ export function TasksPage() {
             </PopoverContent>
           </Popover>
 
+          {/* Status filter — list-only: the board already sorts by status into
+              its four columns, so there is nothing there for it to narrow. */}
+          {isList ? (
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 gap-1.5 rounded-full bg-muted/70 px-3 text-[0.8125rem] font-medium ws-msg-chip hover:bg-muted"
+                >
+                  <Tag
+                    className="size-3.5 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  {t("statusFilter")}
+                  {statusFilter != null ? (
+                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[0.625rem] font-medium leading-none text-primary tabular-nums">
+                      {statusFilter.length}
+                    </span>
+                  ) : null}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="start"
+                className="w-56 gap-0.5 rounded-xl p-1.5"
+              >
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs font-medium hover:bg-accent/50 disabled:pointer-events-none disabled:opacity-50"
+                  disabled={statusFilter == null}
+                  onClick={() => setStatusFilter(null)}
+                >
+                  {t("statusFilterAll")}
+                </button>
+                {/* Grouped under the board's own column names, so the two views
+                    describe the same statuses with the same words. */}
+                {BOARD_COLUMN_IDS.map((col) => (
+                  <div key={col} className="flex flex-col gap-0.5">
+                    <span className="px-2 pb-0.5 pt-1.5 text-[0.625rem] font-medium uppercase tracking-wide text-muted-foreground">
+                      {t(COLUMN_LABEL_KEYS[col])}
+                    </span>
+                    {STATUSES_BY_COLUMN[col].map((status) => (
+                      <label
+                        key={status}
+                        className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-accent/50"
+                      >
+                        <Checkbox
+                          checked={selectedStatuses.includes(status)}
+                          onCheckedChange={(v) =>
+                            toggleStatus(status, v === true)
+                          }
+                        />
+                        {t(statusLabelKey(status))}
+                      </label>
+                    ))}
+                  </div>
+                ))}
+              </PopoverContent>
+            </Popover>
+          ) : null}
+
           <div className="flex-1" />
+
+          {/* Board ⇄ list. A segmented pill rather than two loose buttons: the
+              two are one exclusive choice, and it reads that way. */}
+          <div className="flex h-8 shrink-0 items-center gap-0.5 rounded-full bg-muted/70 p-0.5 ws-msg-chip">
+            {(
+              [
+                { mode: "board", icon: Kanban, label: t("viewBoard") },
+                { mode: "list", icon: List, label: t("viewList") },
+              ] as const
+            ).map((option) => (
+              <Button
+                key={option.mode}
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-pressed={viewMode === option.mode}
+                className={cn(
+                  "h-7 gap-1.5 rounded-full px-2.5 text-[0.8125rem] font-medium",
+                  viewMode === option.mode
+                    ? "bg-background text-foreground shadow-sm hover:bg-background"
+                    : "text-muted-foreground hover:bg-transparent hover:text-foreground"
+                )}
+                onClick={() => setViewMode(option.mode)}
+              >
+                <option.icon className="size-3.5" aria-hidden="true" />
+                {option.label}
+              </Button>
+            ))}
+          </div>
 
           <Button
             type="button"
@@ -632,8 +817,10 @@ export function TasksPage() {
         </div>
       )}
 
-      {/* Board */}
-      {!hasAnyTask ? (
+      {/* Board / list */}
+      {showSkeleton ? (
+        <TasksSkeleton mode={viewMode} />
+      ) : !hasAnyTask ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
           <ListTodo
             className="size-10 text-muted-foreground/40"
@@ -655,6 +842,33 @@ export function TasksPage() {
             {t("new")}
           </Button>
         </div>
+      ) : isList ? (
+        <ScrollArea className="min-h-0 flex-1">
+          {/* Same insets as the board below, so switching views doesn't shift
+              the content's left edge or its distance from the toolbar. */}
+          <div className="px-4 pb-4 pt-1">
+            {listTasks.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-muted-foreground/30 p-8 text-center ws-msg-card">
+                <p className="text-xs text-muted-foreground">
+                  {t("listEmpty")}
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-border/60 overflow-hidden rounded-xl border border-foreground/15 bg-card ws-msg-card">
+                {listTasks.map((task) => (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    folderName={folderNames.get(task.folder_id) ?? null}
+                    now={now}
+                    onOpen={() => setDetailTaskId(task.id)}
+                    {...handlersFor(task)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </ScrollArea>
       ) : (
         <div className="min-h-0 flex-1 overflow-x-auto">
           {/* pt-1, not p-4's 16px: the column headers belong to the toolbar
@@ -676,22 +890,7 @@ export function TasksPage() {
                     if (draggedRef.current) return
                     setDetailTaskId(task.id)
                   }}
-                  onStart={() => void act(() => workTaskStart(task.id))}
-                  onCancel={() => openCancel(task)}
-                  onRetry={() => openRestart(task, "retry")}
-                  onRequeue={() => openRestart(task, "requeue")}
-                  onViewSession={() => openSession(task)}
-                  onMerge={() => openMerge(task)}
-                  onComplete={() => openComplete(task)}
-                  onArchive={() =>
-                    void act(() =>
-                      workTaskArchive(task.id, task.archived_at == null)
-                    )
-                  }
-                  onEdit={() => {
-                    setEditorTask(task)
-                    setEditorOpen(true)
-                  }}
+                  {...handlersFor(task)}
                 />
               )
               return (

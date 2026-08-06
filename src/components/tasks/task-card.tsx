@@ -1,25 +1,12 @@
 "use client"
 
 import { useTranslations } from "next-intl"
-import {
-  Archive,
-  ArchiveRestore,
-  Ban,
-  Check,
-  CircleAlert,
-  CircleCheck,
-  CircleX,
-  GitMerge,
-  Loader2,
-  MessageSquareText,
-  Pencil,
-  Play,
-  RotateCw,
-} from "lucide-react"
+import { Check, CircleAlert, CircleCheck, CircleX, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { formatRelative } from "@/components/conversations/sidebar-conversation-grouping"
 import { cn } from "@/lib/utils"
-import { hasNothingToMerge } from "./task-acceptance"
+import { buildTaskActions, type TaskActionItem } from "./task-actions"
+import type { TaskActionHandlers } from "./task-actions"
 import type { WorkTask } from "@/lib/types"
 
 type StatusLabelKey =
@@ -112,26 +99,12 @@ export function StatusChip({ task }: { task: WorkTask }) {
   }
 }
 
-interface TaskCardProps {
+interface TaskCardProps extends TaskActionHandlers {
   task: WorkTask
   folderName: string | null
   /** Shared render-tick timestamp for relative times (refreshed by the page). */
   now: number
   onOpen: () => void
-  onStart: () => void
-  onCancel: () => void
-  onRetry: () => void
-  onRequeue: () => void
-  /** Opens the read-only live session viewer (TaskTranscriptDialog). */
-  onViewSession: () => void
-  onMerge: () => void
-  /** Takes the merge slot when the task changed nothing (see
-   *  `hasNothingToMerge`) — accepts it outright instead. */
-  onComplete: () => void
-  /** Toggles by `task.archived_at` (archive ⇄ unarchive). */
-  onArchive: () => void
-  /** Opens the editor dialog — offered while editable (todo / failed). */
-  onEdit: () => void
 }
 
 /** The acceptance red/green light for a reviewed card. */
@@ -173,34 +146,17 @@ export function PreflightChip({ task }: { task: WorkTask }) {
   )
 }
 
-interface CardActionItem {
-  icon: typeof Play
-  label: string
-  onClick: () => void
-}
-
 /**
  * One board card. The whole card opens the detail sheet; the footer carries
- * exactly one filled primary action per status on the left, and on the right a
- * row of round icon buttons for the secondaries (edit / archive), always
- * ending in "查看会话" when a session exists. The full action set — with
- * labels — lives in the sheet. `merging` has no primary: it cannot be
- * canceled.
+ * the shared action set (see `buildTaskActions`): one filled primary on the
+ * left, round icon buttons for the secondaries on the right.
  */
 export function TaskCard({
   task,
   folderName,
   now,
   onOpen,
-  onStart,
-  onCancel,
-  onRetry,
-  onRequeue,
-  onViewSession,
-  onMerge,
-  onComplete,
-  onArchive,
-  onEdit,
+  ...handlers
 }: TaskCardProps) {
   const t = useTranslations("Tasks")
   const archived = task.archived_at != null
@@ -223,85 +179,7 @@ export function TaskCard({
     now
   )
 
-  const { primary, more } = (() => {
-    const more: CardActionItem[] = []
-    let primary: CardActionItem | null = null
-    // An archived card offers exactly one way back.
-    if (archived) {
-      primary = {
-        icon: ArchiveRestore,
-        label: t("actionUnarchive"),
-        onClick: onArchive,
-      }
-      return { primary, more }
-    }
-    switch (task.status) {
-      case "todo":
-        primary = { icon: Play, label: t("actionStart"), onClick: onStart }
-        more.push({ icon: Pencil, label: t("actionEdit"), onClick: onEdit })
-        break
-      case "queued":
-      case "preparing":
-      case "running":
-      case "awaiting_input":
-        primary = { icon: Ban, label: t("actionCancel"), onClick: onCancel }
-        break
-      case "review":
-        // Nothing was changed ⟹ nothing to merge: the card offers the
-        // acceptance that actually applies.
-        primary = hasNothingToMerge(task)
-          ? {
-              icon: CircleCheck,
-              label: t("actionComplete"),
-              onClick: onComplete,
-            }
-          : { icon: GitMerge, label: t("actionMerge"), onClick: onMerge }
-        break
-      case "merging":
-        break
-      case "failed":
-        primary = { icon: RotateCw, label: t("actionRetry"), onClick: onRetry }
-        more.push({ icon: Pencil, label: t("actionEdit"), onClick: onEdit })
-        more.push({
-          icon: Archive,
-          label: t("actionArchive"),
-          onClick: onArchive,
-        })
-        break
-      case "done":
-        primary = {
-          icon: Archive,
-          label: t("actionArchive"),
-          onClick: onArchive,
-        }
-        break
-      case "canceled":
-        primary = {
-          icon: RotateCw,
-          label: t("actionRequeue"),
-          onClick: onRequeue,
-        }
-        more.push({
-          icon: Archive,
-          label: t("actionArchive"),
-          onClick: onArchive,
-        })
-        break
-    }
-    return { primary, more }
-  })()
-
-  // Round icon row on the right: the status's own secondaries, then the
-  // uniform session viewer — offered in every status once a session exists
-  // (live ones stream it in real time).
-  const secondaries = [...more]
-  if (task.conversation_id != null) {
-    secondaries.push({
-      icon: MessageSquareText,
-      label: t("actionViewSession"),
-      onClick: onViewSession,
-    })
-  }
+  const { primary, secondaries } = buildTaskActions(task, t, handlers)
 
   return (
     <div
@@ -309,6 +187,10 @@ export function TaskCard({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => {
+        // Only the card's own focus opens the sheet: Enter/Space on one of the
+        // footer buttons bubbles up here, and preventing the default would
+        // swallow that button's activation and open the sheet instead.
+        if (e.target !== e.currentTarget) return
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault()
           onOpen()
@@ -429,7 +311,7 @@ export function TaskCard({
   )
 }
 
-function CardIconAction({ item }: { item: CardActionItem }) {
+function CardIconAction({ item }: { item: TaskActionItem }) {
   return (
     <Button
       type="button"
