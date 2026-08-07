@@ -97,17 +97,36 @@ pub struct DelegationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
     /// Optional per-call model id nominated by the LLM's `delegate_to_agent`
-    /// call, forwarded to the target CLI unchanged. `None` = inherit whatever
-    /// the user configured for that agent (the settings panel's global knob),
-    /// which is the only mechanism that existed before this field.
+    /// call. `None` = inherit whatever the user configured for that agent
+    /// (the settings panel's global knob), which is the only mechanism that
+    /// existed before this field.
+    ///
+    /// # WIRE-ONLY at this stage: normalized and carried, NOT yet applied
+    ///
+    /// Nothing consumes this field yet. The listener normalizes it and the
+    /// request carries it, but no spawn path reads it, so nominating an id
+    /// does NOT change which model the child runs on -- the child still
+    /// starts on the model configured for that agent. A later launch stage
+    /// wires it into the spawned child process.
+    ///
+    /// What survives verbatim is the id itself; what is normalized is only
+    /// its framing (trim / blank / control characters -- see below).
+    ///
+    /// TODO(delegation-model-launch): when that launch stage lands, update
+    /// BOTH user-visible contracts in the SAME change: this doc comment and
+    /// the `model` property description in
+    /// `src-tauri/src/acp/delegation/tool_schema.json`, which currently
+    /// tells the host LLM the value is not yet in effect. Leaving either one
+    /// stale re-creates the same silent-downgrade failure that description
+    /// warns about, just in the opposite direction.
     ///
     /// Deliberately NOT validated against any list of known model names: the
     /// id is served by the *user's own* endpoint, which may be a relay in
     /// front of any vendor, so an id this build has never heard of is a
     /// legitimate value. The listener only normalizes it — trim, blank ⇒
-    /// `None` — and rejects the one class that cannot survive the trip to a
-    /// child process (control characters; see
-    /// [`super::listener::normalize_requested_model`]).
+    /// `None` — and rejects ids containing control characters as paste
+    /// contamination (see [`super::listener::normalize_requested_model`] for
+    /// why that is a hygiene rule and not a transport limit).
     ///
     /// # Not the same axis as `subagent_type`
     ///
@@ -167,20 +186,26 @@ pub enum DelegationError {
     /// it — name grammar failed, the persona file was missing, malformed,
     /// or oversize, or a path-safety check tripped. Detail carries the
     /// user-visible reason (see [`super::persona::PersonaError::Display`]).
-    /// Wire code is `"invalid_persona"`.
+    /// Wire code is [`INVALID_PERSONA_WIRE_CODE`].
     #[error("invalid persona: {0}")]
     InvalidPersona(String),
-    /// The LLM nominated a per-call `model` whose value cannot be carried to
-    /// the child process — it contains a control character (newline, NUL, ...)
-    /// that no process env-var / argv value can represent. Detail carries the
-    /// user-visible reason. Wire code is `"invalid_model"`.
+    /// The LLM nominated a per-call `model` carrying a control character
+    /// (newline, tab, NUL, ...). Detail carries the user-visible reason. Wire
+    /// code is [`INVALID_MODEL_WIRE_CODE`].
+    ///
+    /// Rejected as input hygiene, NOT because of a transport limit: control
+    /// characters other than NUL do survive a process env-var value intact
+    /// (verified by controlled experiment — see
+    /// [`super::listener::normalize_requested_model`]). Such an id is almost
+    /// always paste contamination, and failing loudly at the argument boundary
+    /// beats an opaque error from the user's endpoint — or a silent fall back
+    /// to its default model reported as a success on the requested one. NUL is
+    /// the one value that genuinely cannot be represented at all.
     ///
     /// This is the ONLY model input class that fails: an unrecognized-but-
     /// well-formed id is passed through verbatim on purpose (the user's own
     /// endpoint decides what it serves), and a blank id degrades to "inherit
-    /// the configured default". Failing loudly here rather than dropping the
-    /// value keeps a mangled id from reading as "my model choice was silently
-    /// ignored".
+    /// the configured default".
     #[error("invalid model: {0}")]
     InvalidModel(String),
     #[error("subagent runtime error: {0}")]
@@ -233,6 +258,23 @@ pub enum DelegationError {
     #[error("the broker is rebuilding its session index after startup; retry shortly")]
     Rebuilding,
 }
+
+/// Wire-stable `DelegationOutcome::Err.code` for [`DelegationError::InvalidPersona`].
+///
+/// Single source of truth: every producer of this code — [`DelegationOutcome::from_err`],
+/// the persona providers' `PersonaEffect::Failed { wire_code, .. }`, and any listener
+/// fast-path that reports the failure before a typed error exists — MUST reference this
+/// constant rather than re-spelling the literal. The string ships to LLM context and to
+/// the frontend, so a drifted second spelling is a silent contract break that no compiler
+/// error catches.
+pub const INVALID_PERSONA_WIRE_CODE: &str = "invalid_persona";
+
+/// Wire-stable `DelegationOutcome::Err.code` for [`DelegationError::InvalidModel`].
+///
+/// Same single-source rule as [`INVALID_PERSONA_WIRE_CODE`]: the listener's
+/// pre-typed rejection path and [`DelegationOutcome::from_err`] must both read
+/// this constant, so renaming or extending the code is a one-line change.
+pub const INVALID_MODEL_WIRE_CODE: &str = "invalid_model";
 
 /// Historical alias accepted on the facade (R2-B4): upstream PR #375 named the
 /// released state `session_closed`; this build reports `session_released`.
@@ -356,8 +398,8 @@ impl DelegationOutcome {
             DelegationError::InvalidAgentType => "invalid_agent_type",
             DelegationError::InvalidWorkingDir(_) => "invalid_working_dir",
             DelegationError::SpawnFailed(_) => "spawn_failed",
-            DelegationError::InvalidPersona(_) => "invalid_persona",
-            DelegationError::InvalidModel(_) => "invalid_model",
+            DelegationError::InvalidPersona(_) => INVALID_PERSONA_WIRE_CODE,
+            DelegationError::InvalidModel(_) => INVALID_MODEL_WIRE_CODE,
             DelegationError::SubagentRuntimeError(_) => "subagent_error",
             DelegationError::ChildRefusal => "child_refusal",
             DelegationError::ChildMaxTokens => "child_max_tokens",
@@ -409,6 +451,33 @@ mod tests {
                 "continuation_conflict",
             ),
             (DelegationError::Rebuilding, "rebuilding"),
+        ];
+        for (err, want) in cases {
+            match DelegationOutcome::from_err(err, None) {
+                DelegationOutcome::Err { code, .. } => assert_eq!(code, want),
+                other => panic!("expected Err outcome, got {other:?}"),
+            }
+        }
+    }
+
+    /// The two persona/model wire codes have exactly ONE source: the
+    /// constants. `from_err` must project onto them, and their literal
+    /// values are frozen — they ship to LLM context and to the frontend,
+    /// so renaming one silently breaks consumers that pattern-match.
+    #[test]
+    fn persona_and_model_wire_codes_come_from_the_constants() {
+        assert_eq!(INVALID_PERSONA_WIRE_CODE, "invalid_persona");
+        assert_eq!(INVALID_MODEL_WIRE_CODE, "invalid_model");
+
+        let cases: Vec<(DelegationError, &str)> = vec![
+            (
+                DelegationError::InvalidPersona("bad name".into()),
+                INVALID_PERSONA_WIRE_CODE,
+            ),
+            (
+                DelegationError::InvalidModel("control char".into()),
+                INVALID_MODEL_WIRE_CODE,
+            ),
         ];
         for (err, want) in cases {
             match DelegationOutcome::from_err(err, None) {

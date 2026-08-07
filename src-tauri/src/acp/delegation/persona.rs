@@ -52,6 +52,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentType;
 
+use super::types::INVALID_PERSONA_WIRE_CODE;
+
 /// Type-safe per-call CLI launch option.
 ///
 /// v1 only carries the Kiro persona nomination. Future CLIs get a NEW
@@ -141,7 +143,8 @@ pub enum PersonaEffect {
     /// cap / malformed frontmatter / path escape / IO). The broker
     /// short-circuits into `DelegationError::InvalidPersona(reason)`
     /// BEFORE spawning; `wire_code` is the stable string the outer
-    /// `DelegationOutcome::Err.code` will carry.
+    /// `DelegationOutcome::Err.code` will carry -- always
+    /// [`INVALID_PERSONA_WIRE_CODE`], never a re-spelled literal.
     Failed {
         wire_code: &'static str,
         reason: String,
@@ -531,7 +534,7 @@ impl PersonaCapability for KiroProvider {
         // rather than a panic in the downstream spawner.
         if !is_valid_persona_name(name) {
             return PersonaEffect::Failed {
-                wire_code: "invalid_persona",
+                wire_code: INVALID_PERSONA_WIRE_CODE,
                 reason: format!("persona name '{name}' violates grammar"),
             };
         }
@@ -566,7 +569,7 @@ impl PersonaCapability for ClaudeCodeProvider {
     fn resolve_persona_effect(&self, name: &str, _home_dir: &Path) -> PersonaEffect {
         if !is_valid_persona_name(name) {
             return PersonaEffect::Failed {
-                wire_code: "invalid_persona",
+                wire_code: INVALID_PERSONA_WIRE_CODE,
                 reason: format!("persona name '{name}' violates grammar"),
             };
         }
@@ -574,7 +577,7 @@ impl PersonaCapability for ClaudeCodeProvider {
         match resolve_preamble_at(name, &root) {
             Ok(preamble) => PersonaEffect::Hint { preamble },
             Err(err) => PersonaEffect::Failed {
-                wire_code: "invalid_persona",
+                wire_code: INVALID_PERSONA_WIRE_CODE,
                 reason: err.to_string(),
             },
         }
@@ -595,7 +598,7 @@ impl PersonaCapability for CodexProvider {
     fn resolve_persona_effect(&self, name: &str, _home_dir: &Path) -> PersonaEffect {
         if !is_valid_persona_name(name) {
             return PersonaEffect::Failed {
-                wire_code: "invalid_persona",
+                wire_code: INVALID_PERSONA_WIRE_CODE,
                 reason: format!("persona name '{name}' violates grammar"),
             };
         }
@@ -603,7 +606,7 @@ impl PersonaCapability for CodexProvider {
         match resolve_preamble_at(name, &root) {
             Ok(preamble) => PersonaEffect::Hint { preamble },
             Err(err) => PersonaEffect::Failed {
-                wire_code: "invalid_persona",
+                wire_code: INVALID_PERSONA_WIRE_CODE,
                 reason: err.to_string(),
             },
         }
@@ -1103,7 +1106,7 @@ mod tests {
         };
         let _ignored = PersonaEffect::Ignored;
         let _failed = PersonaEffect::Failed {
-            wire_code: "invalid_persona",
+            wire_code: INVALID_PERSONA_WIRE_CODE,
             reason: "persona file not found".into(),
         };
     }
