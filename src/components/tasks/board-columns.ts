@@ -12,10 +12,12 @@ export const BOARD_COLUMN_IDS: BoardColumnId[] = [
 ]
 
 /**
- * The exact statuses behind each column, in the order the list view's status
- * filter offers them. `columnForStatus` stays the single source of truth for
- * the mapping — board-columns.test.ts asserts the two agree and that every
- * `WorkTaskStatus` appears here exactly once.
+ * The exact statuses behind each column, written out as a table.
+ * `columnForStatus` stays the single source of truth for the mapping; this is
+ * its spec copy, and board-columns.test.ts asserts the two agree and that every
+ * `WorkTaskStatus` appears here exactly once — which is what makes adding a
+ * status without filing it in a column a test failure rather than a silent
+ * disappearance from the board.
  */
 export const STATUSES_BY_COLUMN: Record<BoardColumnId, WorkTaskStatus[]> = {
   todo: ["todo", "queued"],
@@ -24,7 +26,7 @@ export const STATUSES_BY_COLUMN: Record<BoardColumnId, WorkTaskStatus[]> = {
   done: ["done", "canceled"],
 }
 
-/** Every status, column order — the list view's filter menu reads this. */
+/** Every status, column order — the flattened spec table (see above). */
 export const ALL_WORK_TASK_STATUSES: WorkTaskStatus[] =
   BOARD_COLUMN_IDS.flatMap((col) => STATUSES_BY_COLUMN[col])
 
@@ -99,24 +101,28 @@ function byFreshest(a: WorkTask, b: WorkTask): number {
 
 /**
  * The list view's rows: one flat, freshest-first sequence instead of four
- * columns. `statuses` is the list-only status filter (`null` = every status,
- * which is the default), and archived tasks stay hidden unless `showArchived`.
+ * columns. `group` is the list-only status filter — a whole board COLUMN rather
+ * than individual statuses (`null` = every status, which is the default), so
+ * the list narrows by the same four buckets the board sorts into and the two
+ * views can't describe the same tasks with different words.
  *
- * The board's "show canceled" toggle deliberately has no say here — in list
- * mode `canceled` is just one more status checkbox, so there is exactly one
- * control per status rather than two that can contradict each other.
+ * The visibility toggles apply exactly as they do on the board: `showCanceled`
+ * and `showArchived` are one pair of controls shared by both views. (They have
+ * to be: a column-wide filter cannot single out `canceled`, which lives inside
+ * the Done column.)
  */
 export function filterTasksForList(
   tasks: WorkTask[],
-  statuses: WorkTaskStatus[] | null,
+  group: BoardColumnId | null,
+  showCanceled: boolean,
   showArchived: boolean
 ): WorkTask[] {
-  const allowed = statuses == null ? null : new Set(statuses)
   return tasks
     .filter(
       (task) =>
+        (task.status !== "canceled" || showCanceled) &&
         (task.archived_at == null || showArchived) &&
-        (allowed == null || allowed.has(task.status))
+        (group == null || columnForStatus(task.status) === group)
     )
     .sort(byFreshest)
 }

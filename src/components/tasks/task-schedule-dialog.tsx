@@ -1,20 +1,26 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useTranslations } from "next-intl"
+import { useLocale, useTranslations } from "next-intl"
 import { toast } from "sonner"
-import { CalendarClock, TriangleAlert } from "lucide-react"
+import { CalendarClock, ChevronDown, TriangleAlert } from "lucide-react"
 import { workTaskSchedule } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
+import { dateFnsLocale } from "@/lib/date-fns-locale"
 import {
+  defaultTimeForDate,
+  formatScheduleDay,
   formatScheduleFull,
   isoToDateTimeLocalValue,
   isScheduleInPast,
+  joinDateAndTime,
   parseDateTimeLocalValue,
   schedulePresets,
+  splitDateTimeLocalValue,
   toDateTimeLocalValue,
 } from "@/lib/task-schedule"
 import { Button } from "@/components/ui/button"
+import { Calendar } from "@/components/ui/calendar"
 import {
   Dialog,
   DialogContent,
@@ -25,6 +31,11 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import type { WorkTask } from "@/lib/types"
 
@@ -34,21 +45,30 @@ interface TaskScheduleDialogProps {
   task: WorkTask | null
 }
 
-/** Default seed for an unplanned task: the next full hour. */
-function nextHour(now: Date): string {
-  const date = new Date(now)
-  date.setMinutes(0, 0, 0)
-  date.setHours(date.getHours() + 1)
-  return toDateTimeLocalValue(date)
+/** `YYYY-MM-DD` ⇄ `Date`, both anchored to LOCAL midnight — the calendar hands
+ *  back a Date and the rest of the schedule code speaks the input strings. */
+function toDayValue(date: Date): string {
+  return toDateTimeLocalValue(date).slice(0, 10)
+}
+function fromDayValue(day: string): Date | undefined {
+  if (!day) return undefined
+  const parsed = new Date(`${day}T00:00`)
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed
 }
 
 /**
  * Plan when a to-do task starts.
  *
- * `type="datetime-local"` rather than a bespoke calendar: it is keyboard
- * accessible and locale-formatted for free, and it speaks the user's own wall
- * clock — which is what "run it at nine" means. The conversion to the UTC
- * instant the backend stores happens on save (see `lib/task-schedule`).
+ * Two controls rather than one `datetime-local`: a calendar popover for the day
+ * (shadcn's Popover + Calendar composition) and a plain time input for the
+ * hour. Both speak the user's own wall clock — which is what "run it at nine"
+ * means — and the conversion to the UTC instant the backend stores happens on
+ * save (see `lib/task-schedule`).
+ *
+ * It opens EMPTY unless the task already has a plan. Seeding an unplanned task
+ * with a time made every to-do task look scheduled; now a blank field says what
+ * is true, and picking a day fills the hour in (see `defaultTimeForDate`) so
+ * one decision stays one decision.
  *
  * A time already in the past is accepted rather than refused: the engine simply
  * claims it on its next sweep. The dialog says so, so it can't read as a plan
@@ -60,7 +80,10 @@ export function TaskScheduleDialog({
   task,
 }: TaskScheduleDialogProps) {
   const t = useTranslations("Tasks")
-  const [value, setValue] = useState("")
+  const locale = useLocale()
+  const [date, setDate] = useState("")
+  const [time, setTime] = useState("")
+  const [calendarOpen, setCalendarOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   // Frozen at open: the presets and the "already passed" hint are a snapshot of
   // the moment the dialog appeared, and a ticking `now` would move them under
@@ -77,16 +100,34 @@ export function TaskScheduleDialog({
     if (!open) return
     const now = new Date()
     setOpenedAt(now.getTime())
-    setValue(
-      (plannedAt ? isoToDateTimeLocalValue(plannedAt) : null) ?? nextHour(now)
-    )
+    const planned = plannedAt ? isoToDateTimeLocalValue(plannedAt) : null
+    const parts = splitDateTimeLocalValue(planned ?? "")
+    setDate(parts.date)
+    setTime(parts.time)
+    setCalendarOpen(false)
     setSubmitting(false)
-    // `plannedAt` seeds the field but deliberately does not re-run this: while
-    // the dialog is open the input belongs to the user, not to the row.
+    // `plannedAt` seeds the fields but deliberately does not re-run this: while
+    // the dialog is open the inputs belong to the user, not to the row.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, taskId])
 
+  const value = joinDateAndTime(date, time)
   const picked = parseDateTimeLocalValue(value)
+
+  const applyCombined = (combined: string) => {
+    const parts = splitDateTimeLocalValue(combined)
+    setDate(parts.date)
+    setTime(parts.time)
+  }
+
+  const pickDay = (picked: Date | undefined) => {
+    if (!picked) return
+    const day = toDayValue(picked)
+    setDate(day)
+    // Only ever fills a BLANK time — an hour the user chose is never moved.
+    if (!time) setTime(defaultTimeForDate(day, new Date(openedAt)))
+    setCalendarOpen(false)
+  }
   const isPast = picked != null && isScheduleInPast(picked, openedAt)
   const scheduled = plannedAt != null
 
@@ -116,18 +157,67 @@ export function TaskScheduleDialog({
         </DialogHeader>
 
         <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="task-schedule-at">{t("scheduleTimeLabel")}</Label>
-            <Input
-              id="task-schedule-at"
-              type="datetime-local"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              autoFocus
-            />
+          {/* Day and hour side by side, each with its own label — the two are
+              one plan, and a stacked pair would read as two questions. */}
+          <div className="flex items-end gap-2">
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+              <Label htmlFor="task-schedule-date">
+                {t("scheduleDateLabel")}
+              </Label>
+              <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    id="task-schedule-date"
+                    type="button"
+                    variant="outline"
+                    className={cn(
+                      "h-9 w-full justify-between px-3 font-normal",
+                      !date && "text-muted-foreground"
+                    )}
+                  >
+                    <span className="truncate">
+                      {date
+                        ? formatScheduleDay(date, locale)
+                        : t("schedulePickDate")}
+                    </span>
+                    <ChevronDown
+                      className="size-4 shrink-0 opacity-50"
+                      aria-hidden="true"
+                    />
+                  </Button>
+                </PopoverTrigger>
+                {/* w-auto p-0: the shared PopoverContent is a padded w-72 box,
+                    which would crop and inset the calendar. */}
+                <PopoverContent align="start" className="w-auto p-0">
+                  <Calendar
+                    mode="single"
+                    autoFocus
+                    locale={dateFnsLocale(locale)}
+                    selected={fromDayValue(date)}
+                    defaultMonth={fromDayValue(date)}
+                    onSelect={pickDay}
+                  />
+                </PopoverContent>
+              </Popover>
+            </div>
+            <div className="flex w-32 shrink-0 flex-col gap-1.5">
+              <Label htmlFor="task-schedule-time">
+                {t("scheduleTimeLabel")}
+              </Label>
+              <Input
+                id="task-schedule-time"
+                type="time"
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                // WebKit draws its own clock button inside the field; the
+                // calendar next door already owns "open a picker".
+                className="px-3 [&::-webkit-calendar-picker-indicator]:hidden"
+              />
+            </div>
           </div>
 
-          {/* One-tap options for the times people actually pick. */}
+          {/* One-tap options for the times people actually pick — they fill
+              both halves, so a preset is still a single decision. */}
           <div className="flex flex-wrap gap-1.5">
             {schedulePresets(new Date(openedAt)).map((preset) => (
               <Button
@@ -140,7 +230,7 @@ export function TaskScheduleDialog({
                   "h-7 rounded-full bg-muted/70 px-3 text-xs font-medium hover:bg-muted",
                   value === preset.value && "bg-primary/10 text-primary"
                 )}
-                onClick={() => setValue(preset.value)}
+                onClick={() => applyCombined(preset.value)}
               >
                 {t(preset.labelKey)}
               </Button>

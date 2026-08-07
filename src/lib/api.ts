@@ -2860,14 +2860,6 @@ export async function workTaskStart(id: number): Promise<void> {
   return getTransport().call("work_task_start", { id })
 }
 
-/** Queue every todo of the folder — or of every folder holding todos when
- *  `folderId` is null. Returns how many were claimed. */
-export async function workTaskStartAll(
-  folderId: number | null
-): Promise<number> {
-  return getTransport().call("work_task_start_all", { folderId })
-}
-
 /** failed → queued. `note` (optional) reaches the retry prompt. */
 export async function workTaskRetry(
   id: number,

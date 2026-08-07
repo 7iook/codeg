@@ -1,8 +1,9 @@
-import { render, screen } from "@testing-library/react"
+import { act, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
 import { describe, expect, it, vi } from "vitest"
 import enMessages from "@/i18n/messages/en.json"
+import { TooltipProvider } from "@/components/ui/tooltip"
 import type { WorkTask } from "@/lib/types"
 import { TaskRow } from "./task-row"
 
@@ -63,12 +64,15 @@ function renderRow(
   }
   return render(
     <NextIntlClientProvider locale="en" messages={enMessages}>
-      <TaskRow
-        task={t}
-        folderName="repo"
-        now={Date.parse("2026-08-01T01:00:00Z")}
-        {...props}
-      />
+      {/* TaskList mounts one per list; the rows' action tooltips need it. */}
+      <TooltipProvider>
+        <TaskRow
+          task={t}
+          folderName="repo"
+          now={Date.parse("2026-08-01T01:00:00Z")}
+          {...props}
+        />
+      </TooltipProvider>
     </NextIntlClientProvider>
   )
 }
@@ -100,7 +104,9 @@ describe("TaskRow", () => {
     const onArchive = vi.fn()
     renderRow(task({ status: "done" }), { onOpen, onArchive })
 
-    screen.getByRole("button", { name: "Archive" }).focus()
+    // Focusing opens the button's tooltip, so the raw DOM call needs its own
+    // act() — user-event wraps its interactions but this isn't one.
+    act(() => screen.getByRole("button", { name: "Archive" }).focus())
     await userEvent.keyboard("{Enter}")
     expect(onArchive).toHaveBeenCalledTimes(1)
     // The keydown bubbles to the row — which must neither open the sheet nor
@@ -108,20 +114,37 @@ describe("TaskRow", () => {
     expect(onOpen).not.toHaveBeenCalled()
   })
 
-  it("keeps the session viewer on an archived task", () => {
+  it("keeps the session viewer on an archived task", async () => {
+    const onViewSession = vi.fn()
     renderRow(
       task({
         status: "done",
         archived_at: "2026-08-01T02:00:00Z",
         conversation_id: 42,
-      })
+      }),
+      { onViewSession }
     )
-    expect(
-      screen.getByRole("button", { name: "View session" })
-    ).toBeInTheDocument()
+    // Unarchive is the primary; the session viewer is a secondary — both are
+    // on the row, named by their aria-label (the visible label is a tooltip).
     expect(
       screen.getByRole("button", { name: "Unarchive" })
     ).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "View session" }))
+    expect(onViewSession).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not open the detail sheet when a secondary action is clicked", async () => {
+    const onOpen = vi.fn()
+    const onEdit = vi.fn()
+    const onSchedule = vi.fn()
+    renderRow(task({ status: "todo" }), { onOpen, onEdit, onSchedule })
+
+    // Every action is expanded on the row — no overflow menu to open first.
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }))
+    expect(onEdit).toHaveBeenCalledTimes(1)
+    await userEvent.click(screen.getByRole("button", { name: "Schedule" }))
+    expect(onSchedule).toHaveBeenCalledTimes(1)
+    expect(onOpen).not.toHaveBeenCalled()
   })
 
   it("shows the error of a failed task and the live progress of a running one", () => {

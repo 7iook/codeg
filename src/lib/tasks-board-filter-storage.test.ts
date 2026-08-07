@@ -29,47 +29,28 @@ describe("tasks view mode storage", () => {
 })
 
 describe("tasks status filter storage", () => {
-  it("round-trips a selection and keeps null meaning every status", () => {
+  it("round-trips a group and keeps null meaning every status", () => {
     expect(loadTasksStatusFilter()).toBeNull()
-    saveTasksStatusFilter(["review", "failed"])
-    expect(loadTasksStatusFilter()).toEqual(["review", "failed"])
-    // Clearing removes the entry rather than storing an empty selection that
-    // would read back as "hide everything".
+    saveTasksStatusFilter("attention")
+    expect(loadTasksStatusFilter()).toBe("attention")
+    // Clearing removes the entry rather than storing something that would read
+    // back as a filter nobody chose.
     saveTasksStatusFilter(null)
     expect(localStorage.getItem(STATUS_FILTER_KEY)).toBeNull()
     expect(loadTasksStatusFilter()).toBeNull()
   })
 
-  it("normalizes a stored selection to column order", () => {
-    saveTasksStatusFilter(["failed", "todo"])
-    expect(loadTasksStatusFilter()).toEqual(["todo", "failed"])
-  })
-
-  it("drops unknown statuses and degrades an empty or full set to null", () => {
+  it("falls back to every status on an unknown entry — including the old per-status selection", () => {
+    // What this key held while the filter was a checkbox menu. It matches no
+    // group, so it degrades to "every status" and the next save overwrites it.
     localStorage.setItem(
       STATUS_FILTER_KEY,
-      JSON.stringify(["review", "obsolete_status"])
+      JSON.stringify(["review", "failed"])
     )
-    expect(loadTasksStatusFilter()).toEqual(["review"])
-
-    localStorage.setItem(STATUS_FILTER_KEY, JSON.stringify(["nope"]))
     expect(loadTasksStatusFilter()).toBeNull()
 
-    localStorage.setItem(
-      STATUS_FILTER_KEY,
-      JSON.stringify([
-        "todo",
-        "queued",
-        "preparing",
-        "running",
-        "awaiting_input",
-        "review",
-        "merging",
-        "done",
-        "failed",
-        "canceled",
-      ])
-    )
+    // A single status id is not a group either — `review` lives in `attention`.
+    localStorage.setItem(STATUS_FILTER_KEY, "review")
     expect(loadTasksStatusFilter()).toBeNull()
 
     localStorage.setItem(STATUS_FILTER_KEY, "{not json")

@@ -1,7 +1,5 @@
 "use client"
 
-import type { WorkTaskStatus } from "@/lib/types"
-
 const BOARD_FILTER_KEY = "workspace:tasks-board-filter"
 const VIEW_MODE_KEY = "workspace:tasks-view-mode"
 const STATUS_FILTER_KEY = "workspace:tasks-status-filter"
@@ -23,22 +21,17 @@ export type TasksViewMode = "board" | "list"
 
 export const DEFAULT_TASKS_VIEW_MODE: TasksViewMode = "board"
 
-/** Every status the list view can filter on. Kept in sync with
- *  `WorkTaskStatus` by `STATUSES_BY_COLUMN` (board-columns.ts), whose test
- *  asserts the two agree — this copy exists so the storage layer stays free of
- *  component imports. */
-const KNOWN_STATUSES: readonly WorkTaskStatus[] = [
+/** The groups the list view can filter on — the board's four columns. Mirrors
+ *  `BOARD_COLUMN_IDS` (board-columns.ts), whose test asserts the two agree —
+ *  this copy exists so the storage layer stays free of component imports. */
+export const TASKS_STATUS_GROUPS = [
   "todo",
-  "queued",
-  "preparing",
-  "running",
-  "awaiting_input",
-  "review",
-  "merging",
+  "inProgress",
+  "attention",
   "done",
-  "failed",
-  "canceled",
-]
+] as const
+
+export type TasksStatusGroup = (typeof TASKS_STATUS_GROUPS)[number]
 
 export function loadTasksBoardFilter(): TasksBoardFilter {
   if (typeof window === "undefined") return DEFAULT_TASKS_BOARD_FILTER
@@ -93,32 +86,28 @@ export function saveTasksViewMode(mode: TasksViewMode): void {
 
 /**
  * The list view's status selection. `null` means "every status" — the default,
- * and what an empty or unreadable entry falls back to. Unknown strings are
- * dropped so a stored selection survives a status being renamed or removed;
- * one that ends up empty (or complete) that way degrades to `null` rather than
- * hiding every task.
+ * and what anything unrecognized falls back to rather than an empty list.
+ *
+ * Stored as the bare group id (like the view mode above). That also migrates
+ * the entry this key used to hold — a JSON array of individual statuses, from
+ * when the filter was a checkbox menu: it matches no group, so it reads back as
+ * "every status" and the next save overwrites it.
  */
-export function loadTasksStatusFilter(): WorkTaskStatus[] | null {
+export function loadTasksStatusFilter(): TasksStatusGroup | null {
   if (typeof window === "undefined") return null
   try {
     const raw = localStorage.getItem(STATUS_FILTER_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) return null
-    const known = KNOWN_STATUSES.filter((status) => parsed.includes(status))
-    if (known.length === 0 || known.length === KNOWN_STATUSES.length)
-      return null
-    return [...known]
+    return TASKS_STATUS_GROUPS.find((group) => group === raw) ?? null
   } catch {
     return null
   }
 }
 
-export function saveTasksStatusFilter(statuses: WorkTaskStatus[] | null): void {
+export function saveTasksStatusFilter(group: TasksStatusGroup | null): void {
   if (typeof window === "undefined") return
   try {
-    if (statuses == null) localStorage.removeItem(STATUS_FILTER_KEY)
-    else localStorage.setItem(STATUS_FILTER_KEY, JSON.stringify(statuses))
+    if (group == null) localStorage.removeItem(STATUS_FILTER_KEY)
+    else localStorage.setItem(STATUS_FILTER_KEY, group)
   } catch {
     /* ignore */
   }

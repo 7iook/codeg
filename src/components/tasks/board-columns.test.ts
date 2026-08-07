@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest"
 import {
   ALL_WORK_TASK_STATUSES,
+  BOARD_COLUMN_IDS,
   columnForStatus,
   filterTasksForList,
   groupTasksByColumn,
   STATUSES_BY_COLUMN,
   type BoardColumnId,
 } from "./board-columns"
+import { TASKS_STATUS_GROUPS } from "@/lib/tasks-board-filter-storage"
 import type { WorkTask, WorkTaskStatus } from "@/lib/types"
 
 function task(
@@ -99,41 +101,62 @@ describe("STATUSES_BY_COLUMN", () => {
     )
     expect([...ALL_WORK_TASK_STATUSES].sort()).toEqual([...every].sort())
   })
+
+  it("agrees with the storage layer's copy of the group ids", () => {
+    // tasks-board-filter-storage.ts duplicates these ids so it stays free of
+    // component imports; a drift would silently reject a stored selection.
+    expect([...TASKS_STATUS_GROUPS]).toEqual(BOARD_COLUMN_IDS)
+  })
 })
 
 describe("filterTasksForList", () => {
-  it("returns every non-archived task, freshest first, with no status filter", () => {
+  it("returns every non-archived task, freshest first, with no group filter", () => {
     const tasks = [
       task(1, "todo", { updated_at: "2026-08-01T01:00:00Z" }),
       task(2, "running", { updated_at: "2026-08-01T03:00:00Z" }),
-      // Canceled is NOT hidden here — in list mode it is just another status,
-      // governed by the status filter rather than the board's toggle.
       task(3, "canceled", { updated_at: "2026-08-01T02:00:00Z" }),
       task(4, "done", {
         updated_at: "2026-08-01T04:00:00Z",
         archived_at: "2026-08-01T04:00:00Z",
       }),
     ]
-    expect(filterTasksForList(tasks, null, false).map((t) => t.id)).toEqual([
-      2, 3, 1,
-    ])
+    expect(
+      filterTasksForList(tasks, null, true, false).map((t) => t.id)
+    ).toEqual([2, 3, 1])
     // Archived joins the list — still freshest-first — once the toggle is on.
-    expect(filterTasksForList(tasks, null, true).map((t) => t.id)).toEqual([
-      4, 2, 3, 1,
-    ])
+    expect(
+      filterTasksForList(tasks, null, true, true).map((t) => t.id)
+    ).toEqual([4, 2, 3, 1])
   })
 
-  it("keeps only the selected statuses", () => {
+  it("keeps only the selected column's statuses", () => {
     const tasks = [
       task(1, "todo"),
       task(2, "review"),
       task(3, "failed"),
       task(4, "canceled"),
     ]
+    // 等你处理 aggregates review + failed (+ awaiting_input / merging).
     expect(
-      filterTasksForList(tasks, ["review", "failed"], false).map((t) => t.id)
+      filterTasksForList(tasks, "attention", true, false).map((t) => t.id)
     ).toEqual([2, 3])
-    expect(filterTasksForList(tasks, [], false)).toEqual([])
+    // 已完成 is done + canceled — the filter narrows to a whole column, so
+    // canceled comes along with it.
+    expect(
+      filterTasksForList(tasks, "done", true, false).map((t) => t.id)
+    ).toEqual([4])
+  })
+
+  it("hides canceled tasks unless the toggle is on, like the board", () => {
+    // The group filter cannot single `canceled` out (it lives inside Done), so
+    // this toggle is the only control that can — shared with the board.
+    const tasks = [task(1, "done"), task(2, "canceled")]
+    expect(
+      filterTasksForList(tasks, null, false, false).map((t) => t.id)
+    ).toEqual([1])
+    expect(
+      filterTasksForList(tasks, "done", false, false).map((t) => t.id)
+    ).toEqual([1])
   })
 
   it("does not mutate the list it was given", () => {
@@ -141,7 +164,7 @@ describe("filterTasksForList", () => {
       task(1, "todo", { updated_at: "2026-08-01T01:00:00Z" }),
       task(2, "todo", { updated_at: "2026-08-01T05:00:00Z" }),
     ]
-    filterTasksForList(tasks, null, false)
+    filterTasksForList(tasks, null, true, false)
     expect(tasks.map((t) => t.id)).toEqual([1, 2])
   })
 })

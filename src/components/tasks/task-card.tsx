@@ -59,51 +59,107 @@ export function statusLabelKey(status: WorkTask["status"]): StatusLabelKey {
  * same-looking chips: live statuses are primary-colored spinner text,
  * attention statuses an outlined amber pill, `done` a bare green check,
  * `failed` a tinted red pill, the rest a muted pill.
+ *
+ * The label truncates inside whatever width it is given (with the full text on
+ * `title`): the list view puts the chip in a fixed status column, and locales
+ * whose "awaiting input" runs to twenty characters must not blow that column
+ * out. In the card, where the chip sizes to its content, this never engages.
  */
-export function StatusChip({ task }: { task: WorkTask }) {
+export function StatusChip({
+  task,
+  className,
+}: {
+  task: WorkTask
+  className?: string
+}) {
   const t = useTranslations("Tasks")
   // An interrupted failure (restart) reads differently from an agent failure.
   const label =
     task.status === "failed" && task.failure_reason === "interrupted"
       ? t("statusInterrupted")
       : t(statusLabelKey(task.status))
+
+  let tone: string
+  let icon: React.ReactNode = null
   switch (task.status) {
     case "queued":
     case "preparing":
     case "running":
     case "merging":
-      return (
-        <span className="inline-flex shrink-0 items-center gap-1 text-[0.6875rem] font-medium text-primary">
-          <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-          {label}
-        </span>
+      tone = "gap-1 text-[0.6875rem] text-primary"
+      icon = (
+        <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
       )
+      break
     case "awaiting_input":
     case "review":
-      return (
-        <span className="inline-flex shrink-0 items-center rounded-full border border-amber-500/45 bg-amber-500/5 px-2 py-1 text-[0.625rem] font-medium leading-none text-amber-600 dark:border-amber-400/40 dark:text-amber-400">
-          {label}
-        </span>
-      )
+      tone =
+        "rounded-full border border-amber-500/45 bg-amber-500/5 px-2 py-1 text-[0.625rem] text-amber-600 dark:border-amber-400/40 dark:text-amber-400"
+      break
     case "done":
-      return (
-        <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-1 text-[0.625rem] font-medium leading-none text-emerald-600 dark:text-emerald-400">
-          <Check className="size-2.5" strokeWidth={3} aria-hidden="true" />
-          {label}
-        </span>
+      tone =
+        "gap-1 rounded-full bg-emerald-500/10 px-2 py-1 text-[0.625rem] text-emerald-600 dark:text-emerald-400"
+      icon = (
+        <Check
+          className="size-2.5 shrink-0"
+          strokeWidth={3}
+          aria-hidden="true"
+        />
       )
+      break
     case "failed":
-      return (
-        <span className="inline-flex shrink-0 items-center rounded-full bg-destructive/10 px-2 py-1 text-[0.625rem] font-medium leading-none text-destructive">
-          {label}
-        </span>
-      )
+      tone =
+        "rounded-full bg-destructive/10 px-2 py-1 text-[0.625rem] text-destructive"
+      break
     default:
-      return (
-        <span className="inline-flex shrink-0 items-center rounded-full bg-muted px-2 py-1 text-[0.625rem] font-medium leading-none text-muted-foreground">
-          {label}
-        </span>
-      )
+      tone =
+        "rounded-full bg-muted px-2 py-1 text-[0.625rem] text-muted-foreground"
+  }
+
+  return (
+    <span
+      className={cn(
+        "inline-flex min-w-0 shrink-0 items-center font-medium leading-none",
+        tone,
+        className
+      )}
+      title={label}
+    >
+      {icon}
+      <span className="truncate">{label}</span>
+    </span>
+  )
+}
+
+/**
+ * The list row's leading accent bar — the board's column markers turned on
+ * their side, so the two views speak one colour language.
+ *
+ * It refines the mapping where a board column lumps two outcomes together:
+ * `failed` reads red rather than the attention column's amber, and `canceled`
+ * stays neutral instead of inheriting Done's green (a green bar on a row that
+ * says "已取消" is a lie the board gets away with only because its column
+ * heading says "Done" once, at the top).
+ */
+export function statusAccent(task: WorkTask): string {
+  if (task.archived_at != null) return "bg-muted-foreground/20"
+  switch (task.status) {
+    case "todo":
+    case "queued":
+      return "bg-muted-foreground/35"
+    case "preparing":
+    case "running":
+      return "bg-primary"
+    case "awaiting_input":
+    case "review":
+    case "merging":
+      return "bg-amber-500"
+    case "failed":
+      return "bg-destructive"
+    case "done":
+      return "bg-emerald-500"
+    case "canceled":
+      return "bg-muted-foreground/25"
   }
 }
 

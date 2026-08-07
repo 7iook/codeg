@@ -355,7 +355,7 @@ impl ChatAuthoringAccess for DbChatAuthoring {
                 folder_path: Some(folder.path),
                 agent_type: spec.agent_type.clone(),
                 note: Some(
-                    "Queued as a to-do on the task board; the user starts it from there \
+                    "Queued as a to-do; the user starts it from there \
                      (or auto-processing picks it up)."
                         .to_string(),
                 ),

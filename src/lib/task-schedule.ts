@@ -48,6 +48,48 @@ export function isoToDateTimeLocalValue(iso: string): string | null {
   return Number.isNaN(date.getTime()) ? null : toDateTimeLocalValue(date)
 }
 
+/**
+ * The picker is two controls — a calendar and a time input — while everything
+ * downstream (presets, parsing, the wire) speaks one `YYYY-MM-DDTHH:mm` value.
+ * These two are that seam; keeping it here rather than in the dialog is what
+ * lets the preset buttons keep emitting a single combined value.
+ */
+export function splitDateTimeLocalValue(value: string): {
+  date: string
+  time: string
+} {
+  if (!INPUT_PATTERN.test(value)) return { date: "", time: "" }
+  const [date, time] = value.split("T")
+  return { date, time }
+}
+
+/** The two halves → one value. Empty when either half is missing: a date with
+ *  no time is not a plan, and `parseDateTimeLocalValue` rejects it as such. */
+export function joinDateAndTime(date: string, time: string): string {
+  if (!date || !time) return ""
+  return `${date}T${time}`
+}
+
+/**
+ * The time to fill in once a date is chosen and the time is still blank.
+ *
+ * The dialog opens EMPTY — an unplanned task must not look scheduled — but
+ * leaving the user to fill both halves before anything can be saved turns one
+ * decision into two. Picking the date is the decision; this supplies the rest:
+ * the next full hour when the date is today (the plan is "soon"), and 09:00
+ * otherwise (a day away, "the morning of" is what people mean).
+ */
+export function defaultTimeForDate(date: string, now: Date): string {
+  if (date !== toDateTimeLocalValue(now).slice(0, 10)) return "09:00"
+  const next = new Date(now)
+  next.setMinutes(0, 0, 0)
+  next.setHours(next.getHours() + 1)
+  // Rolled past midnight — the hour after 23:xx belongs to tomorrow, and the
+  // date is already fixed, so end the day instead of jumping back to 00:00.
+  if (next.getDate() !== now.getDate()) return "23:59"
+  return toDateTimeLocalValue(next).slice(11)
+}
+
 /** Compact "when": no year — a plan more than a year out is not a use case. */
 export function formatScheduleShort(iso: string): string {
   const date = new Date(iso)
@@ -57,6 +99,21 @@ export function formatScheduleShort(iso: string): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+  })
+}
+
+/**
+ * A `YYYY-MM-DD` day, spelled for the date picker's trigger. Takes the app
+ * locale explicitly — unlike the two above it labels a control the user is
+ * about to operate, so it must match the UI language rather than the browser's.
+ */
+export function formatScheduleDay(day: string, locale: string): string {
+  const date = new Date(`${day}T00:00`)
+  if (Number.isNaN(date.getTime())) return day
+  return date.toLocaleDateString(locale, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
   })
 }
 
