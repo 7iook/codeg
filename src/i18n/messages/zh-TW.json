@@ -3996,6 +3996,19 @@
     "saveFailed": "儲存工作階段資訊設定失敗",
     "loadFailed": "載入失敗：{detail}"
   },
+  "ChatAuthoringSettings": {
+    "title": "從聊天中建立",
+    "description": "允許智能體把對話變成定時或排隊的工作：儲存一條按 cron 執行的自動化，或在任務看板上排一張卡片。兩者預設關閉，因為這些工具會寫入應用程式狀態，而定時自動化還會自行啟動智能體。",
+    "enableAutomations": "建立自動化",
+    "enableAutomationsHint": "在開啟後啟動的智能體將獲得 create_automation 工具。",
+    "enableWorkTasks": "建立任務看板任務",
+    "enableWorkTasksHint": "在開啟後啟動的智能體將獲得 create_work_task 工具。",
+    "save": "儲存",
+    "saving": "儲存中…",
+    "saved": "從聊天中建立的設定已儲存",
+    "saveFailed": "儲存從聊天中建立的設定失敗",
+    "loadFailed": "載入失敗：{detail}"
+  },
   "AskQuestionSettings": {
     "title": "向使用者提問",
     "description": "允許智能體暫停並向你提出多選問題，問題會顯示在對話輸入框上方。智能體會一直等待，直到你作答（或略過）。",

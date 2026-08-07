@@ -3996,6 +3996,19 @@
     "saveFailed": "Falha ao salvar as configurações de informações da sessão",
     "loadFailed": "Falha ao carregar: {detail}"
   },
+  "ChatAuthoringSettings": {
+    "title": "Criar a partir do chat",
+    "description": "Permite que agentes transformem uma conversa em trabalho agendado ou na fila: salvar uma automação que roda por cron, ou colocar um cartão no quadro de tarefas. Ambos vêm desligados porque estas ferramentas escrevem no estado do app e uma automação agendada chega a iniciar agentes por conta própria.",
+    "enableAutomations": "Criar automações",
+    "enableAutomationsHint": "Adiciona a ferramenta create_automation aos agentes iniciados depois de ativar isto.",
+    "enableWorkTasks": "Criar tarefas do quadro",
+    "enableWorkTasksHint": "Adiciona a ferramenta create_work_task aos agentes iniciados depois de ativar isto.",
+    "save": "Salvar",
+    "saving": "Salvando…",
+    "saved": "Configurações de criar a partir do chat salvas",
+    "saveFailed": "Falha ao salvar as configurações de criar a partir do chat",
+    "loadFailed": "Falha ao carregar: {detail}"
+  },
   "AskQuestionSettings": {
     "title": "Perguntar ao usuário",
     "description": "Permite que os agentes pausem e façam uma pergunta de múltipla escolha que aparece acima da caixa de entrada da conversa. O agente aguarda até você responder (ou pular).",

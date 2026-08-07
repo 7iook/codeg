@@ -3996,6 +3996,19 @@
     "saveFailed": "Échec de l'enregistrement des paramètres d'infos de session",
     "loadFailed": "Échec du chargement : {detail}"
   },
+  "ChatAuthoringSettings": {
+    "title": "Créer depuis le chat",
+    "description": "Permet aux agents de transformer une conversation en travail planifié ou mis en file : enregistrer une automatisation qui s'exécute selon un cron, ou déposer une carte sur le tableau des tâches. Les deux sont désactivés par défaut car ces outils écrivent l'état de l'application et une automatisation planifiée finit par lancer des agents d'elle-même.",
+    "enableAutomations": "Créer des automatisations",
+    "enableAutomationsHint": "Ajoute l'outil create_automation aux agents démarrés après activation.",
+    "enableWorkTasks": "Créer des tâches du tableau",
+    "enableWorkTasksHint": "Ajoute l'outil create_work_task aux agents démarrés après activation.",
+    "save": "Enregistrer",
+    "saving": "Enregistrement…",
+    "saved": "Paramètres de création depuis le chat enregistrés",
+    "saveFailed": "Échec de l'enregistrement des paramètres de création depuis le chat",
+    "loadFailed": "Échec du chargement : {detail}"
+  },
   "AskQuestionSettings": {
     "title": "Poser une question à l'utilisateur",
     "description": "Permet aux agents de s'interrompre et de vous poser une question à choix multiples affichée au-dessus de la zone de saisie de la conversation. L'agent attend votre réponse (ou que vous ignoriez).",

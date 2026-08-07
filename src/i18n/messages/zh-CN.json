@@ -3996,6 +3996,19 @@
     "saveFailed": "保存会话信息设置失败",
     "loadFailed": "加载失败：{detail}"
   },
+  "ChatAuthoringSettings": {
+    "title": "从聊天中创建",
+    "description": "允许智能体把对话变成定时或排队的工作：保存一条按 cron 运行的自动化，或在任务看板上排一张卡片。两者默认关闭，因为这些工具会写入应用状态，而定时自动化还会自行启动智能体。",
+    "enableAutomations": "创建自动化",
+    "enableAutomationsHint": "在开启后启动的智能体将获得 create_automation 工具。",
+    "enableWorkTasks": "创建任务看板任务",
+    "enableWorkTasksHint": "在开启后启动的智能体将获得 create_work_task 工具。",
+    "save": "保存",
+    "saving": "保存中…",
+    "saved": "从聊天中创建的设置已保存",
+    "saveFailed": "保存从聊天中创建的设置失败",
+    "loadFailed": "加载失败：{detail}"
+  },
   "AskQuestionSettings": {
     "title": "向用户提问",
     "description": "允许智能体暂停并向你提出多选问题，问题会显示在会话输入框上方。智能体会一直等待，直到你作答（或跳过）。",

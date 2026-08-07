@@ -3996,6 +3996,19 @@
     "saveFailed": "No se pudieron guardar los ajustes de información de sesión",
     "loadFailed": "Error al cargar: {detail}"
   },
+  "ChatAuthoringSettings": {
+    "title": "Crear desde el chat",
+    "description": "Permite que los agentes conviertan una conversación en trabajo programado o en cola: guardar una automatización que se ejecuta con cron, o añadir una tarjeta al tablero de tareas. Ambas opciones están desactivadas por defecto porque estas herramientas escriben en el estado de la aplicación y una automatización programada llega a iniciar agentes por su cuenta.",
+    "enableAutomations": "Crear automatizaciones",
+    "enableAutomationsHint": "Añade la herramienta create_automation a los agentes iniciados después de activarlo.",
+    "enableWorkTasks": "Crear tareas del tablero",
+    "enableWorkTasksHint": "Añade la herramienta create_work_task a los agentes iniciados después de activarlo.",
+    "save": "Guardar",
+    "saving": "Guardando…",
+    "saved": "Ajustes de crear desde el chat guardados",
+    "saveFailed": "No se pudieron guardar los ajustes de crear desde el chat",
+    "loadFailed": "Error al cargar: {detail}"
+  },
   "AskQuestionSettings": {
     "title": "Preguntar al usuario",
     "description": "Permite que los agentes se detengan y te hagan una pregunta de opción múltiple que aparece encima del cuadro de entrada de la conversación. El agente espera hasta que respondas (u omitas).",

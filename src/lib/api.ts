@@ -4213,6 +4213,26 @@ export async function setSessionInfoSettings(
   return getTransport().call("set_session_info_settings", { settings })
 }
 
+// ─── Create-from-chat (chat authoring) settings ────────────────────────────
+
+/** Mirror of Rust `ChatAuthoringSettings`. Both default OFF — these tools write
+ * app state (and a scheduled automation goes on to spawn agents), so they are
+ * opt-in rather than on like the read-only lookups. */
+export interface ChatAuthoringSettings {
+  automations_enabled: boolean
+  work_tasks_enabled: boolean
+}
+
+export async function getChatAuthoringSettings(): Promise<ChatAuthoringSettings> {
+  return getTransport().call("get_chat_authoring_settings")
+}
+
+export async function setChatAuthoringSettings(
+  settings: ChatAuthoringSettings
+): Promise<ChatAuthoringSettings> {
+  return getTransport().call("set_chat_authoring_settings", { settings })
+}
+
 /** Live probe — opens a transient ACP connection to `agent_type`, reads what
  * it advertises (modes / config_options), and tears down. Used by the
  * delegation-settings UI so the option set on screen matches exactly what

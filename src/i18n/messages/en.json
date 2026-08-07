@@ -3996,6 +3996,19 @@
     "saveFailed": "Failed to save session info settings",
     "loadFailed": "Failed to load: {detail}"
   },
+  "ChatAuthoringSettings": {
+    "title": "Create from chat",
+    "description": "Let agents turn a conversation into scheduled or queued work: save an automation that runs on a cron, or drop a card on the task board. Both are off by default because these tools write app state and a scheduled automation goes on to start agents on its own.",
+    "enableAutomations": "Create automations",
+    "enableAutomationsHint": "Adds the create_automation tool to agents started after this is turned on.",
+    "enableWorkTasks": "Create task board tasks",
+    "enableWorkTasksHint": "Adds the create_work_task tool to agents started after this is turned on.",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Create-from-chat settings saved",
+    "saveFailed": "Failed to save create-from-chat settings",
+    "loadFailed": "Failed to load: {detail}"
+  },
   "AskQuestionSettings": {
     "title": "Ask user question",
     "description": "Let agents pause and ask you a multiple-choice question that appears above the conversation input box. The agent waits until you answer (or skip).",

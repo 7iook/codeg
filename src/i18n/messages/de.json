@@ -3996,6 +3996,19 @@
     "saveFailed": "Einstellungen für Sitzungsinformationen konnten nicht gespeichert werden",
     "loadFailed": "Laden fehlgeschlagen: {detail}"
   },
+  "ChatAuthoringSettings": {
+    "title": "Aus dem Chat erstellen",
+    "description": "Erlaubt Agenten, ein Gespräch in geplante oder eingereihte Arbeit zu verwandeln: eine Automatisierung speichern, die per Cron läuft, oder eine Karte auf dem Aufgabenboard ablegen. Beides ist standardmäßig aus, weil diese Tools den App-Zustand schreiben und eine geplante Automatisierung von sich aus Agenten startet.",
+    "enableAutomations": "Automatisierungen erstellen",
+    "enableAutomationsHint": "Fügt das create_automation-Tool zu Agenten hinzu, die nach dem Aktivieren gestartet werden.",
+    "enableWorkTasks": "Aufgaben im Aufgabenboard erstellen",
+    "enableWorkTasksHint": "Fügt das create_work_task-Tool zu Agenten hinzu, die nach dem Aktivieren gestartet werden.",
+    "save": "Speichern",
+    "saving": "Wird gespeichert…",
+    "saved": "Einstellungen für Aus dem Chat erstellen gespeichert",
+    "saveFailed": "Einstellungen für Aus dem Chat erstellen konnten nicht gespeichert werden",
+    "loadFailed": "Laden fehlgeschlagen: {detail}"
+  },
   "AskQuestionSettings": {
     "title": "Benutzer fragen",
     "description": "Erlaubt Agenten, anzuhalten und dir eine Multiple-Choice-Frage zu stellen, die über dem Eingabefeld der Unterhaltung erscheint. Der Agent wartet, bis du antwortest (oder überspringst).",
