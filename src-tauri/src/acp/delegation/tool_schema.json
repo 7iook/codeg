@@ -33,6 +33,10 @@
           "type": "string",
           "description": "Absolute path the sub-agent runs in. Defaults to this session's working directory."
         },
+        "model": {
+          "type": "string",
+          "description": "Optional model id for THIS sub-agent, forwarded to the target CLI unchanged. Any id the user's own endpoint serves is valid — including non-Anthropic ids (e.g. a `gpt-*` or `deepseek-*` id) when their endpoint is a relay fronting several vendors — so this is not restricted to a fixed list. Omit it to inherit the model the user configured for that agent. WARNING: nominating an id the endpoint does NOT serve may not fail loudly — some relays silently answer with their own default model instead of erroring — so the run would quietly use a different model than you asked for. Only name an id you have reason to believe is served (one the user mentioned, or one already configured); when in doubt, omit this and take the configured default."
+        },
         "subagent_type": {
           "type": "string",
           "description": "Optional persona / sub-agent name INSIDE the target CLI (do not confuse with `agent_type`, which picks the CLI). Naming grammar: 1-64 chars matching `[A-Za-z0-9_-]`. Semantic strength splits across CLI families: `kiro` — REAL persona: translated to `kiro-cli acp --agent <name>`; kiro-cli loads the full definition from `<KIRO_HOME>/agents/<name>.json` (permissions, tools, and system prompt all take effect). `claude_code` / `codex` — BEST-EFFORT hint only: the broker reads `~/.claude/agents/<name>.md` or `~/.codex/agents/<name>.md`, strips the YAML frontmatter, and prepends the markdown BODY as a text hint to the first turn; frontmatter high-order fields (permission mode, tool allowlist, model, hook) DO NOT take effect on this leg. Any other agent_type — Ignored, with a `[note]` attached to the tool result so you know the request was silently downgraded; the delegation still runs.<<PERSONA_LISTS>>"

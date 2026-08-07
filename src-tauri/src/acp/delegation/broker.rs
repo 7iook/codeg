@@ -6328,6 +6328,7 @@ mod tests {
             external_handle: None,
 
             subagent_type: None,
+            model: None,
         }
     }
 
@@ -14061,6 +14062,7 @@ mod tests {
             requested_working_dir: None,
             external_handle: None,
             subagent_type: subagent_type.map(str::to_string),
+            model: None,
         }
     }
 

@@ -89,6 +89,7 @@ fn persona_request(
         requested_working_dir: None,
         external_handle: None,
         subagent_type: Some(subagent_type.to_string()),
+        model: None,
     }
 }
 

@@ -22,7 +22,9 @@ use crate::acp::delegation::transport::{
     BrokerResponse, BrokerSessionRequest, BrokerStatusRequest, BrokerTaskCompleteRequest,
     BrokerTaskProgressRequest,
 };
-use crate::acp::delegation::types::{DelegationRequest, DelegationTaskReport, TaskStatus};
+use crate::acp::delegation::types::{
+    DelegationError, DelegationRequest, DelegationTaskReport, TaskStatus,
+};
 use crate::acp::feedback::{PendingFeedback, SessionFeedbackAccess};
 use crate::acp::question::{QuestionOutcome, SessionQuestionAccess};
 use crate::acp::session_info::{SessionInfo, SessionInfoAccess};
@@ -666,6 +668,16 @@ impl DelegationListener {
             .clone()
             .or_else(|| Some(entry.working_dir.to_string_lossy().to_string()));
 
+        // The LLM's optional per-call model nomination. Normalized (not
+        // validated against any known-model list) — see
+        // [`normalize_requested_model`]. A rejected value aborts the whole
+        // call BEFORE any child is spawned: a silently dropped model would
+        // read to the LLM as "my choice was applied" when it wasn't.
+        let model = match normalize_requested_model(req.input.get("model")) {
+            Ok(model) => model,
+            Err(err) => return report_failed("invalid_model", &err.to_string()),
+        };
+
         let delegation_req = DelegationRequest {
             parent_connection_id: req.parent_connection_id,
             parent_conversation_id,
@@ -686,6 +698,7 @@ impl DelegationListener {
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
+            model,
         };
         self.broker.start_delegation(delegation_req).await
     }
@@ -841,6 +854,69 @@ fn parse_agent_type(raw: &str) -> Option<AgentType> {
     serde_json::from_value(serde_json::Value::String(raw.to_string())).ok()
 }
 
+/// Normalize the raw `model` argument of a `delegate_to_agent` call into the
+/// `Option<String>` the broker carries on [`DelegationRequest::model`].
+///
+/// `pub` so an integration test crate can assert the contract directly:
+/// `cargo test --lib` cannot launch on every host (a Tauri native dependency
+/// aborts the lib test binary at startup with `STATUS_ENTRYPOINT_NOT_FOUND` on
+/// this Windows host), and an integration crate links only the public API.
+///
+/// # Contract
+///
+/// | input | result |
+/// |---|---|
+/// | absent / `null` / any non-string JSON | `Ok(None)` — inherit the user's configured model |
+/// | `""` / whitespace-only | `Ok(None)` — same as absent |
+/// | `"  id  "` | `Ok(Some("id"))` — trimmed |
+/// | contains a control character | `Err(InvalidModel)` |
+/// | anything else | `Ok(Some(verbatim))` |
+///
+/// The blank-degrades-to-`None` posture matches
+/// [`crate::acp::connection::kiro_launch_args`], which applies the same
+/// `trim().filter(!is_empty)` to the panel-stored knobs: an empty knob means
+/// "unset", never "launch with an empty model".
+///
+/// # Why there is no allowlist
+///
+/// The id is served by the *user's own* endpoint, which may be a relay
+/// fronting any vendor, so an id this build has never heard of is legitimate.
+/// Checking against a list of known names would defeat the feature — it would
+/// reject exactly the custom ids the argument exists to carry.
+///
+/// # Why control characters are the one hard failure
+///
+/// The id is eventually carried to the child as a process env-var value / argv
+/// element. A NUL terminates a C string and a newline can't be represented in
+/// an env-var value at all, so such a value cannot arrive intact — it would be
+/// truncated or mangled somewhere downstream, and the LLM would see a
+/// successful delegation running on a model it did not ask for. Failing here,
+/// with a reason, is the only way that stays visible. This check rejects the
+/// full `char::is_control` class (C0, DEL, C1), not just `\n` / `\0`: ESC
+/// sequences and CR are equally unable to survive the trip, and admitting them
+/// would only move the failure somewhere harder to attribute.
+pub fn normalize_requested_model(raw: Option<&Value>) -> Result<Option<String>, DelegationError> {
+    // Non-string JSON degrades to "no model" rather than failing: a
+    // schema-violating companion must not be able to lose the user's whole
+    // tool call, and there is no plausible model id to recover from `42`.
+    let Some(value) = raw.and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if let Some(bad) = trimmed.chars().find(|c| c.is_control()) {
+        return Err(DelegationError::InvalidModel(format!(
+            "model id contains a control character (U+{:04X}) and cannot be \
+             passed to the agent; pass a plain model id, or omit `model` to \
+             use the configured default",
+            bad as u32
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 /// Default socket path for the running process, scoped to PID so multiple
 /// codeg instances on the same machine don't collide.
 ///
@@ -863,7 +939,7 @@ mod tests {
     use super::*;
     use crate::acp::delegation::broker::{ConversationDepthLookup, DelegationConfig};
     use crate::acp::delegation::spawner::{mock::MockSpawner, ConnectionSpawner, SpawnerError};
-    use crate::acp::delegation::types::{DelegationError, DelegationOutcome, DelegationSuccess};
+    use crate::acp::delegation::types::{DelegationOutcome, DelegationSuccess};
     use serde_json::json;
     use std::time::Duration;
     use tokio::io::duplex;
@@ -1305,6 +1381,7 @@ mod tests {
                 external_handle: None,
 
                 subagent_type: None,
+                model: None,
             })
             .await;
         let task_id = ack.task_id.clone().expect("running task carries an id");
@@ -1462,6 +1539,7 @@ mod tests {
                         external_handle: None,
 
                         subagent_type: None,
+                        model: None,
                     })
                     .await
                     .task_id
@@ -1568,6 +1646,7 @@ mod tests {
                 external_handle: None,
 
                 subagent_type: None,
+                model: None,
             })
             .await;
         let task_id = ack.task_id.clone().unwrap();
@@ -1621,6 +1700,7 @@ mod tests {
                     external_handle: Some("h-1".into()),
 
                     subagent_type: None,
+                    model: None,
                 };
                 broker.handle_request(req).await
             })

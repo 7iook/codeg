@@ -2715,6 +2715,7 @@ mod tests {
             external_handle: None,
 
             subagent_type: None,
+            model: None,
         }
     }
 

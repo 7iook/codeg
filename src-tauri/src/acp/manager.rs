@@ -6563,6 +6563,7 @@ mod tests {
                 external_handle: None,
 
                 subagent_type: None,
+                model: None,
             })
             .await;
         ack.task_id.expect("running ack carries a task id")
@@ -6826,6 +6827,7 @@ mod tests {
                         external_handle: None,
 
                         subagent_type: None,
+                        model: None,
                     })
                     .await
             })

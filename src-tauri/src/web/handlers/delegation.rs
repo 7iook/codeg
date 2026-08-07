@@ -439,6 +439,7 @@ mod happy_path_tests {
                 external_handle: None,
 
                 subagent_type: None,
+                model: None,
             })
             .await;
         let task_id = ack.task_id.expect("running task carries an id");

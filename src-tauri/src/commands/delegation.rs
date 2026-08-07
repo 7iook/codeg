@@ -898,6 +898,7 @@ mod tests {
                 requested_working_dir: None,
                 external_handle: None,
                 subagent_type: None,
+                model: None,
             })
             .await;
         let task_id = ack.task_id.expect("a running task carries an id");
@@ -971,6 +972,7 @@ mod tests {
                 requested_working_dir: None,
                 external_handle: None,
                 subagent_type: None,
+                model: None,
             })
             .await;
         let task_id = ack.task_id.expect("a running task carries an id");

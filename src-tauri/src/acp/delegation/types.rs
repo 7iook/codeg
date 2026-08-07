@@ -96,6 +96,31 @@ pub struct DelegationRequest {
     /// not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
+    /// Optional per-call model id nominated by the LLM's `delegate_to_agent`
+    /// call, forwarded to the target CLI unchanged. `None` = inherit whatever
+    /// the user configured for that agent (the settings panel's global knob),
+    /// which is the only mechanism that existed before this field.
+    ///
+    /// Deliberately NOT validated against any list of known model names: the
+    /// id is served by the *user's own* endpoint, which may be a relay in
+    /// front of any vendor, so an id this build has never heard of is a
+    /// legitimate value. The listener only normalizes it — trim, blank ⇒
+    /// `None` — and rejects the one class that cannot survive the trip to a
+    /// child process (control characters; see
+    /// [`super::listener::normalize_requested_model`]).
+    ///
+    /// # Not the same axis as `subagent_type`
+    ///
+    /// `subagent_type` picks a *persona* inside the target CLI (its system
+    /// prompt / tools / permissions); `model` picks the *LLM* that persona
+    /// runs on. They are independent: a call may set either, both, or
+    /// neither. Note the two can collide on one CLI family — a Kiro persona
+    /// definition can itself pin a model, and for `claude_code` / `codex`
+    /// personas the frontmatter `model` field is dropped on the Hint leg
+    /// anyway (see `subagent_type` above), which is part of why a per-call
+    /// `model` is useful there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +170,19 @@ pub enum DelegationError {
     /// Wire code is `"invalid_persona"`.
     #[error("invalid persona: {0}")]
     InvalidPersona(String),
+    /// The LLM nominated a per-call `model` whose value cannot be carried to
+    /// the child process — it contains a control character (newline, NUL, ...)
+    /// that no process env-var / argv value can represent. Detail carries the
+    /// user-visible reason. Wire code is `"invalid_model"`.
+    ///
+    /// This is the ONLY model input class that fails: an unrecognized-but-
+    /// well-formed id is passed through verbatim on purpose (the user's own
+    /// endpoint decides what it serves), and a blank id degrades to "inherit
+    /// the configured default". Failing loudly here rather than dropping the
+    /// value keeps a mangled id from reading as "my model choice was silently
+    /// ignored".
+    #[error("invalid model: {0}")]
+    InvalidModel(String),
     #[error("subagent runtime error: {0}")]
     SubagentRuntimeError(String),
     /// Child agent ended its turn via `refusal`. Often a backend / gateway
@@ -319,6 +357,7 @@ impl DelegationOutcome {
             DelegationError::InvalidWorkingDir(_) => "invalid_working_dir",
             DelegationError::SpawnFailed(_) => "spawn_failed",
             DelegationError::InvalidPersona(_) => "invalid_persona",
+            DelegationError::InvalidModel(_) => "invalid_model",
             DelegationError::SubagentRuntimeError(_) => "subagent_error",
             DelegationError::ChildRefusal => "child_refusal",
             DelegationError::ChildMaxTokens => "child_max_tokens",

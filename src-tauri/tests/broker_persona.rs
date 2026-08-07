@@ -74,6 +74,7 @@ fn persona_request(
         requested_working_dir: None,
         external_handle: None,
         subagent_type: subagent_type.map(str::to_string),
+        model: None,
     }
 }
 
