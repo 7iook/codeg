@@ -17,7 +17,10 @@ function turn(
   return { id, role, blocks: [{ type: "text", text: id }], timestamp }
 }
 
-function makeDetail(turns: MessageTurn[]): DbConversationDetail {
+function makeDetail(
+  turns: MessageTurn[],
+  inFlightUserTurnId: string | null = null
+): DbConversationDetail {
   return {
     summary: {
       id: CID,
@@ -37,6 +40,7 @@ function makeDetail(turns: MessageTurn[]): DbConversationDetail {
       pinned_at: null,
     },
     turns,
+    in_flight_user_turn_id: inFlightUserTurnId,
   }
 }
 
@@ -240,14 +244,25 @@ describe("liveOwnsActiveTurn strips only the ACTIVE round", () => {
   })
 
   it("still drops the persisted copy of the reply being streamed", () => {
-    // The DB caught up mid-stream: a3 is the partial persisted copy of the
+    // The DB caught up mid-stream: a2 is the partial persisted copy of the
     // very reply the live message is rendering — it must not double up.
-    const detail = makeDetail([
-      turn("u1", "user"),
-      turn("a1", "assistant"),
-      turn("u2", "user"),
-      turn("a2", "assistant"),
-    ])
+    //
+    // The backend's `in_flight_user_turn_id` is what says so. Without it this
+    // transcript is genuinely ambiguous: `[u1, a1, u2, a2]` is equally "a2 is
+    // the partial of the streaming reply" and "round 2 COMPLETED and the live
+    // stream is round 3 whose prompt has not been persisted yet" (the
+    // continuable delegation child of Requirement 4.7). Resolving that by
+    // position alone hides a completed reply, so the projection keeps history
+    // and relies on this anchor — see `delegation-multi-turn-timeline.test.ts`.
+    const detail = makeDetail(
+      [
+        turn("u1", "user"),
+        turn("a1", "assistant"),
+        turn("u2", "user"),
+        turn("a2", "assistant"),
+      ],
+      "u2"
+    )
     seedSession(CID, {
       detail,
       liveOwnsActiveTurn: true,
@@ -258,6 +273,32 @@ describe("liveOwnsActiveTurn strips only the ACTIVE round", () => {
       "u1",
       "a1",
       "u2",
+      `live-${CID}-m1`,
+    ])
+  })
+
+  it("keeps a completed earlier round when no in-flight anchor is reported", () => {
+    // Same transcript as above WITHOUT the backend anchor: the newest prompt
+    // has not reached the agent's JSONL yet, so a2 is a COMPLETED reply and
+    // hiding it would silently delete a round from the viewer. A transient
+    // visible duplicate is recoverable; a hidden completed round is not.
+    const detail = makeDetail([
+      turn("u1", "user"),
+      turn("a1", "assistant"),
+      turn("u2", "user"),
+      turn("a2", "assistant"),
+    ])
+    seedSession(CID, {
+      detail,
+      liveOwnsActiveTurn: true,
+      liveMessage: liveMsg("m1", "round three"),
+    })
+
+    expect(getTimelineTurns(CID).map((e) => e.turn.id)).toEqual([
+      "u1",
+      "a1",
+      "u2",
+      "a2",
       `live-${CID}-m1`,
     ])
   })

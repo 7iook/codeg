@@ -2471,49 +2471,56 @@ function computeTimelinePrefix(
   }
 
   // Phase 1: DB historical turns.
-  // [merge-v0.23.0] upstream/main v0.23.0 replaced HEAD's single-round-scoped
-  // strip (anchored on in_flight_user_turn_id, with a "at most one persisted
-  // user turn" fallback) with a last-persisted-user-turn anchor + first-
-  // assistant-turn fallback. The upstream shape is the correct one for the
-  // multi-round work-task viewer that also lands in this merge — a
-  // conversation now runs work → rework → retry → merge in one thread — and
-  // still degrades to the historical single-round behaviour when only one
-  // user turn is persisted (delegation kickoff). Keep upstream.
-  // When liveOwnsActiveTurn is set (read-only viewer), the live/local reply is
-  // authoritative for the ACTIVE reply — the persisted copy of that one reply
-  // must not render beside it. This eliminates the partial-plus-live duplicate
-  // for all timing scenarios, including a connection-id-null open where we
-  // can't read the live store during fetch.
+  // [merge-v0.23.4] upstream/main v0.23.0 replaced HEAD's round-scoped strip
+  // (anchored on `in_flight_user_turn_id`, with an "at most one persisted user
+  // turn" fallback) with a LAST-persisted-user-turn anchor. That anchor is
+  // unsound for the continuable delegation child HEAD had just shipped
+  // (Requirement 4.7): while round 3 streams before its prompt reaches the
+  // agent's JSONL, `[u1, a1, u2, a2]` is indistinguishable from "a2 is the
+  // partial of the streaming reply", so cutting after the last user turn
+  // DELETES the completed round-2 reply. Restore HEAD's rule — it subsumes
+  // upstream's multi-round intent (earlier rounds stay visible) without the
+  // history loss, and still degrades to the historical single-round behaviour
+  // for a one-shot kickoff.
   //
-  // Scoped to the active round: strip only what follows the LAST persisted
-  // user turn. For a one-shot delegation child ([user, assistant]) that is
-  // exactly the old "from the first assistant turn" rule. For a MULTI-ROUND
-  // session — a work task runs work → rework → retry → merge in one
-  // conversation — the old rule erased every earlier round from the viewer the
-  // whole time it was streaming, leaving only the kickoff and the live reply.
-  // With no persisted user turn at all (transcript still cold) there is no
-  // anchor, so fall back to the first assistant turn: the only assistant
-  // content that can exist is the reply being streamed.
+  // When liveOwnsActiveTurn is set (sub-agent dialog), the live/local reply is
+  // authoritative for the reply of the round it owns, so the persisted copy of
+  // THAT reply must not render beside it. Only the round's own assistant turns
+  // are stripped — every earlier round stays visible.
+  //
+  // Locating the round: the backend names the in-flight prompt
+  // (`detail.in_flight_user_turn_id`), so assistant turns after it are the
+  // partial of the reply now streaming. Without that anchor only the
+  // single-round shape is unambiguous: with at most one persisted user turn
+  // every persisted assistant turn belongs to the round the live/local reply
+  // owns (the delegation kickoff case, where the child's JSONL can even surface
+  // the reply before its prompt). With more than one round persisted and no
+  // anchor we keep everything: a visible duplicate is recoverable, a hidden
+  // completed round is not.
+  //
+  // (Delegation children used to be one-shot, and this stripped from the FIRST
+  // assistant turn onward. They are continuable now — Requirement 4.7 — so that
+  // cut would erase the whole earlier transcript during a continued turn.)
   const rawPersistedTurns = session.detail?.turns ?? []
   const hasLiveOrLocalReply =
     session.liveOwnsActiveTurn &&
     (session.liveMessage !== null || session.localTurns.length > 0)
-  let stripFrom = -1
-  if (hasLiveOrLocalReply) {
-    let lastUserIdx = -1
-    for (let i = rawPersistedTurns.length - 1; i >= 0; i--) {
-      if (rawPersistedTurns[i]!.role === "user") {
-        lastUserIdx = i
-        break
-      }
-    }
-    stripFrom =
-      lastUserIdx === -1
-        ? rawPersistedTurns.findIndex((t) => t.role === "assistant")
-        : lastUserIdx + 1
-  }
-  const persistedTurns =
-    stripFrom !== -1 ? rawPersistedTurns.slice(0, stripFrom) : rawPersistedTurns
+  const ownedRoundPromptId = session.detail?.in_flight_user_turn_id ?? null
+  const ownedRoundCut =
+    hasLiveOrLocalReply && ownedRoundPromptId !== null
+      ? rawPersistedTurns.findIndex(
+          (t) => t.role === "user" && t.id === ownedRoundPromptId
+        )
+      : -1
+  const stripOwnedRoundReply =
+    hasLiveOrLocalReply &&
+    (ownedRoundCut !== -1 ||
+      rawPersistedTurns.filter((t) => t.role === "user").length <= 1)
+  const persistedTurns = stripOwnedRoundReply
+    ? rawPersistedTurns.filter(
+        (t, i) => i <= ownedRoundCut || t.role !== "assistant"
+      )
+    : rawPersistedTurns
 
   // Suppress the persisted PARTIAL in-flight reply for a non-delegation
   // cross-client viewer. While a reply is streaming, some agents (OpenCode,
