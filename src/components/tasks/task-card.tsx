@@ -1,9 +1,17 @@
 "use client"
 
 import { useTranslations } from "next-intl"
-import { Check, CircleAlert, CircleCheck, CircleX, Loader2 } from "lucide-react"
+import {
+  CalendarClock,
+  Check,
+  CircleAlert,
+  CircleCheck,
+  CircleX,
+  Loader2,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { formatRelative } from "@/components/conversations/sidebar-conversation-grouping"
+import { formatScheduleFull, formatScheduleShort } from "@/lib/task-schedule"
 import { cn } from "@/lib/utils"
 import { buildTaskActions, type TaskActionItem } from "./task-actions"
 import type { TaskActionHandlers } from "./task-actions"
@@ -147,6 +155,27 @@ export function PreflightChip({ task }: { task: WorkTask }) {
 }
 
 /**
+ * The planned start of a to-do task. Primary-tinted rather than muted: it is
+ * the one thing on a pending card that says something WILL happen, and it is
+ * how a card that looks idle explains itself.
+ */
+export function ScheduleChip({ task }: { task: WorkTask }) {
+  const t = useTranslations("Tasks")
+  if (task.status !== "todo" || !task.scheduled_at) return null
+  return (
+    <span
+      className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[0.625rem] font-medium leading-none text-primary"
+      title={t("scheduleBadge", {
+        time: formatScheduleFull(task.scheduled_at),
+      })}
+    >
+      <CalendarClock className="size-2.5 shrink-0" aria-hidden="true" />
+      <span className="truncate">{formatScheduleShort(task.scheduled_at)}</span>
+    </span>
+  )
+}
+
+/**
  * One board card. The whole card opens the detail sheet; the footer carries
  * the shared action set (see `buildTaskActions`): one filled primary on the
  * left, round icon buttons for the secondaries on the right.
@@ -236,6 +265,7 @@ export function TaskCard({
           <span className="text-muted-foreground/40">·</span>
         ) : null}
         {when ? <span className="shrink-0">{when}</span> : null}
+        <ScheduleChip task={task} />
         <PreflightChip task={task} />
         {task.cleanup_state === "failed" ? (
           <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[0.625rem] text-amber-600 dark:text-amber-400">

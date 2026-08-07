@@ -1282,6 +1282,7 @@ mod tauri_app {
                 work_task_commands::work_task_start_all,
                 work_task_commands::work_task_retry,
                 work_task_commands::work_task_requeue,
+                work_task_commands::work_task_schedule,
                 work_task_commands::work_task_return,
                 work_task_commands::work_task_cancel,
                 work_task_commands::work_task_merge,

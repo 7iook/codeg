@@ -1285,6 +1285,10 @@ pub fn build_router(
             post(handlers::work_task::work_task_requeue),
         )
         .route(
+            "/work_task_schedule",
+            post(handlers::work_task::work_task_schedule),
+        )
+        .route(
             "/work_task_return",
             post(handlers::work_task::work_task_return),
         )

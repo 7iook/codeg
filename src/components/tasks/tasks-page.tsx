@@ -82,6 +82,7 @@ import { TaskEditorDialog } from "./task-editor-dialog"
 import { TaskMergeDialog } from "./task-merge-dialog"
 import { TaskRestartDialog, type TaskRestartKind } from "./task-restart-dialog"
 import { TaskRow } from "./task-row"
+import { TaskScheduleDialog } from "./task-schedule-dialog"
 import { TaskSettingsDialog } from "./task-settings-dialog"
 import { TasksSkeleton } from "./tasks-skeleton"
 import { TaskTranscriptDialog } from "./task-transcript-dialog"
@@ -261,6 +262,10 @@ export function TasksPage() {
   const [restartTask, setRestartTask] = useState<WorkTask | null>(null)
   const [restartKind, setRestartKind] = useState<TaskRestartKind>("retry")
   const [restartOpen, setRestartOpen] = useState(false)
+  // Planning a to-do task's start — tracked by id so the dialog reads the live
+  // row (a task claimed while it is open no longer accepts a plan).
+  const [scheduleTaskId, setScheduleTaskId] = useState<number | null>(null)
+  const [scheduleOpen, setScheduleOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   // Read-only live session viewer ("查看会话") — tracked by id so the dialog
   // header's status chip follows the live row (like the detail sheet).
@@ -340,6 +345,10 @@ export function TasksPage() {
     () => tasks.find((task) => task.id === sessionTaskId) ?? null,
     [tasks, sessionTaskId]
   )
+  const scheduleTask = useMemo(
+    () => tasks.find((task) => task.id === scheduleTaskId) ?? null,
+    [tasks, scheduleTaskId]
+  )
 
   const act = useCallback(
     async (fn: () => Promise<unknown>) => {
@@ -392,6 +401,11 @@ export function TasksPage() {
     setRestartOpen(true)
   }, [])
 
+  const openSchedule = useCallback((task: WorkTask) => {
+    setScheduleTaskId(task.id)
+    setScheduleOpen(true)
+  }, [])
+
   const openNewTask = useCallback(() => {
     setEditorTask(null)
     setEditorOpen(true)
@@ -413,8 +427,17 @@ export function TasksPage() {
         setEditorTask(task)
         setEditorOpen(true)
       },
+      onSchedule: () => openSchedule(task),
     }),
-    [act, openCancel, openComplete, openMerge, openRestart, openSession]
+    [
+      act,
+      openCancel,
+      openComplete,
+      openMerge,
+      openRestart,
+      openSchedule,
+      openSession,
+    ]
   )
 
   const positionGhost = useCallback((x: number, y: number) => {
@@ -1056,6 +1079,7 @@ export function TasksPage() {
           setEditorTask(task)
           setEditorOpen(true)
         }}
+        onSchedule={openSchedule}
       />
       <TaskMergeDialog
         open={mergeOpen}
@@ -1080,6 +1104,11 @@ export function TasksPage() {
         onOpenChange={setRestartOpen}
         task={restartTask}
         kind={restartKind}
+      />
+      <TaskScheduleDialog
+        open={scheduleOpen && scheduleTask != null}
+        onOpenChange={setScheduleOpen}
+        task={scheduleTask}
       />
       {/* Rendered after the sheet so it stacks above it when opened from
           within (both portal to body; later mount wins). */}

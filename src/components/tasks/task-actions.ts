@@ -2,6 +2,7 @@ import {
   Archive,
   ArchiveRestore,
   Ban,
+  CalendarClock,
   CircleCheck,
   GitMerge,
   MessageSquareText,
@@ -35,6 +36,8 @@ export interface TaskActionHandlers {
   onArchive: () => void
   /** Opens the editor dialog — offered while editable (todo / failed). */
   onEdit: () => void
+  /** Opens the schedule dialog — to-do tasks only (plan / re-plan / clear). */
+  onSchedule: () => void
 }
 
 type ActionLabelKey =
@@ -48,6 +51,7 @@ type ActionLabelKey =
   | "actionArchive"
   | "actionUnarchive"
   | "actionEdit"
+  | "actionSchedule"
 
 /**
  * The action set a task offers, shared by the board card and the list row so
@@ -83,6 +87,13 @@ export function buildTaskActions(
           icon: Pencil,
           label: t("actionEdit"),
           onClick: handlers.onEdit,
+        })
+        // "Start" and "start later" are the same decision — the plan lives
+        // next to the button that skips it.
+        secondaries.push({
+          icon: CalendarClock,
+          label: t("actionSchedule"),
+          onClick: handlers.onSchedule,
         })
         break
       case "queued":

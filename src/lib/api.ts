@@ -2888,6 +2888,18 @@ export async function workTaskRequeue(
 }
 
 /**
+ * Plan when a to-do task starts (`scheduledAt` is an ISO instant; `null`
+ * clears the plan). The engine claims it at that time exactly as if the start
+ * button had been pressed — the folder's concurrency limit still applies.
+ */
+export async function workTaskSchedule(
+  id: number,
+  scheduledAt: string | null
+): Promise<void> {
+  return getTransport().call("work_task_schedule", { id, scheduledAt })
+}
+
+/**
  * Follow up on a reviewed task. `intent` picks the framing the agent receives
  * (see `lib/task-follow-up`); omitted means `revise`.
  */

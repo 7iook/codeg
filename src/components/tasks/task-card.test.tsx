@@ -32,6 +32,7 @@ function task(overrides?: Partial<WorkTask>): WorkTask {
     merge_commit: null,
     preflight: null,
     archived_at: null,
+    scheduled_at: null,
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-01T00:00:00Z",
     started_at: null,
@@ -57,6 +58,7 @@ function renderCard(
     onComplete: noop,
     onArchive: noop,
     onEdit: noop,
+    onSchedule: noop,
     ...handlers,
   }
   return render(
@@ -115,6 +117,31 @@ describe("TaskCard secondaries", () => {
     expect(
       screen.getByRole("button", { name: "Unarchive" })
     ).toBeInTheDocument()
+  })
+
+  it("offers scheduling on a pending card, and only there", async () => {
+    const onSchedule = vi.fn()
+    renderCard(task({ status: "todo", files_changed: null }), { onSchedule })
+    await userEvent.click(screen.getByRole("button", { name: "Schedule" }))
+    expect(onSchedule).toHaveBeenCalledTimes(1)
+
+    // A task that already has a run of its own has no start left to plan.
+    renderCard(task({ status: "review" }))
+    expect(screen.queryAllByRole("button", { name: "Schedule" })).toHaveLength(
+      1
+    )
+  })
+
+  it("shows the planned start on a pending card", () => {
+    const planned = new Date(2026, 7, 8, 9, 30)
+    renderCard(
+      task({
+        status: "todo",
+        files_changed: null,
+        scheduled_at: planned.toISOString(),
+      })
+    )
+    expect(screen.getByTitle(/Scheduled to start at/)).toBeInTheDocument()
   })
 
   it("does not open the sheet when a footer button is activated by keyboard", async () => {

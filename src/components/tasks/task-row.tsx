@@ -5,7 +5,7 @@ import { CircleAlert } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { formatRelative } from "@/components/conversations/sidebar-conversation-grouping"
 import { cn } from "@/lib/utils"
-import { StatusChip } from "./task-card"
+import { ScheduleChip, StatusChip } from "./task-card"
 import { buildTaskActions, type TaskActionHandlers } from "./task-actions"
 import type { WorkTask } from "@/lib/types"
 
@@ -103,6 +103,11 @@ export function TaskRow({
           </span>
         ) : null}
       </div>
+
+      {/* Outside the meta cluster below, which the narrow layout drops: a
+          planned start is the one thing a pending row has to say. Renders
+          nothing (and so costs no gap) when the task has no plan. */}
+      <ScheduleChip task={task} />
 
       {/* Meta cluster — dropped first when the window gets narrow; the title
           and the actions are what a row cannot lose. */}
