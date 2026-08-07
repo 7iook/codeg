@@ -28,7 +28,7 @@
 //! - R2.4 / R5.1: a Hint persona prepends the persona body to the FIRST-turn
 //!   task as `{preamble}\n\n---\n\n{task}`
 //! - Property P3 (Native <-> Hint mutual exclusion): the Hint path forwards
-//!   `launch_option: None` — it must never also nominate a launch option
+//!   an EMPTY `launch_options` — it must never also nominate a launch option
 //! - R3 / stage-4: `applied_persona` settles as `Hint { name }`
 //! - R3 F3: an UNRESOLVABLE persona on a persona-supporting CLI fails the
 //!   delegation with `invalid_persona` rather than silently degrading
@@ -160,8 +160,8 @@ async fn assert_hint_tier(agent_type: AgentType, tool_use: &str, child_conn: &st
     {
         let args = mock.spawn_args.lock().await;
         assert_eq!(args.len(), 1, "exactly one spawn");
-        assert_eq!(
-            args[0].launch_option, None,
+        assert!(
+            args[0].launch_options.is_empty(),
             "P3: a Hint persona must NEVER forward a launch option"
         );
     }

@@ -8144,6 +8144,69 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
     }
 }
 
+/// Runtime-env key a PER-CALL model id (`delegate_to_agent`'s `model`
+/// argument) must be written to so it actually reaches the child CLI.
+///
+/// # Why this is not just `agent_env_keys(..).2`
+///
+/// The generic triple's model slot is a *provider-cascade* key, and for two
+/// agent types it is not the key that reaches the CLI at launch:
+///
+/// * **Kiro** has NO arm in [`agent_env_keys`] at all — it falls into the
+///   `_ =>` catch-all and would get `OPENAI_MODEL`, which kiro-cli never
+///   reads. Its real launch knob is `KIRO_MODEL`, which
+///   `connection::kiro_launch_args` translates into `--model <id>` argv
+///   (`connection.rs:231`). Reusing the triple here would silently produce a
+///   delegation that ignores the requested model — the exact failure this
+///   function exists to prevent.
+/// * **Claude Code** is deliberately EXCLUDED from the triple's model write in
+///   [`build_runtime_env_from_setting`] (`if agent_type != ClaudeCode`),
+///   because the panel/provider path routes Claude through the eight-key
+///   [`CLAUDE_MODEL_KEY_MAP`]. That exclusion is about the provider cascade,
+///   not about a per-call override: a per-call model means "run THIS
+///   delegation on THIS model", so it takes the main key `ANTHROPIC_MODEL`
+///   only, and MUST NOT touch the three alias slots
+///   (`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL`) — writing those would
+///   redefine what "sonnet" means for the whole child session, which is a
+///   different and much broader semantic.
+///
+/// # Verification status per agent (honest, anchored)
+///
+/// VERIFIED to reach the CLI:
+/// * `Kiro` — `KIRO_MODEL` → `--model <id>` argv, verbatim, no allowlist
+///   (`connection::kiro_launch_args`, `connection.rs:229-234`).
+/// * `Cursor` — the CLI reads no model env var, but codeg translates
+///   `CURSOR_MODEL` into a root-level `--model <id>` argv element before the
+///   `acp` subcommand (`connection.rs:1099-1107`).
+/// * `Grok` — `GROK_DEFAULT_MODEL`, verified against the 0.2.94 binary and
+///   documented at the [`agent_env_keys`] arm.
+/// * `KimiCode` — `KIMI_MODEL_NAME`; the `KIMI_MODEL_*` family is the only
+///   non-interactive path and wins over `~/.kimi-code/config.toml` (see the
+///   [`agent_env_keys`] arm).
+///
+/// UNVERIFIED (a dedicated key exists and is what the panel/provider path
+/// uses, but this repo carries no evidence the CLI reads it at launch):
+/// `ClaudeCode` (`ANTHROPIC_MODEL`), `Gemini` (`GEMINI_MODEL`), `Codex`
+/// (`OPENAI_MODEL`).
+///
+/// NO EVIDENCE AT ALL: the remaining agent types fall into the `_ =>`
+/// catch-all and get `OPENAI_MODEL` because that is the least-surprising
+/// default for an OpenAI-compatible CLI — nothing in this repo shows their
+/// CLIs read it. A per-call model for those agents may simply be inert. It is
+/// written anyway rather than dropped, because a key the CLI ignores is
+/// harmless, whereas silently discarding the LLM's request would be invisible.
+pub(crate) fn per_call_model_env_key(agent_type: AgentType) -> &'static str {
+    match agent_type {
+        // codeg-side launch knob → `--model <id>` argv. NOT in agent_env_keys.
+        AgentType::Kiro => crate::acp::connection::KIRO_MODEL_ENV,
+        // Main key only — never the haiku/sonnet/opus alias slots.
+        AgentType::ClaudeCode => "ANTHROPIC_MODEL",
+        // Everything else: the generic triple's model slot is also the launch
+        // key (Gemini / KimiCode / Grok / Cursor / the OPENAI_MODEL fallback).
+        other => agent_env_keys(other).2,
+    }
+}
+
 /// Serialize a BTreeMap into env_json for database storage.
 /// Returns `None` when the map is empty.
 fn serialize_env_map(env: &BTreeMap<String, String>) -> Result<Option<String>, AcpError> {

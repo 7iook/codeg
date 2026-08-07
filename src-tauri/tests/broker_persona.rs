@@ -15,7 +15,10 @@
 //!
 //! These re-exercise the spawn-arg contract against the same public
 //! `DelegationBroker` + `test-utils` `MockSpawner` surface: the resolved
-//! `LaunchOption` must land in `MockSpawner::spawn_args[..].launch_option`.
+//! `LaunchOption`s must land in `MockSpawner::spawn_args[..].launch_options`.
+//! Since stage-2-model that vector carries TWO independent dimensions — a
+//! persona nomination and/or a per-call model — so the tail of this file also
+//! pins that they coexist rather than clobbering each other.
 
 use std::sync::Arc;
 
@@ -64,6 +67,16 @@ fn persona_request(
     tool_use: &str,
     subagent_type: Option<&str>,
 ) -> DelegationRequest {
+    request_with(agent_type, tool_use, subagent_type, None)
+}
+
+/// Full-control request builder: both per-call launch dimensions.
+fn request_with(
+    agent_type: AgentType,
+    tool_use: &str,
+    subagent_type: Option<&str>,
+    model: Option<&str>,
+) -> DelegationRequest {
     DelegationRequest {
         parent_connection_id: "parent-conn".into(),
         parent_conversation_id: 1,
@@ -74,7 +87,7 @@ fn persona_request(
         requested_working_dir: None,
         external_handle: None,
         subagent_type: subagent_type.map(str::to_string),
-        model: None,
+        model: model.map(str::to_string),
     }
 }
 
@@ -136,8 +149,8 @@ async fn kiro_persona_launch_option_reaches_spawn() {
     let args = mock.spawn_args.lock().await;
     assert_eq!(args.len(), 1, "exactly one spawn");
     assert_eq!(
-        args[0].launch_option,
-        Some(LaunchOption::KiroPersona("plan-reality-recon".into())),
+        args[0].launch_options,
+        vec![LaunchOption::KiroPersona("plan-reality-recon".into())],
         "the resolved Kiro LaunchOption must reach spawn (P0-1)"
     );
     // Native path leaves the first-turn task text unchanged (no Hint preamble).
@@ -147,7 +160,7 @@ async fn kiro_persona_launch_option_reaches_spawn() {
     );
 }
 
-/// A delegation WITHOUT a persona nomination forwards `launch_option: None` —
+/// A delegation WITHOUT a persona nomination forwards NO launch option —
 /// legacy callers spawn exactly as before.
 #[tokio::test]
 async fn no_persona_forwards_no_launch_option() {
@@ -164,7 +177,7 @@ async fn no_persona_forwards_no_launch_option() {
     assert_eq!(report.status, TaskStatus::Completed);
     assert!(report.applied_persona.is_none());
     let args = mock.spawn_args.lock().await;
-    assert_eq!(args[0].launch_option, None);
+    assert!(args[0].launch_options.is_empty());
 }
 
 /// An unsupported CLI (Gemini) with a persona nomination forwards NO launch
@@ -189,8 +202,8 @@ async fn unsupported_cli_forwards_no_launch_option() {
         })
     );
     let args = mock.spawn_args.lock().await;
-    assert_eq!(
-        args[0].launch_option, None,
+    assert!(
+        args[0].launch_options.is_empty(),
         "an unsupported CLI must never forward a launch option"
     );
 }
@@ -221,8 +234,8 @@ async fn spawn_failure_leaves_applied_persona_none_but_still_forwarded_option() 
     // The option was still forwarded to spawn — the failure is downstream.
     let args = mock.spawn_args.lock().await;
     assert_eq!(
-        args[0].launch_option,
-        Some(LaunchOption::KiroPersona("plan-reality-recon".into())),
+        args[0].launch_options,
+        vec![LaunchOption::KiroPersona("plan-reality-recon".into())],
     );
 }
 
@@ -232,10 +245,6 @@ async fn spawn_failure_leaves_applied_persona_none_but_still_forwarded_option() 
 /// concurrency shape (same CLI family, distinct personas), not a Kiro-then-Gemini
 /// sequence where the agent_type alone would disambiguate.
 #[tokio::test]
-// The `match` in the option extraction below is exhaustive on purpose (see the
-// comment there); `clippy::manual_map` would collapse it into `.map()` and lose
-// the compile-time break a second `LaunchOption` variant should cause.
-#[allow(clippy::manual_map)]
 async fn concurrent_same_agent_distinct_personas_do_not_cross() {
     let (broker, mock) = enabled_broker().await;
 
@@ -262,12 +271,19 @@ async fn concurrent_same_agent_distinct_personas_do_not_cross() {
     let mut options: Vec<Option<String>> = args
         .iter()
         // Exhaustive `match` on purpose, mirroring
-        // `launch_option_has_only_kiro_persona_variant_v1`: a second
-        // `LaunchOption` variant must break this test, which `.map()` over the
-        // `Option` would not do.
-        .map(|a| match &a.launch_option {
-            Some(LaunchOption::KiroPersona(n)) => Some(n.clone()),
-            None => None,
+        // `launch_option_variants_are_exactly_kiro_persona_and_model_v2`: a
+        // THIRD `LaunchOption` variant must break this test, which a
+        // `.map()`/`if let` over the slice would not do. Neither request here
+        // sets `model`, so `Model` is unreachable in this scenario — it is
+        // matched (and asserted absent) rather than wildcarded so the break
+        // survives.
+        .map(|a| match a.launch_options.as_slice() {
+            [] => None,
+            [LaunchOption::KiroPersona(n)] => Some(n.clone()),
+            [LaunchOption::Model(m)] => {
+                panic!("no request set `model`, yet a Model option reached spawn: {m}")
+            }
+            other => panic!("unexpected launch option set reached spawn: {other:?}"),
         })
         .collect();
     options.sort();
@@ -278,5 +294,221 @@ async fn concurrent_same_agent_distinct_personas_do_not_cross() {
             Some("review-agent".to_string())
         ],
         "each concurrent spawn keeps its own persona — no cross-contamination"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-call MODEL dimension at the spawn-arg boundary (stage-2-model)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The model half of the P0 wiring: a `model` on the request must reach `spawn`
+/// as `LaunchOption::Model`. Without this the field would be parsed and carried
+/// (stage 1) but have no consumer — exactly the "built but not wired" shape.
+#[tokio::test]
+async fn per_call_model_reaches_spawn_as_launch_option() {
+    let (broker, mock) = enabled_broker().await;
+    let report = settle(
+        &broker,
+        &mock,
+        "c-model",
+        80,
+        request_with(AgentType::Kiro, "pt-model", None, Some("claude-sonnet-5")),
+    )
+    .await;
+
+    assert_eq!(report.status, TaskStatus::Completed);
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(args.len(), 1, "exactly one spawn");
+    assert_eq!(
+        args[0].launch_options,
+        vec![LaunchOption::Model("claude-sonnet-5".into())],
+        "a per-call model must reach spawn as LaunchOption::Model"
+    );
+}
+
+/// **Coexistence at the broker boundary.** Persona and model are independent
+/// launch dimensions, so a call setting both must forward BOTH to `spawn`. The
+/// pre-stage-2 single-`Option` parameter could not express this — one knob would
+/// have been silently dropped.
+#[tokio::test]
+async fn persona_and_model_both_reach_spawn() {
+    let (broker, mock) = enabled_broker().await;
+    let report = settle(
+        &broker,
+        &mock,
+        "c-both",
+        81,
+        request_with(
+            AgentType::Kiro,
+            "pt-both",
+            Some("plan-reality-recon"),
+            Some("claude-sonnet-5"),
+        ),
+    )
+    .await;
+
+    assert_eq!(report.status, TaskStatus::Completed);
+    // Persona attribution is unaffected by the model riding along.
+    assert_eq!(
+        report.applied_persona,
+        Some(AppliedPersona::Native {
+            name: "plan-reality-recon".into()
+        }),
+        "a per-call model must not disturb persona attribution"
+    );
+    let args = mock.spawn_args.lock().await;
+    let opts = &args[0].launch_options;
+    assert_eq!(opts.len(), 2, "both knobs must be forwarded, got {opts:?}");
+    assert!(
+        opts.contains(&LaunchOption::KiroPersona("plan-reality-recon".into())),
+        "persona missing from {opts:?}"
+    );
+    assert!(
+        opts.contains(&LaunchOption::Model("claude-sonnet-5".into())),
+        "model missing from {opts:?}"
+    );
+    // Native path still leaves the first-turn task text alone.
+    assert_eq!(
+        mock.first_prompt_tasks.lock().await.as_slice(),
+        &["do x".to_string()],
+    );
+}
+
+/// A per-call model is forwarded even when the CLI has NO persona concept
+/// (Gemini): the two dimensions are independent, so the persona downgrade must
+/// not swallow the model. Asserts the model survives while the persona is
+/// dropped.
+#[tokio::test]
+async fn model_survives_a_persona_downgrade_on_an_unsupported_cli() {
+    let (broker, mock) = enabled_broker().await;
+    let report = settle(
+        &broker,
+        &mock,
+        "c-gem-model",
+        82,
+        request_with(
+            AgentType::Gemini,
+            "pt-gem-model",
+            Some("some-agent"),
+            Some("gemini-3-pro"),
+        ),
+    )
+    .await;
+
+    assert_eq!(report.status, TaskStatus::Completed);
+    assert_eq!(
+        report.applied_persona,
+        Some(AppliedPersona::IgnoredUnsupportedCli {
+            name: "some-agent".into()
+        })
+    );
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(
+        args[0].launch_options,
+        vec![LaunchOption::Model("gemini-3-pro".into())],
+        "the model must survive while the unsupported persona is dropped"
+    );
+}
+
+/// A Hint-tier persona (Claude Code / Codex) prepends to the task text and
+/// forwards NO persona launch option — but a per-call model still must reach
+/// spawn. Guards against the model being tied to the Native leg.
+#[tokio::test]
+async fn model_reaches_spawn_on_the_hint_leg_too() {
+    let (broker, mock) = enabled_broker().await;
+    // No persona nominated, so no filesystem dependency: this isolates the
+    // model dimension for a non-Kiro CLI whose model key is ANTHROPIC_MODEL.
+    let report = settle(
+        &broker,
+        &mock,
+        "c-claude-model",
+        83,
+        request_with(
+            AgentType::ClaudeCode,
+            "pt-claude-model",
+            None,
+            Some("claude-opus-5"),
+        ),
+    )
+    .await;
+
+    assert_eq!(report.status, TaskStatus::Completed);
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(
+        args[0].launch_options,
+        vec![LaunchOption::Model("claude-opus-5".into())],
+    );
+}
+
+/// Absent model ⇒ no `Model` option is forwarded, for any agent. The regression
+/// guard for every pre-stage-2 delegation.
+#[tokio::test]
+async fn no_model_forwards_no_model_option() {
+    let (broker, mock) = enabled_broker().await;
+    let report = settle(
+        &broker,
+        &mock,
+        "c-nomodel",
+        84,
+        request_with(
+            AgentType::Kiro,
+            "pt-nomodel",
+            Some("plan-reality-recon"),
+            None,
+        ),
+    )
+    .await;
+
+    assert_eq!(report.status, TaskStatus::Completed);
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(
+        args[0].launch_options,
+        vec![LaunchOption::KiroPersona("plan-reality-recon".into())],
+        "with no per-call model, only the persona may be forwarded"
+    );
+}
+
+/// Concurrency: two simultaneous delegations with DIFFERENT models keep
+/// independent launch options — one call's model never bleeds into the other's
+/// spawn. Same shape as the persona cross-contamination test.
+#[tokio::test]
+async fn concurrent_distinct_models_do_not_cross() {
+    let (broker, mock) = enabled_broker().await;
+    mock.queue_spawn(Ok("c-m-a".into())).await;
+    mock.queue_spawn(Ok("c-m-b".into())).await;
+    mock.queue_send(Ok(90)).await;
+    mock.queue_send(Ok(91)).await;
+
+    let (ack_a, ack_b) = tokio::join!(
+        broker.start_delegation(request_with(
+            AgentType::Kiro,
+            "pt-m-a",
+            None,
+            Some("model-a")
+        )),
+        broker.start_delegation(request_with(
+            AgentType::Kiro,
+            "pt-m-b",
+            None,
+            Some("model-b")
+        ))
+    );
+    assert_eq!(ack_a.status, TaskStatus::Running);
+    assert_eq!(ack_b.status, TaskStatus::Running);
+
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(args.len(), 2, "both concurrent delegations spawned");
+    let mut models: Vec<String> = args
+        .iter()
+        .map(|a| match a.launch_options.as_slice() {
+            [LaunchOption::Model(m)] => m.clone(),
+            other => panic!("expected exactly one Model option, got {other:?}"),
+        })
+        .collect();
+    models.sort();
+    assert_eq!(
+        models,
+        vec!["model-a".to_string(), "model-b".to_string()],
+        "each concurrent spawn keeps its own model — no cross-contamination"
     );
 }
