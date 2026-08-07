@@ -20,6 +20,7 @@ pub mod backgrounds;
 pub mod chat_channel;
 pub mod commands;
 pub mod db;
+pub mod folder_links;
 pub mod git_credential;
 pub mod git_repo;
 pub mod intern;
@@ -73,6 +74,7 @@ mod tauri_app {
         feedback as feedback_commands,
         file_io,
         folder_commands,
+        folder_links,
         folders,
         logging as logging_commands,
         mcp as mcp_commands,
@@ -83,14 +85,16 @@ mod tauri_app {
         project_boot,
         question as question_commands,
         quick_messages as quick_messages_commands,
-        // [merge-v0.23.0] union: keep local extras (remote_workspace, science, session_info,
-        // terminal, version_control, windows) + upstream new work_task_commands.
+        // [merge-v0.23.4] union: keep local extras (remote_workspace, science, session_info,
+        // terminal, version_control, windows) + upstream new work_task_commands,
+        // folder_links and token_usage_commands.
         remote_proxy as remote_proxy_commands,
         remote_workspace as remote_workspace_commands,
         science as science_commands,
         session_info as session_info_commands,
         system_settings,
         terminal as terminal_commands,
+        token_usage as token_usage_commands,
         version_control,
         windows,
         work_task as work_task_commands,
@@ -965,6 +969,12 @@ mod tauri_app {
                 folders::update_folder_color,
                 folders::update_folder_alias,
                 folders::update_folder_default_agent,
+                folder_links::list_folder_links,
+                folder_links::preview_folder_links,
+                folder_links::create_folder_links,
+                folder_links::rename_folder_link,
+                folder_links::repair_folder_link,
+                folder_links::remove_folder_link,
                 folders::add_folder_to_history,
                 folders::remove_folder_from_history,
                 folders::create_folder_directory,
@@ -976,6 +986,7 @@ mod tauri_app {
                 folders::git_start_pull_merge,
                 folders::git_has_merge_head,
                 folders::git_fetch,
+                folders::git_update_branch,
                 folders::git_push_info,
                 folders::git_push,
                 folders::git_new_branch,
@@ -1269,6 +1280,10 @@ mod tauri_app {
                 automation_commands::automation_compute_next_run,
                 automation_commands::automation_run_now,
                 automation_commands::automation_cancel_run,
+                token_usage_commands::token_usage_report,
+                token_usage_commands::token_usage_facets,
+                token_usage_commands::token_usage_status,
+                token_usage_commands::token_usage_sync,
                 work_task_commands::work_task_list,
                 work_task_commands::work_task_get,
                 work_task_commands::work_task_events,
@@ -1284,6 +1299,7 @@ mod tauri_app {
                 work_task_commands::work_task_return,
                 work_task_commands::work_task_cancel,
                 work_task_commands::work_task_merge,
+                work_task_commands::work_task_complete,
                 work_task_commands::work_task_archive,
                 work_task_commands::work_task_cleanup,
                 work_task_commands::work_task_diff,

@@ -19,11 +19,13 @@ import {
 import { Button } from "@/components/ui/button"
 import { formatRelative } from "@/components/conversations/sidebar-conversation-grouping"
 import { cn } from "@/lib/utils"
+import { hasNothingToMerge } from "./task-acceptance"
 import type { WorkTask } from "@/lib/types"
 
 type StatusLabelKey =
   | "statusTodo"
   | "statusQueued"
+  | "statusPreparing"
   | "statusRunning"
   | "statusAwaitingInput"
   | "statusReview"
@@ -38,6 +40,8 @@ export function statusLabelKey(status: WorkTask["status"]): StatusLabelKey {
       return "statusTodo"
     case "queued":
       return "statusQueued"
+    case "preparing":
+      return "statusPreparing"
     case "running":
       return "statusRunning"
     case "awaiting_input":
@@ -70,6 +74,7 @@ export function StatusChip({ task }: { task: WorkTask }) {
       : t(statusLabelKey(task.status))
   switch (task.status) {
     case "queued":
+    case "preparing":
     case "running":
     case "merging":
       return (
@@ -120,6 +125,9 @@ interface TaskCardProps {
   /** Opens the read-only live session viewer (TaskTranscriptDialog). */
   onViewSession: () => void
   onMerge: () => void
+  /** Takes the merge slot when the task changed nothing (see
+   *  `hasNothingToMerge`) — accepts it outright instead. */
+  onComplete: () => void
   /** Toggles by `task.archived_at` (archive ⇄ unarchive). */
   onArchive: () => void
   /** Opens the editor dialog — offered while editable (todo / failed). */
@@ -190,6 +198,7 @@ export function TaskCard({
   onRequeue,
   onViewSession,
   onMerge,
+  onComplete,
   onArchive,
   onEdit,
 }: TaskCardProps) {
@@ -232,12 +241,21 @@ export function TaskCard({
         more.push({ icon: Pencil, label: t("actionEdit"), onClick: onEdit })
         break
       case "queued":
+      case "preparing":
       case "running":
       case "awaiting_input":
         primary = { icon: Ban, label: t("actionCancel"), onClick: onCancel }
         break
       case "review":
-        primary = { icon: GitMerge, label: t("actionMerge"), onClick: onMerge }
+        // Nothing was changed ⟹ nothing to merge: the card offers the
+        // acceptance that actually applies.
+        primary = hasNothingToMerge(task)
+          ? {
+              icon: CircleCheck,
+              label: t("actionComplete"),
+              onClick: onComplete,
+            }
+          : { icon: GitMerge, label: t("actionMerge"), onClick: onMerge }
         break
       case "merging":
         break

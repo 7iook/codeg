@@ -13,6 +13,7 @@ import {
   type CancelScopePreview,
   type CancelScopeResult,
 } from "@/lib/cancel-scope"
+import { isConnectionBusy } from "@/lib/connection-teardown"
 import { TurnBusyError } from "@/lib/turn-busy"
 import { type AgentType, type PromptDraft } from "@/lib/types"
 import { getAgentLabel } from "@/lib/custom-agents"
@@ -117,6 +118,8 @@ export interface UseConnectionLifecycleReturn {
  * EXCEPT on a transient unmount (tab reparented across split groups, not
  * closed): the remounted view re-attaches to the same connection, so neither
  * owners nor viewers tear down.
+ * Shares `isConnectionBusy` with the preview-replacement release
+ * (`disconnectIfIdle`) so the two teardown paths can't drift apart.
  * Exported for tests.
  */
 export function shouldDisconnectOnUnmount(args: {
@@ -127,9 +130,7 @@ export function shouldDisconnectOnUnmount(args: {
 }): boolean {
   if (args.transientUnmount) return false
   if (args.isViewer) return true
-  const ownerBusy =
-    args.status === "prompting" || args.backgroundOutstanding > 0
-  return !ownerBusy
+  return !isConnectionBusy(args)
 }
 
 function normalizeErrorMessage(error: unknown): string {

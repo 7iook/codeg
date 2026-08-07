@@ -231,6 +231,10 @@ async fn spawn_failure_leaves_applied_persona_none_but_still_forwarded_option() 
 /// concurrency shape (same CLI family, distinct personas), not a Kiro-then-Gemini
 /// sequence where the agent_type alone would disambiguate.
 #[tokio::test]
+// The `match` in the option extraction below is exhaustive on purpose (see the
+// comment there); `clippy::manual_map` would collapse it into `.map()` and lose
+// the compile-time break a second `LaunchOption` variant should cause.
+#[allow(clippy::manual_map)]
 async fn concurrent_same_agent_distinct_personas_do_not_cross() {
     let (broker, mock) = enabled_broker().await;
 
@@ -256,6 +260,10 @@ async fn concurrent_same_agent_distinct_personas_do_not_cross() {
     assert_eq!(args.len(), 2, "both concurrent delegations spawned");
     let mut options: Vec<Option<String>> = args
         .iter()
+        // Exhaustive `match` on purpose, mirroring
+        // `launch_option_has_only_kiro_persona_variant_v1`: a second
+        // `LaunchOption` variant must break this test, which `.map()` over the
+        // `Option` would not do.
         .map(|a| match &a.launch_option {
             Some(LaunchOption::KiroPersona(n)) => Some(n.clone()),
             None => None,

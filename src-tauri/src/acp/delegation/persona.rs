@@ -1116,6 +1116,12 @@ mod tests {
         // stage-2 provider dispatch and the stage-5 spawner translation
         // in the same change.
         let opt = LaunchOption::KiroPersona("plan-reality-recon".into());
+        // `match` over `let` ON PURPOSE, and the lint is wrong here: an
+        // irrefutable `let` compiles fine when a second variant lands, which
+        // would silently defeat the whole point of this test. The `match` is
+        // what breaks the build and forces the author to the two dispatch
+        // sites named above.
+        #[allow(clippy::infallible_destructuring_match)]
         let name = match opt {
             LaunchOption::KiroPersona(n) => n,
         };

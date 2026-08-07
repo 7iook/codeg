@@ -149,6 +149,14 @@ pub struct WorkTaskFolderSettings {
     /// starts (deps install, env seeding). Not re-run on reused worktrees.
     #[serde(default)]
     pub init_command: Option<String>,
+    /// User-authored instructions appended *after* the built-in prompt of a
+    /// launch stage — project conventions or personal preferences the standard
+    /// wording can't cover. Keys are the stage identifiers the engine already
+    /// stamps on its `round` events (`work` / `retry` / `return` / `merge`),
+    /// plus the reserved key `all`, which is appended to every stage. Unknown
+    /// keys are ignored, so a future stage needs no schema change.
+    #[serde(default)]
+    pub stage_prompts: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for WorkTaskFolderSettings {
@@ -165,6 +173,66 @@ impl Default for WorkTaskFolderSettings {
             preflight_command_id: None,
             preflight_command: None,
             init_command: None,
+            stage_prompts: Default::default(),
+        }
+    }
+}
+
+/// Reserved `stage_prompts` key whose text is appended to every launch stage.
+pub const STAGE_PROMPT_ALL: &str = "all";
+
+/// What the user means by a follow-up on a reviewed task. The board offers one
+/// neutral "follow up" action; the intent picks the wording the agent actually
+/// receives, because "have another look at this" and "why did you do it that
+/// way?" call for opposite behaviour from the same text box.
+///
+/// Deliberately NOT a stored column: an intent only ever shapes one prompt, so
+/// it lives in the launch mode and on the `user_action` / `round` timeline
+/// events. `round_kind()` stays `"return"` for every intent, so the folder's
+/// per-stage prompt settings keep their four stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpIntent {
+    /// Review feedback to act on — the historical "return" behaviour, and the
+    /// default so an unlabelled follow-up keeps composing exactly as before.
+    #[default]
+    Revise,
+    /// The work so far stands; extend it.
+    Continue,
+    /// A question about the work. Answering must not touch the worktree.
+    Question,
+    /// Re-check the work before acceptance. Complete on its own, so it is the
+    /// one intent that may be sent without any text.
+    Verify,
+}
+
+impl FollowUpIntent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FollowUpIntent::Revise => "revise",
+            FollowUpIntent::Continue => "continue",
+            FollowUpIntent::Question => "question",
+            FollowUpIntent::Verify => "verify",
+        }
+    }
+
+    /// Whether this intent is a complete instruction without user text.
+    pub fn allows_empty(self) -> bool {
+        matches!(self, FollowUpIntent::Verify)
+    }
+
+    /// Decode a wire value. Absent → `Revise` (older clients, and the value the
+    /// historical behaviour corresponds to); an unrecognized string is an error
+    /// rather than a silent fallback, so a typo surfaces instead of quietly
+    /// composing the wrong prompt.
+    pub fn from_wire(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None => Ok(FollowUpIntent::Revise),
+            Some("revise") => Ok(FollowUpIntent::Revise),
+            Some("continue") => Ok(FollowUpIntent::Continue),
+            Some("question") => Ok(FollowUpIntent::Question),
+            Some("verify") => Ok(FollowUpIntent::Verify),
+            Some(other) => Err(format!("unknown follow-up intent: {other}")),
         }
     }
 }
@@ -224,4 +292,33 @@ pub struct WorkTaskChangedFile {
     pub file: String,
     pub additions: i32,
     pub deletions: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Settings rows written before stage prompts existed must keep decoding —
+    /// the column is one JSON blob, so a missing key is the migration.
+    #[test]
+    fn legacy_settings_json_decodes_without_stage_prompts() {
+        let legacy = r#"{
+            "default_agent_type": "claude_code",
+            "mode_id": null,
+            "config_values": {},
+            "auto_process": true,
+            "max_concurrent": 3,
+            "merge_strategy": "merge",
+            "delete_worktree_default": false,
+            "init_command": "pnpm install"
+        }"#;
+        let settings: WorkTaskFolderSettings =
+            serde_json::from_str(legacy).expect("legacy settings decode");
+        assert!(settings.stage_prompts.is_empty());
+        assert_eq!(settings.max_concurrent, 3);
+        assert_eq!(settings.merge_strategy, "merge");
+        assert!(settings.auto_process);
+        assert!(!settings.delete_worktree_default);
+        assert_eq!(settings.init_command.as_deref(), Some("pnpm install"));
+    }
 }
