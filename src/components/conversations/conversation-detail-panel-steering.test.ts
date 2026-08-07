@@ -16,10 +16,6 @@ const panelSource = readFileSync(
   ),
   "utf8"
 )
-const messageInputSource = readFileSync(
-  resolve(process.cwd(), "src/components/chat/message-input.tsx"),
-  "utf8"
-)
 const chatInputSource = readFileSync(
   resolve(process.cwd(), "src/components/chat/chat-input.tsx"),
   "utf8"
@@ -152,40 +148,13 @@ describe("optimistic display reuses the existing rollback (design §2.6)", () =>
 })
 
 describe("the composer keeps send available while the agent works (R3.1)", () => {
-  it("renders stop AND send together in the prompting branch", () => {
-    // The replacement this fixes is the single biggest reason the user reported
-    // being unable to do anything mid-turn: cancelling was the only way to talk,
-    // and cancelling cascades into killing every running sub-agent.
-    const branchIdx = messageInputSource.indexOf("isPrompting && onCancel ? (")
-    expect(branchIdx).toBeGreaterThan(-1)
-    // Up to the next branch of the same ternary chain.
-    const branch = messageInputSource.slice(
-      branchIdx,
-      messageInputSource.indexOf(") : onForkSend ? (", branchIdx)
-    )
-    expect(branch).toContain("<Square")
-    expect(branch).toContain("<Send")
-    expect(branch).toContain("onClick={onCancel}")
-    expect(branch).toContain("onClick={handleSend}")
-  })
-
-  it("keeps the stop button destructive — it genuinely is", () => {
-    const branchIdx = messageInputSource.indexOf("isPrompting && onCancel ? (")
-    const branch = messageInputSource.slice(
-      branchIdx,
-      messageInputSource.indexOf(") : onForkSend ? (", branchIdx)
-    )
-    expect(branch).toContain('variant="destructive"')
-  })
-
-  it("puts no mode dropdown on the send key in the prompting branch", () => {
-    // Send behavior is unchanged: it enqueues. The per-item "send now" is the
-    // only steering affordance (anchored on Zed's Send Now).
-    const branchIdx = messageInputSource.indexOf("isPrompting && onCancel ? (")
-    const branch = messageInputSource.slice(
-      branchIdx,
-      messageInputSource.indexOf(") : onForkSend ? (", branchIdx)
-    )
-    expect(branch).not.toContain("DropdownMenu")
-  })
+  // Behavioral coverage of the prompting form lives in
+  // `src/components/chat/message-input.test.tsx` ("MessageInput native
+  // steering"): it renders the component and queries the DOM for Stop, Send and
+  // the steer dropdown. Reading `message-input.tsx` as a STRING to assert on
+  // rendered chrome is the anti-pattern those tests replace — the shape of the
+  // source is not the behavior, and a slice boundary like
+  // `indexOf(") : onForkSend ? (")` silently voids the gate the moment an
+  // unrelated neighbouring branch is edited.
+  it.todo("covered behaviorally in message-input.test.tsx")
 })

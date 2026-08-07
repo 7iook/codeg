@@ -572,26 +572,39 @@ describe("MessageInput native steering (insert into current turn)", () => {
     })
   }
 
-  it("keeps the historical Stop-only form when onSteer is absent", async () => {
+  // Both branches of the prompting form title their Send button "Queue
+  // message" (`messageInput.queueMessage` and `messageQueue.addToQueue` are the
+  // same string), so that title CANNOT tell the two forms apart. The steer
+  // dropdown's aria-label is the only affordance unique to the split form.
+  it("keeps Stop and Send coexisting when onSteer is absent (no steer affordance)", async () => {
     const editor = await mountPrompting()
     typeDraft(editor, "draft text")
-    // Stop is there; none of the split-button chrome is.
-    expect(screen.getByTitle(MI.cancel)).toBeInTheDocument()
-    expect(screen.queryByTitle(MI.queueMessage)).toBeNull()
+    // [merge-v0.23.0] union fallback: Stop no longer REPLACES Send — locking
+    // the user out of the conversation for the whole turn was the R3.1 bug.
+    // What the fallback lacks is the steer dropdown, not Send.
+    const stop = screen.getByTitle(MI.cancel)
+    expect(stop).toBeInTheDocument()
+    expect(stop).toHaveAttribute("data-variant", "destructive")
+    expect(screen.getByTitle(MI.queueMessage)).toBeEnabled()
     expect(screen.queryByLabelText(MI.steerIntoTurn)).toBeNull()
   })
 
   it("shows the queue/steer split next to Stop once there is content", async () => {
     const editor = await mountPrompting({ onSteer: vi.fn() })
-    // Empty draft: nothing to queue or steer — still Stop-only.
-    expect(screen.queryByTitle(MI.queueMessage)).toBeNull()
+    // Empty draft: nothing to steer, so the split's dropdown is absent and Send
+    // is inert — but Stop and Send still coexist (union fallback).
+    expect(screen.queryByLabelText(MI.steerIntoTurn)).toBeNull()
+    expect(screen.getByTitle(MI.queueMessage)).toBeDisabled()
 
     typeDraft(editor, "go left")
+    // Content + onSteer + onEnqueue → the three-key split form.
     await waitFor(() =>
-      expect(screen.getByTitle(MI.queueMessage)).toBeInTheDocument()
+      expect(screen.getByLabelText(MI.steerIntoTurn)).toBeInTheDocument()
     )
-    expect(screen.getByLabelText(MI.steerIntoTurn)).toBeInTheDocument()
-    expect(screen.getByTitle(MI.cancel)).toBeInTheDocument()
+    expect(screen.getByTitle(MI.queueMessage)).toBeEnabled()
+    const stop = screen.getByTitle(MI.cancel)
+    expect(stop).toBeInTheDocument()
+    expect(stop).toHaveAttribute("data-variant", "destructive")
   })
 
   it("steers the draft text and clears the composer on success", async () => {
@@ -620,11 +633,15 @@ describe("MessageInput native steering (insert into current turn)", () => {
     await act(async () => {
       resolveSteer()
     })
-    // Confirmed: the composer clears (the split collapses back to Stop-only).
+    // Confirmed: the composer clears, so the split collapses back to the
+    // Stop + inert-Send fallback — the steer dropdown is what disappears.
     await waitFor(() =>
       expect(serializeDocToText(editor.state.doc)).not.toContain("go left")
     )
-    await waitFor(() => expect(screen.queryByTitle(MI.queueMessage)).toBeNull())
+    await waitFor(() =>
+      expect(screen.queryByLabelText(MI.steerIntoTurn)).toBeNull()
+    )
+    expect(screen.getByTitle(MI.queueMessage)).toBeDisabled()
   })
 
   it("falls back to the queue when the turn ends in the race window", async () => {
