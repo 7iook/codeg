@@ -3060,8 +3060,16 @@ impl ConnectionManager {
     }
 }
 
-/// Merge a per-call [`LaunchOption`] into the runtime env a child is about to
-/// be spawned with, returning the env unchanged when there is no launch option.
+/// Merge the per-call [`LaunchOption`]s into the runtime env a child is about
+/// to be spawned with, returning the env unchanged when the slice is empty.
+///
+/// # Why a slice rather than a single `Option`
+///
+/// The launch knobs are INDEPENDENT dimensions and a delegation may set
+/// several at once — "run as persona X on model Y" is a legitimate call. Each
+/// variant owns one env key, so applying them in sequence composes: order
+/// within the slice does not matter unless two entries carry the SAME variant,
+/// in which case the last one wins (the caller never builds such a slice).
 ///
 /// # Why this is a standalone pure function
 ///
@@ -3074,9 +3082,15 @@ impl ConnectionManager {
 ///
 /// A Kiro persona lands as `KIRO_AGENT=<name>` because that is the key
 /// `connection::kiro_launch_args` reads to emit `--agent <name>` argv. A
-/// per-call nomination intentionally OVERRIDES any panel-stored `KIRO_AGENT`
-/// (`env_json`) that `build_session_runtime_env` seeded — the LLM's explicit
-/// `subagent_type` wins over the persisted default.
+/// per-call model lands under
+/// [`crate::commands::acp::per_call_model_env_key`]`(agent_type)` — which is
+/// why this function needs `agent_type` at all: the SAME `Model` variant must
+/// reach `KIRO_MODEL` for Kiro and `ANTHROPIC_MODEL` for Claude Code. See that
+/// function for which agents the model is actually verified to reach.
+///
+/// Both kinds of per-call value intentionally OVERRIDE the panel-stored
+/// equivalent (`env_json`) that `build_session_runtime_env` seeded — the LLM's
+/// explicit argument wins over the persisted default, for exactly this call.
 ///
 /// # Ordering
 ///
@@ -3085,8 +3099,9 @@ impl ConnectionManager {
 /// Kiro, in this order:
 ///
 /// 1. `kiro_launch_args(runtime_env)` — translates `KIRO_AGENT` into
-///    `--agent <name>` argv, and `verify_kiro_selected_agent_exists` rejects a
-///    nomination with no matching `<KIRO_HOME>/agents/<name>.json`.
+///    `--agent <name>` argv and `KIRO_MODEL` into `--model <id>` argv, and
+///    `verify_kiro_selected_agent_exists` rejects a nomination with no matching
+///    `<KIRO_HOME>/agents/<name>.json`.
 /// 2. `apply_kiro_env_policy(&mut merged_env, runtime_env)` — strips every
 ///    `KIRO_*` knob out of the CHILD PROCESS env (a separate `Vec`), so codeg's
 ///    own launch inputs don't leak in as environment variables.
@@ -3094,7 +3109,7 @@ impl ConnectionManager {
 /// Step 2 takes `runtime_env` by shared reference and mutates only the child
 /// env vector, so it cannot unset what step 1 reads: the argv translation is
 /// safe regardless of the two steps' relative order. What is NOT safe is
-/// merging the launch option AFTER `spawn_agent` has already been handed the
+/// merging the launch options AFTER `spawn_agent` has already been handed the
 /// env — hence this function's result must flow into that call, which is what
 /// the `spawn_child_inner` call site does and what the merge tests pin.
 ///
@@ -3102,18 +3117,30 @@ impl ConnectionManager {
 /// `cargo test --lib` cannot launch on every host (a Tauri native dependency
 /// aborts the lib test binary at startup with `STATUS_ENTRYPOINT_NOT_FOUND` on
 /// this Windows host), and an integration crate links only the public API.
-pub fn merge_launch_option_into_runtime_env(
+pub fn merge_launch_options_into_runtime_env(
     mut runtime_env: BTreeMap<String, String>,
-    launch_option: Option<&crate::acp::delegation::persona::LaunchOption>,
+    agent_type: AgentType,
+    launch_options: &[crate::acp::delegation::persona::LaunchOption],
 ) -> BTreeMap<String, String> {
-    match launch_option {
-        Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(name)) => {
-            runtime_env.insert(
-                crate::acp::connection::KIRO_AGENT_ENV.to_string(),
-                name.clone(),
-            );
+    use crate::acp::delegation::persona::LaunchOption;
+    for option in launch_options {
+        // No `_ =>` arm ON PURPOSE: a new LaunchOption variant must break the
+        // build here, so its env translation cannot be forgotten (the same
+        // reason `launch_option_variants_are_exactly_*` exists).
+        match option {
+            LaunchOption::KiroPersona(name) => {
+                runtime_env.insert(
+                    crate::acp::connection::KIRO_AGENT_ENV.to_string(),
+                    name.clone(),
+                );
+            }
+            LaunchOption::Model(model) => {
+                runtime_env.insert(
+                    crate::commands::acp::per_call_model_env_key(agent_type).to_string(),
+                    model.clone(),
+                );
+            }
         }
-        None => {}
     }
     runtime_env
 }
@@ -3152,7 +3179,7 @@ impl ConnectionManagerSpawner {
         session_id: Option<String>,
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
-        launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
+        launch_options: Vec<crate::acp::delegation::persona::LaunchOption>,
     ) -> Result<String, crate::acp::delegation::spawner::SpawnerError> {
         use crate::acp::delegation::spawner::SpawnerError;
         // Resolve the parent connection so we can inherit its emitter and
@@ -3193,20 +3220,25 @@ impl ConnectionManagerSpawner {
         .await
         .map_err(|e| SpawnerError::Spawn(e.to_string()))?;
 
-        // Per-call persona nomination (stage 5, closes P0-1): a Kiro persona
-        // resolved by the broker arrives as `LaunchOption::KiroPersona(name)`
-        // and is merged into the runtime env as `KIRO_AGENT=<name>` so
-        // `connection::kiro_launch_args` later emits `--agent <name>` argv.
+        // Per-call launch knobs (stage 5 closed P0-1 for persona; the model
+        // dimension rides the same seam): a Kiro persona resolved by the broker
+        // arrives as `LaunchOption::KiroPersona(name)` and is merged as
+        // `KIRO_AGENT=<name>`; a per-call model arrives as
+        // `LaunchOption::Model(id)` and is merged under the agent's model key
+        // (`KIRO_MODEL` → `--model <id>` argv for Kiro, `ANTHROPIC_MODEL` for
+        // Claude Code, ...). Both can be present at once — "run as persona X on
+        // model Y" — which is why this is a slice, not a single Option.
         //
         // MERGE-ORDER INVARIANT: the merge MUST happen HERE, before the env is
         // handed to `spawn_agent` — that call consumes `runtime_env` BY VALUE,
-        // so a nomination applied afterwards could not reach the child at all.
-        // The merge semantics (including that a per-call nomination overrides a
-        // panel-stored `KIRO_AGENT`) are pinned by the
-        // `launch_option_merge_*` tests against
-        // `merge_launch_option_into_runtime_env`; the argv translation it feeds
+        // so a knob applied afterwards could not reach the child at all.
+        // The merge semantics (including that a per-call value overrides the
+        // panel-stored equivalent) are pinned by the `launch_option_merge_*`
+        // and `model_merge_*` tests against
+        // `merge_launch_options_into_runtime_env`; the argv translation it feeds
         // is pinned by `connection::kiro_launch_args_*`.
-        let runtime_env = merge_launch_option_into_runtime_env(runtime_env, launch_option.as_ref());
+        let runtime_env =
+            merge_launch_options_into_runtime_env(runtime_env, agent_type, &launch_options);
 
         self.manager
             .spawn_agent(
@@ -3233,11 +3265,12 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
         working_dir: Option<String>,
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
-        launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
+        launch_options: Vec<crate::acp::delegation::persona::LaunchOption>,
     ) -> Result<String, crate::acp::delegation::spawner::SpawnerError> {
         // Delegation children are brand-new sessions: no resume credential.
-        // The per-call `launch_option` (Kiro persona) rides through to the
-        // shared body, which merges it into the runtime env before spawn.
+        // The per-call `launch_options` (Kiro persona and/or model) ride through
+        // to the shared body, which merges them into the runtime env before
+        // spawn.
         self.spawn_child_inner(
             parent_connection_id,
             agent_type,
@@ -3245,7 +3278,7 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
             None,
             preferred_mode_id,
             preferred_config_values,
-            launch_option,
+            launch_options,
         )
         .await
     }
@@ -3260,7 +3293,9 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
         preferred_config_values: BTreeMap<String, String>,
     ) -> Result<String, crate::acp::delegation::spawner::SpawnerError> {
         // A resume replays an EXISTING session — it must not re-nominate a
-        // persona (R7.4), so no `launch_option` is threaded here.
+        // persona (R7.4), nor re-pick a model: the original launch's knobs are
+        // what the session was created with. So an EMPTY slice is threaded here,
+        // never the original call's options.
         self.spawn_child_inner(
             parent_connection_id,
             agent_type,
@@ -3268,7 +3303,7 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
             session_id,
             preferred_mode_id,
             preferred_config_values,
-            None,
+            Vec::new(),
         )
         .await
     }

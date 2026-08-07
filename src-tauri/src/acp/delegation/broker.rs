@@ -3457,6 +3457,29 @@ impl DelegationBroker {
         // `launch_option_pending` is consumed at the `spawner.spawn(...)` call
         // below (stage 5 closed the wiring — see [stage-5 T5.3]).
 
+        // --- Per-call launch knobs ---------------------------------------------
+        // The persona (above) and the model (`req.model`, normalized by
+        // `listener::normalize_requested_model`) are INDEPENDENT launch
+        // dimensions, so both can apply to one delegation — "run as persona X on
+        // model Y". They travel to the spawner as one Vec; the spawner merges
+        // each into the child's runtime env under its own key before
+        // `spawn_agent` consumes the env by value.
+        let mut launch_options: Vec<crate::acp::delegation::persona::LaunchOption> = Vec::new();
+        if let Some(launch_option) = launch_option_pending {
+            launch_options.push(launch_option);
+        }
+        if let Some(model) = req.model.as_deref() {
+            tracing::info!(
+                target: "delegation::model",
+                agent_type = ?req.agent_type,
+                model = %model,
+                "per-call model forwarded to spawn"
+            );
+            launch_options.push(crate::acp::delegation::persona::LaunchOption::Model(
+                model.to_string(),
+            ));
+        }
+
         // Checkpoint #1 (opportunistic): if a parent cancel already landed
         // during the claim/depth phase, bail before spawning a child the parent
         // has abandoned. No child exists yet, so there's nothing to tear down.
@@ -3480,12 +3503,14 @@ impl DelegationBroker {
                 // [stage-5 T5.3] Closes P0-1: the Native persona's
                 // `LaunchOption` (a Kiro `--agent` nomination) now reaches the
                 // spawner, which merges it into the child's runtime env as
-                // `KIRO_AGENT=<name>`. `None` for every non-persona / Hint /
+                // `KIRO_AGENT=<name>`. Absent for every non-persona / Hint /
                 // Ignored case (Hint prepends to the task text instead; Ignored
-                // and unsupported carry no launch option). R3-A2 timing is
-                // unchanged: `applied_persona: Native` is still only committed
-                // on the spawn-Ok side below.
-                launch_option_pending,
+                // and unsupported carry no launch option). A per-call `model`
+                // rides the same slice under its own variant, so a call may
+                // carry persona + model, either alone, or neither (empty vec).
+                // R3-A2 timing is unchanged: `applied_persona: Native` is still
+                // only committed on the spawn-Ok side below.
+                launch_options,
             )
             .await
         {
@@ -7110,7 +7135,7 @@ mod tests {
             working_dir: Option<String>,
             preferred_mode_id: Option<String>,
             preferred_config_values: BTreeMap<String, String>,
-            launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
+            launch_options: Vec<crate::acp::delegation::persona::LaunchOption>,
         ) -> Result<String, SpawnerError> {
             self.inner
                 .spawn(
@@ -7119,7 +7144,7 @@ mod tests {
                     working_dir,
                     preferred_mode_id,
                     preferred_config_values,
-                    launch_option,
+                    launch_options,
                 )
                 .await
         }
@@ -7934,7 +7959,7 @@ mod tests {
                 w: Option<String>,
                 m: Option<String>,
                 c: BTreeMap<String, String>,
-                l: Option<crate::acp::delegation::persona::LaunchOption>,
+                l: Vec<crate::acp::delegation::persona::LaunchOption>,
             ) -> Result<String, SpawnerError> {
                 self.inner.spawn(p, a, w, m, c, l).await
             }
@@ -14168,10 +14193,10 @@ mod tests {
         let args = mock.spawn_args.lock().await;
         assert_eq!(args.len(), 1, "exactly one spawn for the delegation");
         assert_eq!(
-            args[0].launch_option,
-            Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(
+            args[0].launch_options,
+            vec![crate::acp::delegation::persona::LaunchOption::KiroPersona(
                 "plan-reality-recon".into()
-            )),
+            )],
             "the Kiro persona LaunchOption must reach spawn (P0-1 closure)"
         );
     }
@@ -14211,10 +14236,10 @@ mod tests {
         // preamble prepended). `persona_request` fixes the task to "do x".
         let args = mock.spawn_args.lock().await;
         assert_eq!(
-            args[0].launch_option,
-            Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(
+            args[0].launch_options,
+            vec![crate::acp::delegation::persona::LaunchOption::KiroPersona(
                 "plan-reality-recon".into()
-            )),
+            )],
             "Native path forwards a LaunchOption"
         );
         let sent = mock.first_prompt_tasks.lock().await;

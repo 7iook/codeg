@@ -52,32 +52,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentType;
 
-/// Type-safe per-call CLI launch option.
+/// Type-safe per-call CLI launch knob.
 ///
-/// v1 only carries the Kiro persona nomination. Future CLIs get a NEW
+/// Each variant is ONE independent launch dimension, and a single delegation
+/// may carry several of them at once (persona *and* model) — they travel as a
+/// `&[LaunchOption]` slice, not a single `Option`. Future CLIs get a NEW
 /// variant (e.g. `ClaudePersonaEnv(String)` once upstream
 /// `@agentclientprotocol/claude-agent-acp` grows native `CLAUDE_ACP_AGENT`
 /// support). NEVER extend by adding an opaque `BTreeMap<String, String>`
 /// override — that widens infra control surface without a business driver
 /// (R2 A4 rejected).
 ///
-/// Consumed downstream by `manager::spawn_child_inner`, which merges
-/// `KIRO_AGENT=<name>` into `runtime_env` before handing it to
-/// `spawn_agent` — that call takes the map BY VALUE, so a merge after it
-/// would never reach the child. `connection::kiro_launch_args` then reads
-/// the entry back out and translates it into `--agent <name>` argv.
+/// Consumed downstream by `manager::spawn_child_inner`, which merges each
+/// variant into `runtime_env` (`KIRO_AGENT=<name>` / `<MODEL_KEY>=<id>`)
+/// before handing it to `spawn_agent` — that call takes the map BY VALUE, so
+/// a merge after it would never reach the child. `connection::kiro_launch_args`
+/// then reads the entries back out and translates them into `--agent <name>`
+/// / `--model <id>` argv.
 ///
 /// `apply_kiro_env_policy` is unrelated to this ordering: it strips `KIRO_*`
 /// from the CHILD PROCESS env (a separate `Vec`) and borrows `runtime_env`
 /// immutably, so it cannot unset what `kiro_launch_args` reads. Stripping
-/// `KIRO_AGENT` from the child env is correct — it is a codeg-side knob
-/// translated to argv, not an environment variable kiro-cli reads.
+/// `KIRO_AGENT` / `KIRO_MODEL` from the child env is correct — they are
+/// codeg-side knobs translated to argv, not environment variables kiro-cli
+/// reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchOption {
     /// Nominates a Kiro persona whose definition lives at
     /// `<KIRO_HOME>/agents/<name>.json`. `name` has already been through
     /// [`is_valid_persona_name`] by the time it reaches the spawner.
     KiroPersona(String),
+    /// Per-call model id for THIS delegation, already normalized by
+    /// `listener::normalize_requested_model` (trimmed, non-empty, no control
+    /// characters). Deliberately NOT validated against any known-model list:
+    /// the id is served by the user's own endpoint, which may be a relay
+    /// fronting several vendors.
+    ///
+    /// Merged into the child's runtime env under the model key
+    /// `commands::acp::model_env_key(agent_type)` returns — the key is chosen
+    /// per agent type, so the *same* variant reaches `KIRO_MODEL` for Kiro
+    /// and `ANTHROPIC_MODEL` for Claude Code. See that function for which
+    /// agents this is actually verified to reach.
+    Model(String),
     // Future: ClaudePersonaEnv(String) — pending upstream claude-agent-acp PR
     // Future: CodexPersonaEnv(String)  — pending upstream codex-acp PR
 }
@@ -1109,23 +1125,34 @@ mod tests {
     }
 
     #[test]
-    fn launch_option_has_only_kiro_persona_variant_v1() {
-        // Compile-time contract: exhaustive match on LaunchOption must
-        // pattern-match `KiroPersona(_)` and nothing else. If a future
-        // variant lands, this test forces the author to update the
-        // stage-2 provider dispatch and the stage-5 spawner translation
-        // in the same change.
-        let opt = LaunchOption::KiroPersona("plan-reality-recon".into());
-        // `match` over `let` ON PURPOSE, and the lint is wrong here: an
-        // irrefutable `let` compiles fine when a second variant lands, which
-        // would silently defeat the whole point of this test. The `match` is
-        // what breaks the build and forces the author to the two dispatch
-        // sites named above.
-        #[allow(clippy::infallible_destructuring_match)]
-        let name = match opt {
-            LaunchOption::KiroPersona(n) => n,
+    fn launch_option_variants_are_exactly_kiro_persona_and_model_v2() {
+        // Compile-time contract: an exhaustive match on LaunchOption must
+        // cover EVERY variant and nothing more. If a future variant lands,
+        // this test forces the author to update the stage-2 provider
+        // dispatch, the stage-5 spawner translation, AND the per-variant
+        // merge in `manager::merge_launch_options_into_runtime_env` — which
+        // has no `_ =>` arm for the same reason.
+        //
+        // v1 covered `KiroPersona` alone; stage-2-model added `Model`, which
+        // broke this test exactly as designed and is now pinned here.
+        //
+        // `match` over `if let` ON PURPOSE: an irrefutable/partial binding
+        // still compiles when a new variant lands, which would silently
+        // defeat the whole point of this test.
+        let described = |opt: LaunchOption| -> (&'static str, String) {
+            match opt {
+                LaunchOption::KiroPersona(n) => ("kiro_persona", n),
+                LaunchOption::Model(m) => ("model", m),
+            }
         };
-        assert_eq!(name, "plan-reality-recon");
+        assert_eq!(
+            described(LaunchOption::KiroPersona("plan-reality-recon".into())),
+            ("kiro_persona", "plan-reality-recon".to_string())
+        );
+        assert_eq!(
+            described(LaunchOption::Model("claude-sonnet-5".into())),
+            ("model", "claude-sonnet-5".to_string())
+        );
     }
 
     #[test]
