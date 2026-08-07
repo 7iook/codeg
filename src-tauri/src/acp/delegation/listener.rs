@@ -23,7 +23,7 @@ use crate::acp::delegation::transport::{
     BrokerTaskProgressRequest,
 };
 use crate::acp::delegation::types::{
-    DelegationError, DelegationRequest, DelegationTaskReport, TaskStatus,
+    DelegationError, DelegationRequest, DelegationTaskReport, TaskStatus, INVALID_MODEL_WIRE_CODE,
 };
 use crate::acp::feedback::{PendingFeedback, SessionFeedbackAccess};
 use crate::acp::question::{QuestionOutcome, SessionQuestionAccess};
@@ -675,7 +675,7 @@ impl DelegationListener {
         // read to the LLM as "my choice was applied" when it wasn't.
         let model = match normalize_requested_model(req.input.get("model")) {
             Ok(model) => model,
-            Err(err) => return report_failed("invalid_model", &err.to_string()),
+            Err(err) => return report_failed(INVALID_MODEL_WIRE_CODE, &err.to_string()),
         };
 
         let delegation_req = DelegationRequest {
