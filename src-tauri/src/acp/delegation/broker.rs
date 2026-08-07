@@ -2285,6 +2285,17 @@ pub struct DelegationBroker {
     /// Woken after every terminal `record_completed` so a `get_delegation_status`
     /// long-poll wakes the instant its task finishes instead of busy-polling.
     result_notify: Arc<Notify>,
+    /// Every [`DelegationRequest`] handed to [`Self::start_delegation`], in call
+    /// order, recorded before any setup runs.
+    ///
+    /// Exists so a test can assert what the *listener* built, for fields the
+    /// broker does not yet forward to `spawn`. `DelegationRequest.model` is one:
+    /// it is parsed off the wire and carried, but no launch path reads it yet,
+    /// so `MockSpawner::spawn_args` — the seam `subagent_type` is observed
+    /// through — cannot see it. Without this, a construction site that dropped
+    /// the field (`model: None`) would leave every test green.
+    #[cfg(any(test, feature = "test-utils"))]
+    received_requests: Arc<Mutex<Vec<DelegationRequest>>>,
 }
 
 impl DelegationBroker {
@@ -2340,6 +2351,8 @@ impl DelegationBroker {
             pre_canceled_handles: Arc::new(PreCanceledHandles::default()),
             config: Arc::new(Mutex::new(DelegationConfig::default())),
             result_notify: Arc::new(Notify::new()),
+            #[cfg(any(test, feature = "test-utils"))]
+            received_requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -3157,6 +3170,11 @@ impl DelegationBroker {
         )
     )]
     pub async fn start_delegation(&self, mut req: DelegationRequest) -> DelegationTaskReport {
+        // Record the inbound request verbatim for tests observing fields the
+        // broker does not forward to `spawn` (see `received_requests`). First
+        // statement, so even a request rejected during setup is visible.
+        #[cfg(any(test, feature = "test-utils"))]
+        self.received_requests.lock().await.push(req.clone());
         // Register this setup as the VERY FIRST thing — before the pre-cancel
         // check's `.await` and the (possibly multi-second) claim poll — so a
         // parent cancel landing ANYWHERE from here to park reaches it, not just
@@ -6122,6 +6140,14 @@ impl DelegationBroker {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn early_complete_count(&self) -> usize {
         self.pending.inner.lock().await.early_completes.len()
+    }
+
+    /// Every [`DelegationRequest`] `start_delegation` received, in call order.
+    /// Lets a test assert on a field the broker carries but does not yet
+    /// forward to `spawn` — see the `received_requests` field.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn received_requests(&self) -> Vec<DelegationRequest> {
+        self.received_requests.lock().await.clone()
     }
 
     /// First reserved (mid-setup) `call_id`, if any — lets a test resolve a

@@ -884,17 +884,34 @@ fn parse_agent_type(raw: &str) -> Option<AgentType> {
 /// Checking against a list of known names would defeat the feature — it would
 /// reject exactly the custom ids the argument exists to carry.
 ///
-/// # Why control characters are the one hard failure
+/// # Why control characters are rejected
 ///
-/// The id is eventually carried to the child as a process env-var value / argv
-/// element. A NUL terminates a C string and a newline can't be represented in
-/// an env-var value at all, so such a value cannot arrive intact — it would be
-/// truncated or mangled somewhere downstream, and the LLM would see a
-/// successful delegation running on a model it did not ask for. Failing here,
-/// with a reason, is the only way that stays visible. This check rejects the
-/// full `char::is_control` class (C0, DEL, C1), not just `\n` / `\0`: ESC
-/// sequences and CR are equally unable to survive the trip, and admitting them
-/// would only move the failure somewhere harder to attribute.
+/// Input hygiene, NOT a transport limitation. Controlled experiment
+/// (2026-08-08, child process reading the value through its own runtime's
+/// environ API and base64-ing the raw bytes, so no shell ever interprets it):
+/// newline, CR, tab, ESC, DEL and C1 (U+0085) all round-trip through a process
+/// env-var value INTACT. So "it can't survive the trip" would be false, and is
+/// not the reason. (A naive probe via `cmd /c echo %VAR%` shows newline and CR
+/// apparently vanishing — that is `cmd.exe` mangling the value on echo, not the
+/// transport failing. Do not reason from it.)
+///
+/// The actual reason is that a model id containing a newline or a tab is almost
+/// certainly paste contamination rather than intent, and the id is forwarded to
+/// the *user's own* endpoint, which we cannot validate against (see above). So
+/// the choice is between failing loudly at the input boundary — naming the
+/// offending codepoint, which the LLM can act on — and forwarding it to get
+/// either an opaque downstream error or, worse, a silent fall back to the
+/// endpoint's default model presented as a successful delegation on the
+/// requested one. The early loud failure is strictly more debuggable. We take
+/// the whole `char::is_control` class (C0, DEL, C1) rather than enumerating
+/// `\n` / `\t`, because no legitimate model id contains any of them and a
+/// partial list only relocates the same ambiguity.
+///
+/// NUL is a different kind of impossibility and worth calling out separately:
+/// it genuinely cannot be represented, and a value carrying one fails at spawn
+/// time with an "embedded null character" error rather than arriving mangled.
+/// Rejecting it here converts that late, generic spawn failure into a specific
+/// one at the argument boundary.
 pub fn normalize_requested_model(raw: Option<&Value>) -> Result<Option<String>, DelegationError> {
     // Non-string JSON degrades to "no model" rather than failing: a
     // schema-violating companion must not be able to lose the user's whole
@@ -908,9 +925,10 @@ pub fn normalize_requested_model(raw: Option<&Value>) -> Result<Option<String>, 
     }
     if let Some(bad) = trimmed.chars().find(|c| c.is_control()) {
         return Err(DelegationError::InvalidModel(format!(
-            "model id contains a control character (U+{:04X}) and cannot be \
-             passed to the agent; pass a plain model id, or omit `model` to \
-             use the configured default",
+            "model id contains a control character (U+{:04X}), which is almost \
+             always paste contamination and is rejected here rather than \
+             forwarded to your endpoint; pass a plain model id, or omit \
+             `model` to use the configured default",
             bad as u32
         )));
     }
