@@ -101,24 +101,33 @@ pub struct DelegationRequest {
     /// (the settings panel's global knob), which is the only mechanism that
     /// existed before this field.
     ///
-    /// # WIRE-ONLY at this stage: normalized and carried, NOT yet applied
+    /// # Applied at launch, per call
     ///
-    /// Nothing consumes this field yet. The listener normalizes it and the
-    /// request carries it, but no spawn path reads it, so nominating an id
-    /// does NOT change which model the child runs on -- the child still
-    /// starts on the model configured for that agent. A later launch stage
-    /// wires it into the spawned child process.
+    /// The broker turns this into [`super::persona::LaunchOption::Model`],
+    /// `manager::merge_launch_options_into_runtime_env` writes it into THAT
+    /// spawn's `runtime_env` under the key
+    /// `commands::acp::per_call_model_env_key(agent_type)`, and
+    /// `spawn_agent` consumes that map by value -- so the child really does
+    /// start on the nominated model, overriding the agent's configured
+    /// default for this delegation alone. Two CLI families take it from the
+    /// env map and translate it to argv instead (`kiro` -> `--model` via
+    /// `connection::kiro_launch_args`, `cursor` -> a root-level `--model`).
     ///
     /// What survives verbatim is the id itself; what is normalized is only
     /// its framing (trim / blank / control characters -- see below).
     ///
-    /// TODO(delegation-model-launch): when that launch stage lands, update
-    /// BOTH user-visible contracts in the SAME change: this doc comment and
-    /// the `model` property description in
-    /// `src-tauri/src/acp/delegation/tool_schema.json`, which currently
-    /// tells the host LLM the value is not yet in effect. Leaving either one
-    /// stale re-creates the same silent-downgrade failure that description
-    /// warns about, just in the opposite direction.
+    /// # What this does NOT promise
+    ///
+    /// Delivery, not adoption. codeg guarantees the id reaches the child's
+    /// launch; it never verifies the endpoint honours it, and a relay may
+    /// silently answer with its own default model instead of erroring. And
+    /// whether the target CLI acts on the key at all varies by agent: Kiro /
+    /// Cursor (argv) and Gemini / KimiCode / Grok (dedicated env key) have
+    /// in-repo evidence; ClaudeCode / Codex have a dedicated key but no
+    /// verification anchor; the remaining types get `OPENAI_MODEL` from the
+    /// catch-all with no evidence their CLI reads it, so the request may be
+    /// inert there. See `per_call_model_env_key`'s doc for the per-agent
+    /// breakdown -- it is the single place that mapping is stated.
     ///
     /// Deliberately NOT validated against any list of known model names: the
     /// id is served by the *user's own* endpoint, which may be a relay in
