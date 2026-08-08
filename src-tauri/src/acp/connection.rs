@@ -43,6 +43,7 @@ use crate::acp::types::{
     SessionConfigSelectInfo, SessionConfigSelectOptionInfo, SessionModeInfo, SessionModeStateInfo,
     ToolCallImageInfo, UserMessageBlock,
 };
+use crate::logging::throttle::LeadingEdgeThrottle;
 use crate::models::agent::AgentType;
 use crate::network::proxy;
 use crate::web::event_bridge::{emit_with_state, EventEmitter};
@@ -5823,6 +5824,47 @@ impl DropSite {
     }
 }
 
+/// Minimum spacing between "dropped an unreadable update" WARN lines. Chosen to
+/// match [`crate::logging::throttle::LAG_LOG_WINDOW`]: the first drop still
+/// surfaces instantly, and a sustained mismatch keeps reporting itself roughly
+/// every 10s instead of once per streaming chunk.
+const DROPPED_UPDATE_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The WARN text for a dropped update. `where_` names the layer that dropped it
+/// (the two [`DropSite`] labels, plus `"idle"` — the idle loop has no turn in
+/// flight and therefore no probe).
+///
+/// `coalesced` is the throttle's occurrence count: suppressed hits are never
+/// lost, the tally rides on the next emitted line. Pure so the "and the
+/// suppressed count is reported" contract has a test that doesn't need a
+/// subscriber.
+fn dropped_update_log_line(where_: &str, error: &impl std::fmt::Display, coalesced: u64) -> String {
+    let head = format!("[ACP] Ignoring unreadable session update ({where_}): {error}");
+    if coalesced <= 1 {
+        head
+    } else {
+        format!(
+            "{head} (+{} more in the last {}s)",
+            coalesced - 1,
+            DROPPED_UPDATE_LOG_WINDOW.as_secs()
+        )
+    }
+}
+
+/// Emit the throttled "codeg dropped an update it could not read" WARN.
+fn log_dropped_update(
+    throttle: &mut LeadingEdgeThrottle,
+    where_: &str,
+    error: &impl std::fmt::Display,
+) {
+    if let Some(summary) = throttle.record(1) {
+        tracing::warn!(
+            "{}",
+            dropped_update_log_line(where_, error, summary.occurrences)
+        );
+    }
+}
+
 /// What a single turn was observed to produce. Scoped to one turn and reset at
 /// each turn start.
 ///
@@ -6129,6 +6171,21 @@ async fn run_conversation_loop<'a>(
     // prompt turn, journaled or not, so consecutive ordinals prove adjacent
     // turns to the reader.
     let mut cursor_turn_ord: u64 = 0;
+    // Session-scoped throttle for the three "we dropped an update we couldn't
+    // read" lines below (idle-loop decode, turn-loop decode, turn-loop dispatch).
+    //
+    // Each fires ONCE PER NOTIFICATION, i.e. per streaming chunk, at WARN — so
+    // they are live under the DEFAULT level, and one schema-drifted agent turns
+    // them into a firehose. That is exactly the shape that wrote 34GB in 8.8h in
+    // the 0.23.3 field report (issue #427). The information they carry is
+    // "codeg is dropping this agent's output", which is worth one line per
+    // window, not one per token: `TurnOutputProbe` keeps the exact counts and the
+    // first redacted error, and surfaces them in the empty-turn diagnosis.
+    //
+    // One throttle across all three sites on purpose — they are three layers of
+    // the same failure (the agent is speaking a protocol we can't read), so the
+    // operator wants one signal, not three interleaved ones.
+    let mut drop_log_throttle = LeadingEdgeThrottle::new(DROPPED_UPDATE_LOG_WINDOW);
     loop {
         // Wait for either a user command or a session update (e.g. available_commands_update)
         let cmd = loop {
@@ -6158,7 +6215,7 @@ async fn run_conversation_loop<'a>(
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            tracing::warn!("[ACP] Ignoring unrecognized session update in idle loop: {e}");
+                            log_dropped_update(&mut drop_log_throttle, "idle", &e);
                         }
                     }
                 }
@@ -6321,7 +6378,11 @@ async fn run_conversation_loop<'a>(
                                     // that said nothing, and the two need
                                     // completely different fixes.
                                     probe.note_dropped(DropSite::Decode, &e);
-                                    tracing::warn!("[ACP] Ignoring unrecognized session update: {e}");
+                                    log_dropped_update(
+                                        &mut drop_log_throttle,
+                                        DropSite::Decode.label(),
+                                        &e,
+                                    );
                                     continue;
                                 }
                             };
@@ -6379,7 +6440,11 @@ async fn run_conversation_loop<'a>(
                                         // only be a typed-deserialization
                                         // failure — i.e. ACP schema drift.
                                         probe.note_dropped(DropSite::Dispatch, &e);
-                                        tracing::warn!("[ACP] Ignoring dispatch parse error: {e}");
+                                        log_dropped_update(
+                                            &mut drop_log_throttle,
+                                            DropSite::Dispatch.label(),
+                                            &e,
+                                        );
                                     }
                                 }
                                 SessionMessage::StopReason(reason) => {
@@ -8699,8 +8764,21 @@ async fn emit_conversation_update(
             }
         }
         other => {
-            // Log unhandled update types for debugging
-            tracing::info!("[ACP] Unhandled SessionUpdate: {:?}", other);
+            // Unhandled update types, for debugging. DEBUG, not INFO: this arm
+            // runs once per `session/update` notification, and `{other:?}` is the
+            // whole payload — for a chunk-shaped variant that is the agent's full
+            // text. At INFO a single agent emitting an update kind codeg doesn't
+            // map would write the entire conversation to disk several times over
+            // under the default level (issue #427). Nothing acts on this line;
+            // it exists to be read while adding support for a new variant, which
+            // is exactly when `debug` is on.
+            //
+            // The default-level signal for "a variant we don't map swallowed the
+            // reply" is not this line but the empty-turn diagnosis: such an
+            // update decodes fine, so `TurnOutputProbe::note_update` files it as
+            // metadata and the turn reports `MetadataOnly`. Turn `debug` on from
+            // there to find out *which* variant.
+            tracing::debug!("[ACP] Unhandled SessionUpdate: {:?}", other);
         }
     }
 }
@@ -9690,6 +9768,57 @@ mod tests {
 
     fn drop_err(msg: &str) -> String {
         msg.to_string()
+    }
+
+    /// The read loop drops at most one update per notification, so an agent
+    /// speaking a protocol codeg can't decode used to put a WARN on the
+    /// per-streaming-chunk path — under the DEFAULT level, which is how a field
+    /// report ended up writing 34GB in 8.8h (issue #427). The throttle collapses
+    /// the burst; this pins the part that must survive it, the tally.
+    #[test]
+    fn dropped_update_log_line_reports_what_the_throttle_swallowed() {
+        // Leading edge: the plain line, no tally to report yet.
+        let first = dropped_update_log_line("decode", &drop_err("bad json"), 1);
+        assert_eq!(
+            first,
+            "[ACP] Ignoring unreadable session update (decode): bad json"
+        );
+        // A coalesced line names how many were suppressed and over what window,
+        // so the reader can tell "happened once" from "happening constantly".
+        let coalesced = dropped_update_log_line("dispatch", &drop_err("missing field"), 4213);
+        assert!(
+            coalesced.starts_with(
+                "[ACP] Ignoring unreadable session update (dispatch): missing field"
+            ),
+            "{coalesced}"
+        );
+        assert!(coalesced.contains("+4212 more"), "{coalesced}");
+        assert!(
+            coalesced.contains(&format!("{}s", DROPPED_UPDATE_LOG_WINDOW.as_secs())),
+            "{coalesced}"
+        );
+    }
+
+    #[test]
+    fn dropped_update_logging_emits_once_per_window() {
+        let mut throttle = LeadingEdgeThrottle::new(DROPPED_UPDATE_LOG_WINDOW);
+        let now = std::time::Instant::now();
+        // First hit surfaces instantly...
+        assert!(throttle.record_at(now, 1).is_some());
+        // ...and a chunk-rate burst inside the window emits nothing at all.
+        for i in 1..10_000u64 {
+            assert!(
+                throttle
+                    .record_at(now + std::time::Duration::from_micros(i * 100), 1)
+                    .is_none(),
+                "burst hit {i} must be suppressed"
+            );
+        }
+        // Past the window, one line carries the whole suppressed tally.
+        let summary = throttle
+            .record_at(now + DROPPED_UPDATE_LOG_WINDOW, 1)
+            .expect("post-window hit emits");
+        assert_eq!(summary.occurrences, 10_000);
     }
 
     #[test]
