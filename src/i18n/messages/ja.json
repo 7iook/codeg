@@ -1868,6 +1868,8 @@
         "stashChanges": "変更を stash",
         "stashPop": "stash を pop",
         "deleteBranch": "ブランチ {branchName} を削除",
+        "removeWorktree": "{branchName} のワークツリーを削除",
+        "removeWorktreeAndBranch": "ワークツリーとブランチ {branchName} を削除",
         "updateBranch": "ブランチ {branchName} を更新"
       },
       "confirm": {
@@ -1880,7 +1882,15 @@
         "deleteTitle": "ブランチを削除",
         "deleteDescription": "ブランチ {branchName} を削除しますか？この操作は元に戻せません。",
         "forceDeleteTitle": "ブランチを強制削除",
-        "forceDeleteDescription": "ブランチ {branchName} はまだ完全にマージされていません。強制削除してもよろしいですか？この操作は元に戻せません。"
+        "forceDeleteDescription": "ブランチ {branchName} はまだ完全にマージされていません。強制削除してもよろしいですか？この操作は元に戻せません。",
+        "deleteWorktreeTitle": "ワークツリーを削除",
+        "deleteWorktreeDescription": "{branchName} をチェックアウトしているワークツリーのディレクトリを削除しますか？ブランチとそのコミットは残ります。",
+        "forceDeleteWorktreeTitle": "ワークツリーを強制削除",
+        "forceDeleteWorktreeDescription": "{branchName} のワークツリーに未コミットまたは未追跡のファイルがあります。それでも削除しますか？その変更は復元できません。",
+        "deleteWorktreeAndBranchTitle": "ワークツリーとブランチを削除",
+        "deleteWorktreeAndBranchDescription": "{branchName} のワークツリー、ブランチ自体、そのワークスペースフォルダーを削除しますか？中のセッションはリポジトリのフォルダーに移動します。この操作は取り消せません。",
+        "forceDeleteWorktreeAndBranchTitle": "ワークツリーとブランチを強制削除",
+        "forceDeleteWorktreeAndBranchDescription": "{branchName} のワークツリーに未コミットのファイルがあるか、ブランチが完全にマージされていません。それでも両方を削除しますか？この操作は取り消せません。"
       },
       "current": "現在",
       "switchToBranch": "このブランチに切り替え",
@@ -1954,6 +1964,8 @@
         "cancel": "キャンセル"
       },
       "deleteBranch": "ブランチを削除",
+      "deleteWorktree": "ワークツリーを削除",
+      "deleteWorktreeAndBranch": "ワークツリーとブランチを削除",
       "searchPlaceholder": "ブランチと操作を検索",
       "searchAriaLabel": "ブランチと操作を検索",
       "branchListLabel": "ブランチと操作",

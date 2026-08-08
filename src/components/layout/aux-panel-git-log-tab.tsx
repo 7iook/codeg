@@ -1299,6 +1299,7 @@ export function GitLogTab() {
     local: [],
     remote: [],
     worktree_branches: [],
+    main_worktree_branch: null,
   })
   const [currentBranch, setCurrentBranch] = useState<string | null>(null)
   // null = the default "all branches" view (git log --all); a name narrows to

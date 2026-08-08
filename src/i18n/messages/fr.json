@@ -1868,6 +1868,8 @@
         "stashChanges": "Stash des changements",
         "stashPop": "Appliquer le stash",
         "deleteBranch": "Supprimer la branche {branchName}",
+        "removeWorktree": "Supprimer le worktree de {branchName}",
+        "removeWorktreeAndBranch": "Supprimer le worktree et la branche {branchName}",
         "updateBranch": "Mettre à jour la branche {branchName}"
       },
       "confirm": {
@@ -1880,7 +1882,15 @@
         "deleteTitle": "Supprimer la branche",
         "deleteDescription": "Supprimer la branche {branchName} ? Cette action est irréversible.",
         "forceDeleteTitle": "Forcer la suppression de la branche",
-        "forceDeleteDescription": "La branche {branchName} n'est pas entièrement fusionnée. Êtes-vous sûr de vouloir la supprimer de force ? Cette action est irréversible."
+        "forceDeleteDescription": "La branche {branchName} n'est pas entièrement fusionnée. Êtes-vous sûr de vouloir la supprimer de force ? Cette action est irréversible.",
+        "deleteWorktreeTitle": "Supprimer le worktree",
+        "deleteWorktreeDescription": "Supprimer le répertoire du worktree où {branchName} est extraite ? La branche et ses commits sont conservés.",
+        "forceDeleteWorktreeTitle": "Forcer la suppression du worktree",
+        "forceDeleteWorktreeDescription": "Le worktree de {branchName} contient des fichiers non validés ou non suivis. Le supprimer quand même ? Ces modifications seront irrécupérables.",
+        "deleteWorktreeAndBranchTitle": "Supprimer le worktree et la branche",
+        "deleteWorktreeAndBranchDescription": "Supprimer le worktree de {branchName}, la branche elle-même et son dossier d'espace de travail ? Ses sessions sont déplacées vers le dossier du dépôt. Cette action est irréversible.",
+        "forceDeleteWorktreeAndBranchTitle": "Forcer la suppression du worktree et de la branche",
+        "forceDeleteWorktreeAndBranchDescription": "Le worktree de {branchName} contient des fichiers non validés, ou la branche n'est pas entièrement fusionnée. Tout supprimer quand même ? Cette action est irréversible."
       },
       "current": "Actuelle",
       "switchToBranch": "Basculer vers cette branche",
@@ -1954,6 +1964,8 @@
         "cancel": "Annuler"
       },
       "deleteBranch": "Supprimer la branche",
+      "deleteWorktree": "Supprimer le worktree",
+      "deleteWorktreeAndBranch": "Supprimer le worktree et la branche",
       "searchPlaceholder": "Rechercher des branches et actions",
       "searchAriaLabel": "Rechercher des branches et actions",
       "branchListLabel": "Branches et actions",

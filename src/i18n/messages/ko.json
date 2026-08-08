@@ -1868,6 +1868,8 @@
         "stashChanges": "변경 사항 stash",
         "stashPop": "stash pop",
         "deleteBranch": "브랜치 {branchName} 삭제",
+        "removeWorktree": "{branchName}의 워크트리 삭제",
+        "removeWorktreeAndBranch": "워크트리 및 브랜치 {branchName} 삭제",
         "updateBranch": "브랜치 {branchName} 업데이트"
       },
       "confirm": {
@@ -1880,7 +1882,15 @@
         "deleteTitle": "브랜치 삭제",
         "deleteDescription": "브랜치 {branchName}을(를) 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
         "forceDeleteTitle": "브랜치 강제 삭제",
-        "forceDeleteDescription": "브랜치 {branchName}가 완전히 병합되지 않았습니다. 강제 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다."
+        "forceDeleteDescription": "브랜치 {branchName}가 완전히 병합되지 않았습니다. 강제 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
+        "deleteWorktreeTitle": "워크트리 삭제",
+        "deleteWorktreeDescription": "{branchName}이(가) 체크아웃된 워크트리 디렉터리를 삭제할까요? 브랜치와 커밋은 유지됩니다.",
+        "forceDeleteWorktreeTitle": "워크트리 강제 삭제",
+        "forceDeleteWorktreeDescription": "{branchName}의 워크트리에 커밋되지 않았거나 추적되지 않는 파일이 있습니다. 그래도 삭제할까요? 해당 변경 사항은 복구할 수 없습니다.",
+        "deleteWorktreeAndBranchTitle": "워크트리 및 브랜치 삭제",
+        "deleteWorktreeAndBranchDescription": "{branchName}의 워크트리와 브랜치, 그리고 워크스페이스 폴더를 삭제할까요? 그 안의 세션은 저장소 폴더로 이동합니다. 이 작업은 되돌릴 수 없습니다.",
+        "forceDeleteWorktreeAndBranchTitle": "워크트리 및 브랜치 강제 삭제",
+        "forceDeleteWorktreeAndBranchDescription": "{branchName}의 워크트리에 커밋되지 않은 파일이 있거나 브랜치가 완전히 병합되지 않았습니다. 그래도 둘 다 삭제할까요? 이 작업은 되돌릴 수 없습니다."
       },
       "current": "현재",
       "switchToBranch": "이 브랜치로 전환",
@@ -1954,6 +1964,8 @@
         "cancel": "취소"
       },
       "deleteBranch": "브랜치 삭제",
+      "deleteWorktree": "워크트리 삭제",
+      "deleteWorktreeAndBranch": "워크트리 및 브랜치 삭제",
       "searchPlaceholder": "브랜치 및 작업 검색",
       "searchAriaLabel": "브랜치 및 작업 검색",
       "branchListLabel": "브랜치 및 작업",

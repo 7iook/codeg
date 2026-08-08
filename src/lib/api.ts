@@ -68,6 +68,7 @@ import type {
   CreateChatConversationResult,
   CreateChatDirResult,
   WorktreeResolution,
+  GitWorktreeRemoval,
   DbConversationSummary,
   ImportResult,
   ImportSelectedResult,
@@ -1969,6 +1970,32 @@ export async function gitDeleteBranch(
   return getTransport().call("git_delete_branch", {
     path,
     branchName,
+    force,
+  })
+}
+
+/**
+ * Remove the worktree that has `branchName` checked out — the only way such a
+ * branch can be deleted, since git refuses `branch -d` while a worktree holds
+ * the ref. `deleteBranch` also takes the branch and the worktree's workspace
+ * folder (its sessions move to the repo folder); `force` discards uncommitted
+ * work in the worktree and force-deletes an unmerged branch.
+ *
+ * `sourceFolderId` is the folder the caller acts from — it only supplies the
+ * re-parent target when the worktree folder has no recorded root.
+ */
+export async function gitRemoveWorktree(
+  path: string,
+  branchName: string,
+  sourceFolderId: number,
+  deleteBranch: boolean,
+  force: boolean = false
+): Promise<GitWorktreeRemoval> {
+  return getTransport().call("git_remove_worktree", {
+    path,
+    branchName,
+    sourceFolderId,
+    deleteBranch,
     force,
   })
 }

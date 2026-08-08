@@ -1868,6 +1868,8 @@
         "stashChanges": "贮藏更改",
         "stashPop": "取消贮藏",
         "deleteBranch": "删除分支 {branchName}",
+        "removeWorktree": "删除 {branchName} 的工作树",
+        "removeWorktreeAndBranch": "删除工作树及分支 {branchName}",
         "updateBranch": "更新分支 {branchName}"
       },
       "confirm": {
@@ -1880,7 +1882,15 @@
         "deleteTitle": "删除分支",
         "deleteDescription": "确定删除分支 {branchName} 吗？此操作不可恢复。",
         "forceDeleteTitle": "强制删除分支",
-        "forceDeleteDescription": "分支 {branchName} 尚未完全合并，确定要强制删除吗？此操作不可恢复。"
+        "forceDeleteDescription": "分支 {branchName} 尚未完全合并，确定要强制删除吗？此操作不可恢复。",
+        "deleteWorktreeTitle": "删除工作树",
+        "deleteWorktreeDescription": "删除检出了 {branchName} 的工作树目录？分支及其提交会保留。",
+        "forceDeleteWorktreeTitle": "强制删除工作树",
+        "forceDeleteWorktreeDescription": "{branchName} 的工作树中有未提交或未跟踪的文件。仍要删除吗？这些改动将无法恢复。",
+        "deleteWorktreeAndBranchTitle": "删除工作树及分支",
+        "deleteWorktreeAndBranchDescription": "删除 {branchName} 的工作树、该分支本身及其工作区文件夹？其中的会话会移动到仓库文件夹下。此操作无法撤销。",
+        "forceDeleteWorktreeAndBranchTitle": "强制删除工作树及分支",
+        "forceDeleteWorktreeAndBranchDescription": "{branchName} 的工作树中有未提交的文件，或该分支尚未完全合并。仍要一并删除吗？此操作无法撤销。"
       },
       "current": "当前",
       "switchToBranch": "切换到此分支",
@@ -1954,6 +1964,8 @@
         "cancel": "取消"
       },
       "deleteBranch": "删除分支",
+      "deleteWorktree": "删除工作树",
+      "deleteWorktreeAndBranch": "删除工作树及分支",
       "searchPlaceholder": "搜索分支和操作",
       "searchAriaLabel": "搜索分支和操作",
       "branchListLabel": "分支和操作",

@@ -2866,7 +2866,14 @@ export type GitResetMode = "soft" | "mixed" | "hard" | "keep"
 export interface GitBranchList {
   local: string[]
   remote: string[]
+  /** Branches checked out in some *other* worktree than the queried path. */
   worktree_branches: string[]
+  /**
+   * The branch checked out in the repo's main working tree, when that is not the
+   * queried path itself. It appears in `worktree_branches` like any other — but
+   * its checkout is the repo, so it can neither be deleted nor removed.
+   */
+  main_worktree_branch: string | null
 }
 
 /**
@@ -2895,6 +2902,20 @@ export interface GitHeadInfo {
 export interface WorktreeResolution {
   path: string | null
   folder_id: number | null
+}
+
+/**
+ * What removing a worktree actually did (mirrors Rust `GitWorktreeRemoval`).
+ * `worktree_path` is null when the branch had no worktree left to remove — what
+ * a retry after a partially applied removal sees. `folder_id` is the workspace
+ * folder dropped along with the directory (only the "…and branch" variant drops
+ * one), and `reparented` counts the conversations it moved to the repo folder.
+ */
+export interface GitWorktreeRemoval {
+  worktree_path: string | null
+  branch_deleted: boolean
+  folder_id: number | null
+  reparented: number
 }
 
 export interface GitConflictInfo {

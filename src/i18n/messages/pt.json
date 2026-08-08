@@ -1868,6 +1868,8 @@
         "stashChanges": "Fazer stash das alterações",
         "stashPop": "Aplicar stash",
         "deleteBranch": "Excluir branch {branchName}",
+        "removeWorktree": "Excluir o worktree de {branchName}",
+        "removeWorktreeAndBranch": "Excluir o worktree e o branch {branchName}",
         "updateBranch": "Atualizar o branch {branchName}"
       },
       "confirm": {
@@ -1880,7 +1882,15 @@
         "deleteTitle": "Excluir branch",
         "deleteDescription": "Excluir a branch {branchName}? Esta ação não pode ser desfeita.",
         "forceDeleteTitle": "Forçar exclusão do branch",
-        "forceDeleteDescription": "O branch {branchName} não está totalmente mesclado. Tem certeza de que deseja forçar a exclusão? Esta ação não pode ser desfeita."
+        "forceDeleteDescription": "O branch {branchName} não está totalmente mesclado. Tem certeza de que deseja forçar a exclusão? Esta ação não pode ser desfeita.",
+        "deleteWorktreeTitle": "Excluir worktree",
+        "deleteWorktreeDescription": "Excluir o diretório do worktree onde {branchName} está em uso? O branch e seus commits são mantidos.",
+        "forceDeleteWorktreeTitle": "Forçar a exclusão do worktree",
+        "forceDeleteWorktreeDescription": "O worktree de {branchName} tem arquivos não commitados ou não rastreados. Excluir mesmo assim? Essas alterações não poderão ser recuperadas.",
+        "deleteWorktreeAndBranchTitle": "Excluir worktree e branch",
+        "deleteWorktreeAndBranchDescription": "Excluir o worktree de {branchName}, o próprio branch e a pasta dele no espaço de trabalho? As sessões passam para a pasta do repositório. Esta ação não pode ser desfeita.",
+        "forceDeleteWorktreeAndBranchTitle": "Forçar a exclusão do worktree e do branch",
+        "forceDeleteWorktreeAndBranchDescription": "O worktree de {branchName} tem arquivos não commitados, ou o branch não está totalmente mesclado. Excluir os dois mesmo assim? Esta ação não pode ser desfeita."
       },
       "current": "Atual",
       "switchToBranch": "Mudar para esta branch",
@@ -1954,6 +1964,8 @@
         "cancel": "Cancelar"
       },
       "deleteBranch": "Excluir branch",
+      "deleteWorktree": "Excluir worktree",
+      "deleteWorktreeAndBranch": "Excluir worktree e branch",
       "searchPlaceholder": "Pesquisar ramos e ações",
       "searchAriaLabel": "Pesquisar ramos e ações",
       "branchListLabel": "Ramos e ações",

@@ -1868,6 +1868,8 @@
         "stashChanges": "Guardar cambios en stash",
         "stashPop": "Aplicar stash",
         "deleteBranch": "Eliminar rama {branchName}",
+        "removeWorktree": "Eliminar el worktree de {branchName}",
+        "removeWorktreeAndBranch": "Eliminar el worktree y la rama {branchName}",
         "updateBranch": "Actualizar la rama {branchName}"
       },
       "confirm": {
@@ -1880,7 +1882,15 @@
         "deleteTitle": "Eliminar rama",
         "deleteDescription": "¿Eliminar la rama {branchName}? Esta acción no se puede deshacer.",
         "forceDeleteTitle": "Forzar eliminación de rama",
-        "forceDeleteDescription": "La rama {branchName} no está completamente fusionada. ¿Estás seguro de que quieres forzar su eliminación? Esta acción no se puede deshacer."
+        "forceDeleteDescription": "La rama {branchName} no está completamente fusionada. ¿Estás seguro de que quieres forzar su eliminación? Esta acción no se puede deshacer.",
+        "deleteWorktreeTitle": "Eliminar worktree",
+        "deleteWorktreeDescription": "¿Eliminar el directorio del worktree que tiene {branchName} activa? La rama y sus commits se conservan.",
+        "forceDeleteWorktreeTitle": "Forzar la eliminación del worktree",
+        "forceDeleteWorktreeDescription": "El worktree de {branchName} tiene archivos sin confirmar o sin seguimiento. ¿Eliminarlo de todos modos? Esos cambios no se podrán recuperar.",
+        "deleteWorktreeAndBranchTitle": "Eliminar worktree y rama",
+        "deleteWorktreeAndBranchDescription": "¿Eliminar el worktree de {branchName}, la rama y su carpeta del espacio de trabajo? Sus sesiones pasan a la carpeta del repositorio. Esta acción no se puede deshacer.",
+        "forceDeleteWorktreeAndBranchTitle": "Forzar la eliminación del worktree y la rama",
+        "forceDeleteWorktreeAndBranchDescription": "El worktree de {branchName} tiene archivos sin confirmar, o la rama no está totalmente fusionada. ¿Eliminar ambos de todos modos? Esta acción no se puede deshacer."
       },
       "current": "Actual",
       "switchToBranch": "Cambiar a esta rama",
@@ -1954,6 +1964,8 @@
         "cancel": "Cancelar"
       },
       "deleteBranch": "Eliminar rama",
+      "deleteWorktree": "Eliminar worktree",
+      "deleteWorktreeAndBranch": "Eliminar worktree y rama",
       "searchPlaceholder": "Buscar ramas y acciones",
       "searchAriaLabel": "Buscar ramas y acciones",
       "branchListLabel": "Ramas y acciones",

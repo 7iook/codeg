@@ -1868,6 +1868,8 @@
         "stashChanges": "Stash changes",
         "stashPop": "Pop stash",
         "deleteBranch": "Delete branch {branchName}",
+        "removeWorktree": "Delete worktree for {branchName}",
+        "removeWorktreeAndBranch": "Delete worktree and branch {branchName}",
         "updateBranch": "Update branch {branchName}"
       },
       "confirm": {
@@ -1880,7 +1882,15 @@
         "deleteTitle": "Delete branch",
         "deleteDescription": "Delete branch {branchName}? This action cannot be undone.",
         "forceDeleteTitle": "Force Delete Branch",
-        "forceDeleteDescription": "Branch {branchName} is not fully merged. Are you sure you want to force delete it? This action cannot be undone."
+        "forceDeleteDescription": "Branch {branchName} is not fully merged. Are you sure you want to force delete it? This action cannot be undone.",
+        "deleteWorktreeTitle": "Delete worktree",
+        "deleteWorktreeDescription": "Delete the worktree directory that has {branchName} checked out? The branch and its commits are kept.",
+        "forceDeleteWorktreeTitle": "Force delete worktree",
+        "forceDeleteWorktreeDescription": "The worktree for {branchName} has uncommitted or untracked files. Delete it anyway? Those changes cannot be recovered.",
+        "deleteWorktreeAndBranchTitle": "Delete worktree and branch",
+        "deleteWorktreeAndBranchDescription": "Delete the worktree for {branchName}, the branch itself, and its workspace folder? Its sessions move to the repository folder. This action cannot be undone.",
+        "forceDeleteWorktreeAndBranchTitle": "Force delete worktree and branch",
+        "forceDeleteWorktreeAndBranchDescription": "The worktree for {branchName} has uncommitted files, or the branch is not fully merged. Delete both anyway? This action cannot be undone."
       },
       "current": "Current",
       "switchToBranch": "Switch to this branch",
@@ -1954,6 +1964,8 @@
         "cancel": "Cancel"
       },
       "deleteBranch": "Delete branch",
+      "deleteWorktree": "Delete worktree",
+      "deleteWorktreeAndBranch": "Delete worktree and branch",
       "searchPlaceholder": "Search branches and actions",
       "searchAriaLabel": "Search branches and actions",
       "branchListLabel": "Branches and actions",

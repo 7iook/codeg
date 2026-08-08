@@ -1784,6 +1784,61 @@ pub async fn clear_worktree(conn: &DatabaseConnection, id: i32) -> Result<(), Db
     Ok(())
 }
 
+/// Tasks in a status that is actively using their worktree — mid-run or
+/// mid-merge. Removing such a worktree would pull the directory out from under
+/// a live agent, so [`tasks_blocking_worktree_removal`] refuses on their behalf.
+const WORKTREE_BUSY_STATUSES: &[WorkTaskStatus] = &[
+    WorkTaskStatus::Queued,
+    WorkTaskStatus::Preparing,
+    WorkTaskStatus::Running,
+    WorkTaskStatus::AwaitingInput,
+    WorkTaskStatus::Merging,
+];
+
+/// Titles of the live tasks currently working inside `folder_id`'s worktree.
+/// Non-empty means the worktree must not be removed yet — the card's own
+/// "remove worktree" refuses the same statuses.
+pub async fn tasks_blocking_worktree_removal(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+) -> Result<Vec<String>, DbError> {
+    let rows = work_task::Entity::find()
+        .filter(work_task::Column::DeletedAt.is_null())
+        .filter(work_task::Column::WorktreeFolderId.eq(folder_id))
+        .filter(work_task::Column::Status.is_in(WORKTREE_BUSY_STATUSES.iter().copied()))
+        .all(conn)
+        .await?;
+    Ok(rows.into_iter().map(|row| row.title).collect())
+}
+
+/// [`clear_worktree`] for every task pointing at a folder that has just been
+/// removed, whoever removed it. Returns the ids it detached so the caller can
+/// tell clients to refetch those cards — a task still advertising a worktree
+/// that no longer exists offers cleanup and diff actions that can only fail.
+pub async fn clear_worktree_by_folder(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+) -> Result<Vec<i32>, DbError> {
+    let ids: Vec<i32> = work_task::Entity::find()
+        .filter(work_task::Column::WorktreeFolderId.eq(folder_id))
+        .all(conn)
+        .await?
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    work_task::Entity::update_many()
+        .col_expr(work_task::Column::WorktreeFolderId, Expr::value(None::<i32>))
+        .col_expr(work_task::Column::CleanupState, Expr::value(None::<String>))
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(work_task::Column::WorktreeFolderId.eq(folder_id))
+        .exec(conn)
+        .await?;
+    Ok(ids)
+}
+
 /// Boot recovery: a fresh process has no live connections, so every
 /// queued/running/awaiting_input task is an interruption → failed(interrupted)
 /// (retry is idempotent and reuses the worktree). Merging tasks are NOT touched

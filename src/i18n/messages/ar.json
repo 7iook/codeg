@@ -1868,6 +1868,8 @@
         "stashChanges": "تخزين التغييرات في stash",
         "stashPop": "استرجاع stash",
         "deleteBranch": "حذف الفرع {branchName}",
+        "removeWorktree": "حذف worktree الخاص بـ {branchName}",
+        "removeWorktreeAndBranch": "حذف worktree والفرع {branchName}",
         "updateBranch": "تحديث الفرع {branchName}"
       },
       "confirm": {
@@ -1880,7 +1882,15 @@
         "deleteTitle": "حذف الفرع",
         "deleteDescription": "حذف الفرع {branchName}؟ لا يمكن التراجع عن هذا الإجراء.",
         "forceDeleteTitle": "حذف الفرع بالقوة",
-        "forceDeleteDescription": "الفرع {branchName} لم يتم دمجه بالكامل. هل أنت متأكد من أنك تريد حذفه بالقوة؟ لا يمكن التراجع عن هذا الإجراء."
+        "forceDeleteDescription": "الفرع {branchName} لم يتم دمجه بالكامل. هل أنت متأكد من أنك تريد حذفه بالقوة؟ لا يمكن التراجع عن هذا الإجراء.",
+        "deleteWorktreeTitle": "حذف worktree",
+        "deleteWorktreeDescription": "حذف مجلد worktree الذي تم سحب {branchName} فيه؟ سيتم الاحتفاظ بالفرع وإيداعاته.",
+        "forceDeleteWorktreeTitle": "فرض حذف worktree",
+        "forceDeleteWorktreeDescription": "يحتوي worktree الخاص بـ {branchName} على ملفات غير مودعة أو غير متتبعة. هل تريد حذفه على أي حال؟ لا يمكن استرجاع تلك التغييرات.",
+        "deleteWorktreeAndBranchTitle": "حذف worktree والفرع",
+        "deleteWorktreeAndBranchDescription": "حذف worktree الخاص بـ {branchName} والفرع نفسه ومجلده في مساحة العمل؟ ستنتقل جلساته إلى مجلد المستودع. لا يمكن التراجع عن هذا الإجراء.",
+        "forceDeleteWorktreeAndBranchTitle": "فرض حذف worktree والفرع",
+        "forceDeleteWorktreeAndBranchDescription": "يحتوي worktree الخاص بـ {branchName} على ملفات غير مودعة، أو أن الفرع غير مدمج بالكامل. هل تريد حذفهما على أي حال؟ لا يمكن التراجع عن هذا الإجراء."
       },
       "current": "الحالي",
       "switchToBranch": "التبديل إلى هذا الفرع",
@@ -1954,6 +1964,8 @@
         "cancel": "إلغاء"
       },
       "deleteBranch": "حذف الفرع",
+      "deleteWorktree": "حذف worktree",
+      "deleteWorktreeAndBranch": "حذف worktree والفرع",
       "searchPlaceholder": "البحث في الفروع والإجراءات",
       "searchAriaLabel": "البحث في الفروع والإجراءات",
       "branchListLabel": "الفروع والإجراءات",

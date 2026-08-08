@@ -393,6 +393,10 @@ pub fn build_router(
         .route("/git_fetch_remote", post(handlers::git::git_fetch_remote))
         .route("/git_delete_branch", post(handlers::git::git_delete_branch))
         .route(
+            "/git_remove_worktree",
+            post(handlers::git::git_remove_worktree),
+        )
+        .route(
             "/git_delete_remote_branch",
             post(handlers::git::git_delete_remote_branch),
         )
