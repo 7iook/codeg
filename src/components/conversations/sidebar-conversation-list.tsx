@@ -71,7 +71,9 @@ import {
   saveSectionCollapsed,
   loadConversationExpanded,
   saveConversationExpanded,
+  DEFAULT_SECTION_ORDER,
   type SidebarSectionCollapsed,
+  type SidebarSectionKey,
   type SidebarSortMode,
   type SidebarSectionOrder,
 } from "@/lib/sidebar-view-mode-storage"
@@ -105,6 +107,7 @@ import {
   reuseSet,
   selectChatConversationsWithReuse,
   selectPinnedWithReuse,
+  selectRecentConversationsWithReuse,
   worktreeChildrenByParent,
   type SidebarRow,
 } from "./sidebar-conversation-grouping"
@@ -712,14 +715,19 @@ export interface SidebarConversationListProps {
   /** When on, each repo's worktree child folders render as indented sub-groups
    *  instead of being merged flat into the parent group. Defaults to off. */
   showWorktrees?: boolean
+  /** When on, the flat "Recent" section is rendered at its slot in
+   *  `sectionOrder`. Defaults to off here; the Sidebar passes the user's
+   *  preference, whose product default is ON. */
+  showRecent?: boolean
 }
 
 export function SidebarConversationList({
   ref,
   showCompleted = true,
   sortMode = "created",
-  sectionOrder = "folders-first",
+  sectionOrder = DEFAULT_SECTION_ORDER,
   showWorktrees = false,
+  showRecent = false,
 }: SidebarConversationListProps & {
   ref?: Ref<SidebarConversationListHandle>
 }) {
@@ -835,6 +843,7 @@ export function SidebarConversationList({
   const pinnedExpanded = !sectionCollapsed.pinned
   const foldersExpanded = !sectionCollapsed.folders
   const chatsExpanded = !sectionCollapsed.chats
+  const recentExpanded = !sectionCollapsed.recent
   // ── Per-conversation delegation sub-session expansion ───────────────────
   // Default COLLAPSED (unlike folders): only ids the user opened are tracked
   // and persisted. Hydrated from localStorage after mount. `childrenByParent`
@@ -923,16 +932,13 @@ export function SidebarConversationList({
     setConversationExpanded(new Set(loadConversationExpanded()))
   }, [])
 
-  const toggleSection = useCallback(
-    (section: "pinned" | "folders" | "chats") => {
-      setSectionCollapsed((prev) => {
-        const next = { ...prev, [section]: !prev[section] }
-        saveSectionCollapsed(next)
-        return next
-      })
-    },
-    []
-  )
+  const toggleSection = useCallback((section: SidebarSectionKey) => {
+    setSectionCollapsed((prev) => {
+      const next = { ...prev, [section]: !prev[section] }
+      saveSectionCollapsed(next)
+      return next
+    })
+  }, [])
 
   const handleChangeFolderColor = useCallback(
     async (folderId: number, color: FolderThemeColor) => {
@@ -1058,20 +1064,44 @@ export function SidebarConversationList({
     return next
   }, [conversations])
 
+  // Every folder currently open in the workspace (repos and their worktree
+  // children alike). Depends only on `folders`, so status events never rebuild
+  // it — the Recent bucket below leans on that.
+  const openFolderIds = useMemo(
+    () => new Set(folders.map((f) => f.id)),
+    [folders]
+  )
+
+  // Flat "Recent" bucket: every reachable conversation — folder-bound and chat
+  // alike — newest first, gated on the folder still being open so closing a
+  // folder also removes its sessions here. Reference reuse keeps an unrelated
+  // status event from rebuilding it and defeating the section's card memos.
+  const recentConvsRef = useRef<DbConversationSummary[]>([])
+  const recentConversations = useMemo(() => {
+    const next = selectRecentConversationsWithReuse(
+      conversations,
+      showCompleted,
+      sortMode,
+      openFolderIds,
+      recentConvsRef.current
+    )
+    recentConvsRef.current = next
+    return next
+  }, [conversations, showCompleted, sortMode, openFolderIds])
+
   // Maps each open worktree child folder → its (open) root folder. A child is
   // only redirected when its parent is also open, so a worktree whose root was
   // closed/removed falls back to standing on its own (its conversations stay
   // reachable). The merge is display-only: it never rewrites `conversation.folder_id`.
   const childToParent = useMemo(() => {
-    const openIds = new Set(folders.map((f) => f.id))
     const map = new Map<number, number>()
     for (const f of folders) {
-      if (f.parent_id != null && openIds.has(f.parent_id)) {
+      if (f.parent_id != null && openFolderIds.has(f.parent_id)) {
         map.set(f.id, f.parent_id)
       }
     }
     return map
-  }, [folders])
+  }, [folders, openFolderIds])
 
   // The merge map used for DISPLAY (grouping, counts, theming). When "Show
   // worktrees" is on it is empty, so each worktree child keeps its own bucket /
@@ -1216,6 +1246,9 @@ export function SidebarConversationList({
         foldersExpanded,
         chatConversations,
         chatsExpanded,
+        recentConversations,
+        recentExpanded,
+        showRecent,
         sectionOrder,
         conversationExpanded,
         childrenByParent,
@@ -1233,6 +1266,9 @@ export function SidebarConversationList({
       foldersExpanded,
       chatConversations,
       chatsExpanded,
+      recentConversations,
+      recentExpanded,
+      showRecent,
       sectionOrder,
       conversationExpanded,
       childrenByParent,
@@ -2277,6 +2313,16 @@ export function SidebarConversationList({
         </div>
       )
     }
+    if (row.kind === "recent-empty") {
+      // Empty "Recent" section hint — same folderless, rail-less treatment as
+      // the other two. Only reachable in a workspace with no conversations at
+      // all, since Recent spans every section.
+      return (
+        <div className="px-[0.5rem] py-[0.375rem] text-[0.75rem] text-muted-foreground/70">
+          {t("noRecent")}
+        </div>
+      )
+    }
     if (row.kind === "subsession-loading") {
       // Transient spinner at the child indent while children are fetched. The
       // left inset matches a depth-`row.depth` card's text start: rail axis
@@ -2332,6 +2378,10 @@ export function SidebarConversationList({
     )
   }
 
+  // Keys must be unique across the WHOLE flat array, and the Recent section
+  // deliberately re-lists conversations that also appear under their folder or
+  // in Chat — so every row a Recent parent can produce carries a `recent-`
+  // prefix to stay distinct from its canonical twin.
   const rowKey = (row: SidebarRow): string => {
     if (row.kind === "section") return `section-${row.section}`
     if (row.kind === "folder") return `folder-${row.folderId}`
@@ -2339,8 +2389,12 @@ export function SidebarConversationList({
     if (row.kind === "empty") return `empty-${row.folderId}`
     if (row.kind === "chats-empty") return "chats-empty"
     if (row.kind === "folders-empty") return "folders-empty"
-    if (row.kind === "subsession-loading") return `subloading-${row.parentId}`
-    return `conv-${row.conversation.agent_type}-${row.conversation.id}`
+    if (row.kind === "recent-empty") return "recent-empty"
+    const prefix = row.recent ? "recent-" : ""
+    if (row.kind === "subsession-loading") {
+      return `${prefix}subloading-${row.parentId}`
+    }
+    return `${prefix}conv-${row.conversation.agent_type}-${row.conversation.id}`
   }
 
   return (

@@ -9,14 +9,15 @@ import {
   SquarePen,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
+import type { SidebarSectionKey } from "@/lib/sidebar-view-mode-storage"
 import { cn } from "@/lib/utils"
 
 /**
- * Collapsible heading for one of the two top-level sidebar sections: "pinned"
- * (shown only when there are pinned conversations) and "folders" (wraps the
- * whole folder list). One flat row in the virtualized list, height-matched to
- * every other row (`h-[2rem]`) so `virtua`'s fixed item-size estimate stays
- * accurate.
+ * Collapsible heading for one of the top-level sidebar sections: "pinned"
+ * (shown only when there are pinned conversations), "folders" (wraps the whole
+ * folder list), "chats", and "recent". One flat row in the virtualized list,
+ * height-matched to every other row (`h-[2rem]`) so `virtua`'s fixed item-size
+ * estimate stays accurate.
  *
  * The label sits first and the disclosure chevron trails it, revealed only on
  * hover/focus (and always on touch, which has no hover). The chevron rotates via
@@ -35,9 +36,9 @@ export const SidebarSectionHeader = memo(function SidebarSectionHeader({
   onImportSessions,
   topGap = false,
 }: {
-  section: "pinned" | "folders" | "chats"
+  section: SidebarSectionKey
   expanded: boolean
-  onToggle: (section: "pinned" | "folders" | "chats") => void
+  onToggle: (section: SidebarSectionKey) => void
   /**
    * When provided on the "chats" section, renders a New-chat action button at
    * the row's right edge, revealed only while the row is hovered/focused (and
@@ -82,7 +83,9 @@ export const SidebarSectionHeader = memo(function SidebarSectionHeader({
       ? t("sectionPinned")
       : section === "chats"
         ? t("sectionChats")
-        : t("sectionFolders")
+        : section === "recent"
+          ? t("sectionRecent")
+          : t("sectionFolders")
   const showNewChat = section === "chats" && onNewChat != null
   // The folders section mirrors the chats section's right-edge affordance, but
   // with two buttons (Open Folder / Clone Repository) — the same "add a folder"
