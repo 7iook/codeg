@@ -120,14 +120,15 @@ pub struct DelegationRequest {
     ///
     /// Delivery, not adoption. codeg guarantees the id reaches the child's
     /// launch; it never verifies the endpoint honours it, and a relay may
-    /// silently answer with its own default model instead of erroring. And
-    /// whether the target CLI acts on the key at all varies by agent: Kiro /
-    /// Cursor (argv) and Gemini / KimiCode / Grok (dedicated env key) have
-    /// in-repo evidence; ClaudeCode / Codex have a dedicated key but no
-    /// verification anchor; the remaining types get `OPENAI_MODEL` from the
-    /// catch-all with no evidence their CLI reads it, so the request may be
-    /// inert there. See `per_call_model_env_key`'s doc for the per-agent
-    /// breakdown -- it is the single place that mapping is stated.
+    /// silently answer with its own default model instead of erroring.
+    ///
+    /// Whether the target CLI acts on the key at all varies by agent, and the
+    /// evidence differs in kind (codeg-translated argv / vendor-documented env
+    /// var / disproven / none found). That tiering is deliberately NOT restated
+    /// here: see [`crate::commands::acp::per_call_model_env_key`], which is the
+    /// single place it is stated. An earlier revision of this comment did
+    /// summarise it and had already drifted out of date against that function
+    /// within one working session -- which is the reason for the pointer.
     ///
     /// Deliberately NOT validated against any list of known model names: the
     /// id is served by the *user's own* endpoint, which may be a relay in
