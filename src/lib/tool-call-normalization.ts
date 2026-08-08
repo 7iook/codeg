@@ -290,7 +290,20 @@ function inferFromInput(
     ])
   )
     return "bash"
-  if (hasAnyKey(parsed, ["old_string", "new_string", "replace_all"]))
+  // OpenCode names these arguments in camelCase on the wire, and its ACP
+  // adapter forwards them verbatim, so the live stream sees `oldString` where
+  // the history parser has already rewritten them to snake_case
+  // (`parsers/opencode.rs::normalize_tool_call`).
+  if (
+    hasAnyKey(parsed, [
+      "old_string",
+      "new_string",
+      "replace_all",
+      "oldString",
+      "newString",
+      "replaceAll",
+    ])
+  )
     return "edit"
   if (hasAnyKey(parsed, ["changes"])) return "edit"
   if (hasAnyKey(parsed, ["todos"])) return "todowrite"
@@ -330,7 +343,15 @@ function inferFromInput(
     )
   }
 
-  const hasPath = hasAnyKey(parsed, ["file_path", "notebook_path", "path"])
+  // `filePath` is OpenCode's spelling; `session-files.ts` already counts it as
+  // a path key, so recognising it here keeps classification and file tallies
+  // agreeing on the same payload.
+  const hasPath = hasAnyKey(parsed, [
+    "file_path",
+    "notebook_path",
+    "path",
+    "filePath",
+  ])
   if (hasPath) {
     // Check write-specific input keys first — they take priority over
     // kind/title because ACP ToolKind::Edit ("edit") is a category that

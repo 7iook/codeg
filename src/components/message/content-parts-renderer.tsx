@@ -1117,9 +1117,11 @@ function deriveToolTitle(
     return "TodoWrite"
   }
 
-  // Skill
+  // Skill. OpenCode's native `skill` tool takes `{name}`; the other hosts pass
+  // `{skill}`, so accept either rather than falling through to a title-less
+  // generic card.
   if (name === "skill") {
-    const sk = getField("skill")
+    const sk = getField("skill") ?? getField("name")
     if (sk) return `Skill: ${sk}`
   }
 
