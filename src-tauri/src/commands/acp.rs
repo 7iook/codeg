@@ -8245,6 +8245,46 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
 /// must NOT do is describe this as uniform support: see
 /// [`crate::acp::delegation::types::DelegateToAgentParams`]'s "Delivery, not
 /// adoption" note, which is the user-facing half of this contract.
+///
+/// # This key name now also governs staleness, not just delivery
+///
+/// Read the tiering above with this in mind: the returned key is no longer only
+/// "where the model id is delivered". It is also the key that
+/// [`crate::acp::manager::spawn_env_and_fingerprint`] implicitly excludes from a
+/// delegation child's config fingerprint, because that function fingerprints the
+/// PRE-merge map and the merge writes the model under exactly this key. So a
+/// wrong key name has a second consequence that did not exist before:
+///
+/// * BEFORE: a wrong key meant the per-call model was silently inert — bad, but
+///   confined to delivery, and honestly disclosed by the tiering above.
+/// * NOW: a wrong key additionally means the merge writes a key the user never
+///   configured, while the fingerprint excludes a DIFFERENT key than the one
+///   that actually carries the model. The staleness verdict for that live
+///   session then tracks something other than what the child really launched
+///   with — and nothing goes red. Every test stays green, because our tests can
+///   only prove that the MECHANISM is consistent, never that the key name
+///   matches the target CLI's real launch contract.
+///
+/// That failure is invisible by construction: it is a divergence between this
+/// repo's belief and an external CLI's behaviour, and both sides of it are
+/// outside any assertion we can write.
+///
+/// # How to shrink this risk — not by adding tests on our side
+///
+/// The TIER 4 `_ =>` family is where this bites, and the useful next step is to
+/// ESTABLISH THE REAL KEY for one of those CLIs: launch it and observe which env
+/// var (or argv) actually selects the model — a real capture, a vendor doc one
+/// can cite by section, or a reproducible experiment. `Hermes` and `CodeBuddy`
+/// are the cheapest to check.
+///
+/// Adding more tests in this repo cannot raise confidence here, and it is worth
+/// being explicit about why: what is unverified is an EXTERNAL launch contract.
+/// A test we write exercises our own code, so a hand-built fixture asserting
+/// "the model lands under `OPENAI_MODEL`" would pass whether or not the CLI
+/// reads that key — it restates the assumption instead of testing it. The
+/// existing tests in `tests/delegation_fingerprint_stability.rs` deliberately
+/// use `Kiro` / `OpenClaw` and pin only the mechanism; they do not, and cannot,
+/// cover this premise.
 pub(crate) fn per_call_model_env_key(agent_type: AgentType) -> &'static str {
     match agent_type {
         // codeg-side launch knob → `--model <id>` argv. NOT in agent_env_keys.

@@ -434,6 +434,50 @@ impl ConnectionManager {
     /// fingerprint the canonical recompute can never reproduce — marking the
     /// session permanently stale. See
     /// [`spawn_env_and_fingerprint`] for the full rationale.
+    ///
+    /// # Invariant every future spawn path must honour
+    ///
+    /// **Any spawn path that MODIFIES the env after
+    /// [`crate::commands::acp::build_session_runtime_env`] produced it must
+    /// obtain its fingerprint from [`spawn_env_and_fingerprint`] and pass it as
+    /// `Some(fp)`.** Handing such a path's post-merge env in with `None`
+    /// silently reproduces the exact bug this parameter exists to fix: the
+    /// stored fingerprint contains keys the canonical recompute in
+    /// `commands::acp::compute_session_config_fingerprint` cannot reproduce, so
+    /// every settings save flags that live session "stale / needs restart"
+    /// forever, with nothing about the user's config having changed.
+    ///
+    /// As of this writing exactly ONE path does that — `spawn_child_inner`, for
+    /// delegation's per-call persona / model knobs. The other NINE `spawn_agent`
+    /// call sites (`acp_connect`, the web handler, `automation::engine`,
+    /// `work_task::engine` ×2, the chat-channel commands ×3, and
+    /// `probe_agent_options`) hand over the builder's output unaltered, so `None`
+    /// is right for them and `spawn_agent`'s signature stays unchanged.
+    ///
+    /// # Why this invariant deserves a structural gate (deliberately not built)
+    ///
+    /// The invariant is stated here rather than enforced, and the gap is worth
+    /// understanding before adding the next spawn path:
+    ///
+    /// * `None` is the DEFAULT and the failure is SILENT. A new path that merges
+    ///   something into the env and forgets to thread a fingerprint compiles
+    ///   fine, passes review by looking exactly like the nine correct call sites,
+    ///   and produces no failing test — the damage only shows up as a user
+    ///   complaining that a session claims it needs a restart.
+    /// * The rule cannot be checked locally. Whether `None` is correct at a call
+    ///   site depends on what happened to `runtime_env` upstream of it, which is
+    ///   not visible in the call itself. That is precisely the shape a type or a
+    ///   fitness test can enforce and a doc comment cannot.
+    ///
+    /// The shape that would actually close it is to make "modify the env after
+    /// the builder" impossible to express without producing the paired
+    /// fingerprint — e.g. have the builder return a wrapper that only
+    /// [`spawn_env_and_fingerprint`] can unwrap into `(env, fingerprint)`, so the
+    /// merge cannot happen off to the side. That is a refactor across all ten
+    /// spawn call sites and was out of scope for this fix; it is recorded here so
+    /// the next person can weigh it against how likely an eleventh env-modifying
+    /// path really is. With exactly one such path today, a comment is defensible;
+    /// with two, it is not.
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_agent_with_fingerprint(
         &self,
