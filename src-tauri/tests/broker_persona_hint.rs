@@ -124,6 +124,7 @@ async fn settle(
                 duration_ms: 5,
                 token_usage: None,
                 applied_persona: None,
+                requested_model: None,
             }),
         )
         .await;

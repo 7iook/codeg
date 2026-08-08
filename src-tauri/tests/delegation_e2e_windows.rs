@@ -234,6 +234,7 @@ async fn end_to_end_named_pipe_happy_path() {
                 token_usage: None,
 
                 applied_persona: None,
+                requested_model: None,
             }),
         )
         .await;
@@ -323,6 +324,7 @@ async fn end_to_end_named_pipe_back_to_back_requests() {
                             token_usage: None,
 
                             applied_persona: None,
+                            requested_model: None,
                         }),
                     )
                     .await;
@@ -507,6 +509,7 @@ async fn stage8_wire_kiro_native_persona_reaches_spawn_and_status() {
                 applied_persona: Some(AppliedPersona::Native {
                     name: "plan-reality-recon".into(),
                 }),
+                requested_model: None,
             }),
         )
         .await;
@@ -607,6 +610,7 @@ async fn stage8_wire_unsupported_cli_silently_downgrades_with_note() {
                 duration_ms: 33,
                 token_usage: None,
                 applied_persona: None, // broker overrides from stored intent
+                requested_model: None, // ditto
             }),
         )
         .await;

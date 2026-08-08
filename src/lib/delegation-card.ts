@@ -92,6 +92,44 @@ export function parseAppliedPersona(raw: unknown): AppliedPersona | null {
   return { kind, name } as AppliedPersona
 }
 
+/** Max grapheme clusters of a model id the card draws. Model ids are opaque
+ *  vendor/relay strings with no wire-level length cap (see the Rust
+ *  `DelegationRequest::model` doc — deliberately unvalidated), so a pathological
+ *  id must not be allowed to stretch the row. Slightly wider than
+ *  `PERSONA_NAME_DISPLAY_LIMIT` because real ids are long by nature
+ *  (`claude-sonnet-5`, `deepseek-ai/DeepSeek-V3`). */
+export const MODEL_ID_DISPLAY_LIMIT = 40
+
+/**
+ * Defensively read a `requested_model` value off a broker report.
+ *
+ * Returns null for anything that isn't a non-empty string: a legacy backend
+ * omits the field entirely (`skip_serializing_if = "Option::is_none"`), and a
+ * blank / non-string value must degrade to "no label" rather than render an
+ * empty chip. Whitespace-only is treated as absent — the backend already
+ * normalizes blank to `None`, so seeing one here means a non-conforming
+ * producer, and drawing it would be worse than dropping it.
+ *
+ * The value is REQUESTED, never confirmed in use: codeg delivered this id to
+ * the child's launch but never verified the endpoint honoured it. Every renderer
+ * must frame it that way (see `RequestedModelLabel`).
+ */
+export function parseRequestedModel(raw: unknown): string | null {
+  if (typeof raw !== "string") return null
+  const trimmed = raw.trim()
+  return trimmed ? trimmed : null
+}
+
+/** Truncate a model id for display at [`MODEL_ID_DISPLAY_LIMIT`] grapheme
+ *  clusters, appending `…` on overflow. Reuses the persona truncator's
+ *  grapheme-safe splitter; the caller keeps the FULL id reachable via tooltip. */
+export function truncateModelId(
+  model: string,
+  limit: number = MODEL_ID_DISPLAY_LIMIT
+): string {
+  return truncatePersonaName(model, limit)
+}
+
 /** Max persona-name length the card displays, in grapheme clusters
  *  (Requirement 5.6). Distinct from the 64-CHARACTER wire-level grammar cap in
  *  `is_valid_persona_name` — that bounds what may be *requested*; this bounds
@@ -377,6 +415,7 @@ export type ParsedToolOutput =
       kind: "ack"
       childConversationId: number | null
       appliedPersona: AppliedPersona | null
+      requestedModel: string | null
     }
   | {
       kind: "outcome"
@@ -384,6 +423,7 @@ export type ParsedToolOutput =
       isError: boolean
       childConversationId: number | null
       appliedPersona: AppliedPersona | null
+      requestedModel: string | null
     }
 
 function readChildConversationId(obj: Record<string, unknown>): number | null {
@@ -406,13 +446,21 @@ function interpretReport(
   // terminal report (all three variants). A legacy backend omits the field
   // entirely, which parses to null.
   const appliedPersona = parseAppliedPersona(obj.applied_persona)
+  // Present on the running ack, the running snapshot, AND the terminal report:
+  // the backend commits it at spawn-Ok and never blanks it afterward.
+  const requestedModel = parseRequestedModel(obj.requested_model)
   const status = typeof obj.status === "string" ? obj.status : null
   if (status) {
     switch (status) {
       case "running":
       case "unknown":
         // No terminal result to show on the card — it's an ack.
-        return { kind: "ack", childConversationId, appliedPersona }
+        return {
+          kind: "ack",
+          childConversationId,
+          appliedPersona,
+          requestedModel,
+        }
       case "completed":
         return {
           kind: "outcome",
@@ -420,6 +468,7 @@ function interpretReport(
           isError: false,
           childConversationId,
           appliedPersona,
+          requestedModel,
         }
       case "failed":
       case "canceled": {
@@ -431,10 +480,16 @@ function interpretReport(
           isError: true,
           childConversationId,
           appliedPersona,
+          requestedModel,
         }
       }
       default:
-        return { kind: "ack", childConversationId, appliedPersona }
+        return {
+          kind: "ack",
+          childConversationId,
+          appliedPersona,
+          requestedModel,
+        }
     }
   }
   // Legacy synchronous outcome shape — predates `applied_persona` entirely.
@@ -446,6 +501,7 @@ function interpretReport(
       isError: false,
       childConversationId,
       appliedPersona,
+      requestedModel,
     }
   }
   if (kind === "err") {
@@ -457,6 +513,7 @@ function interpretReport(
       isError: true,
       childConversationId,
       appliedPersona,
+      requestedModel,
     }
   }
   return null
@@ -549,6 +606,7 @@ export function parseToolOutput(
         isError: forceError,
         childConversationId: null,
         appliedPersona: null,
+        requestedModel: null,
       }
     }
   } catch {
@@ -562,6 +620,7 @@ export function parseToolOutput(
       isError: forceError,
       childConversationId: null,
       appliedPersona: null,
+      requestedModel: null,
     }
   }
 
@@ -615,6 +674,10 @@ export function parseToolOutput(
           appliedPersona: inner
             ? parseAppliedPersona(inner.applied_persona)
             : null,
+          // ...and likewise a well-formed model id.
+          requestedModel: inner
+            ? parseRequestedModel(inner.requested_model)
+            : null,
         }
       }
     }
@@ -637,6 +700,7 @@ export function parseToolOutput(
       isError: true,
       childConversationId: null,
       appliedPersona: null,
+      requestedModel: null,
     }
   }
 
@@ -647,6 +711,7 @@ export function parseToolOutput(
     isError: forceError,
     childConversationId: null,
     appliedPersona: null,
+    requestedModel: null,
   }
 }
 

@@ -804,6 +804,9 @@ fn report_canceled(message: &str) -> DelegationTaskReport {
         message: Some(message.into()),
         duration_ms: None,
         applied_persona: None,
+        // Setup-side rejection: nothing was ever spawned, so no model was
+        // requested of any child.
+        requested_model: None,
     }
 }
 
@@ -819,6 +822,7 @@ fn report_failed(error_code: &str, message: &str) -> DelegationTaskReport {
         message: Some(message.into()),
         duration_ms: None,
         applied_persona: None,
+        requested_model: None,
     }
 }
 
@@ -835,6 +839,7 @@ fn unknown_report(task_id: &str) -> DelegationTaskReport {
         message: Some("unknown task id".into()),
         duration_ms: None,
         applied_persona: None,
+        requested_model: None,
     }
 }
 
@@ -1345,6 +1350,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -1472,6 +1478,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -1578,6 +1585,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;

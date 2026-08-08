@@ -359,3 +359,83 @@ describe("SubAgentOverlay persona label", () => {
     expect(screen.queryByTestId("delegation-persona-label")).toBeNull()
   })
 })
+
+describe("SubAgentOverlay per-call model", () => {
+  /** A broker ack/report as the parent tool output, MCP-envelope shaped. */
+  function outputWith(report: Record<string, unknown>): string {
+    return JSON.stringify({
+      content: [{ type: "text", text: "Delegation successful." }],
+      structuredContent: report,
+    })
+  }
+
+  /**
+   * The overlay and the inline card share `useDelegationCardModel` so they can
+   * never disagree about a sub-agent. The model is part of that shared model, so
+   * it must surface on the overlay row too.
+   */
+  it("shows the requested model on the expanded row", () => {
+    renderWithIntl(
+      <SubAgentOverlay
+        defaultExpanded
+        overlayKey="k-model"
+        delegations={[
+          {
+            parentToolUseId: "pt-1",
+            input: JSON.stringify({ agent_type: "kiro", task: "review" }),
+            output: outputWith({
+              status: "running",
+              child_conversation_id: 99,
+              requested_model: "claude-sonnet-5",
+            }),
+          },
+        ]}
+      />
+    )
+    expect(screen.getByTestId("delegation-requested-model")).toHaveTextContent(
+      "model requested: claude-sonnet-5"
+    )
+  })
+
+  /** Absence: no per-call model means no chip on the row. */
+  it("shows no model label on the row when none was nominated", () => {
+    renderWithIntl(
+      <SubAgentOverlay
+        defaultExpanded
+        overlayKey="k-model-none"
+        delegations={[
+          {
+            parentToolUseId: "pt-1",
+            input: JSON.stringify({ agent_type: "kiro", task: "review" }),
+            output: outputWith({ status: "completed", text: "done" }),
+          },
+        ]}
+      />
+    )
+    expect(screen.queryByTestId("delegation-requested-model")).toBeNull()
+  })
+
+  /** Anti-fallback guard, mirroring the inline card: a model present only in
+   *  `raw_input` is the REQUEST, not evidence it reached a spawn. */
+  it("never falls back to the raw_input model on the row", () => {
+    renderWithIntl(
+      <SubAgentOverlay
+        defaultExpanded
+        overlayKey="k-model-fallback"
+        delegations={[
+          {
+            parentToolUseId: "pt-1",
+            input: JSON.stringify({
+              agent_type: "kiro",
+              task: "review",
+              model: "claude-sonnet-5",
+            }),
+            output: outputWith({ status: "completed", text: "done" }),
+          },
+        ]}
+      />
+    )
+    expect(screen.queryByTestId("delegation-requested-model")).toBeNull()
+    expect(screen.queryByText(/claude-sonnet-5/)).toBeNull()
+  })
+})

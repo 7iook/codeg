@@ -116,6 +116,7 @@ async fn settle(
                 duration_ms: 5,
                 token_usage: None,
                 applied_persona: None,
+                requested_model: None,
             }),
         )
         .await;
@@ -598,5 +599,152 @@ async fn concurrent_persona_only_and_model_only_do_not_bleed() {
         ],
         "the persona-only call must not acquire B's model and the model-only \
          call must not acquire A's persona"
+    );
+}
+
+/// The report must echo the per-call model that was actually delivered to the
+/// child's launch, on BOTH the running ack and the terminal report — the
+/// polling path (`get_delegation_status`) reads the latter, so a field carried
+/// only on the ack would silently vanish for anyone who polls.
+///
+/// Deliberately named `requested_model`: codeg guarantees DELIVERY, never that
+/// the endpoint honoured the id (a relay may answer with its own default).
+#[tokio::test]
+async fn requested_model_rides_both_the_ack_and_the_terminal_report() {
+    let (broker, mock) = enabled_broker().await;
+    mock.queue_spawn(Ok("c-model-echo".into())).await;
+    mock.queue_send(Ok(90)).await;
+
+    let ack = broker
+        .start_delegation(request_with(
+            AgentType::Kiro,
+            "pt-model-echo",
+            None,
+            Some("claude-sonnet-5"),
+        ))
+        .await;
+    // The ack is what the card renders while the child is still running.
+    assert_eq!(ack.status, TaskStatus::Running);
+    assert_eq!(
+        ack.requested_model.as_deref(),
+        Some("claude-sonnet-5"),
+        "the running ack must carry the model so the card can show it mid-run"
+    );
+
+    let task_id = ack.task_id.expect("running ack carries a task id");
+    broker
+        .complete_call(
+            &task_id,
+            DelegationOutcome::Ok(DelegationSuccess {
+                text: "done".into(),
+                child_conversation_id: 90,
+                child_agent_type: AgentType::Kiro,
+                turn_count: 1,
+                duration_ms: 5,
+                token_usage: None,
+                applied_persona: None,
+                requested_model: None, // broker overrides from stored intent
+            }),
+        )
+        .await;
+    let report = broker
+        .get_task_status("parent-conn", Some(1), &task_id, StatusWait::Immediate)
+        .await;
+
+    assert_eq!(report.status, TaskStatus::Completed);
+    assert_eq!(
+        report.requested_model.as_deref(),
+        Some("claude-sonnet-5"),
+        "the terminal report (the polling path) must carry it too"
+    );
+}
+
+/// A call that nominated NO model leaves the field `None` on both payloads —
+/// the card then renders nothing rather than inventing "default".
+#[tokio::test]
+async fn no_model_nomination_leaves_requested_model_none() {
+    let (broker, mock) = enabled_broker().await;
+    let report = settle(
+        &broker,
+        &mock,
+        "c-no-model",
+        91,
+        request_with(AgentType::Kiro, "pt-no-model", None, None),
+    )
+    .await;
+
+    assert_eq!(report.status, TaskStatus::Completed);
+    assert!(
+        report.requested_model.is_none(),
+        "no nomination must yield no model on the report"
+    );
+}
+
+/// Timing invariant, mirroring R3-A2 for the persona: a spawn FAILURE leaves
+/// `requested_model` = `None`. The id never reached a running child, so
+/// reporting it would tell the user a model was requested of a sub-agent that
+/// does not exist.
+#[tokio::test]
+async fn spawn_failure_leaves_requested_model_none() {
+    let (broker, mock) = enabled_broker().await;
+    mock.queue_spawn(Err(
+        codeg_lib::acp::delegation::spawner::SpawnerError::Spawn("boom".into()),
+    ))
+    .await;
+    let report = broker
+        .start_delegation(request_with(
+            AgentType::Kiro,
+            "pt-model-fail",
+            None,
+            Some("claude-sonnet-5"),
+        ))
+        .await;
+
+    assert_eq!(report.status, TaskStatus::Failed);
+    assert!(
+        report.requested_model.is_none(),
+        "a failed spawn must not claim a model was requested of a live child"
+    );
+    // The option WAS forwarded — the failure is downstream of the nomination.
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(
+        args[0].launch_options,
+        vec![LaunchOption::Model("claude-sonnet-5".into())],
+    );
+}
+
+/// Per-call isolation for the echoed field: two concurrent delegations with
+/// DIFFERENT models must each report their own. A shared/global read would
+/// make both reports show whichever call spawned last.
+#[tokio::test]
+async fn concurrent_calls_report_their_own_requested_model() {
+    let (broker, mock) = enabled_broker().await;
+    mock.queue_spawn(Ok("c-m-a".into())).await;
+    mock.queue_send(Ok(95)).await;
+    mock.queue_spawn(Ok("c-m-b".into())).await;
+    mock.queue_send(Ok(96)).await;
+
+    let ack_a = broker
+        .start_delegation(request_with(
+            AgentType::Kiro,
+            "pt-m-a",
+            None,
+            Some("model-alpha"),
+        ))
+        .await;
+    let ack_b = broker
+        .start_delegation(request_with(
+            AgentType::Kiro,
+            "pt-m-b",
+            None,
+            Some("model-beta"),
+        ))
+        .await;
+
+    assert_eq!(ack_a.requested_model.as_deref(), Some("model-alpha"));
+    assert_eq!(
+        ack_b.requested_model.as_deref(),
+        Some("model-beta"),
+        "the second call's model must not be overwritten by the first"
     );
 }

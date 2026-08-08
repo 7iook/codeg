@@ -2889,6 +2889,8 @@
         "personaBestEffort": "ベストエフォート",
         "personaIgnoredUnsupported": "無視 — CLI 未対応",
         "personaRequested": "リクエストしたペルソナ: {name}",
+        "modelRequested": "· リクエストしたモデル: {model}",
+        "modelRequestedTooltip": "起動時にリクエストしたモデル: {model}。codeg はこのモデル ID をサブエージェントの起動に渡しましたが、エンドポイントが実際に使用したかは確認できません — リレーが独自の既定モデルで応答する場合があります。",
         "openDetail": "会話を表示",
         "detailTitle": "サブエージェントの会話",
         "detailDescription": "委任されたサブエージェントの会話を読み取り専用で表示します。",

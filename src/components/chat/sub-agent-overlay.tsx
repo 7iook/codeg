@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button"
 import { StatusBadge } from "@/components/message/delegation-status-badge"
 import {
   PersonaLabel,
+  RequestedModelLabel,
   RequestedPersonaNote,
 } from "@/components/message/persona-label"
 import { SubAgentSessionDialog } from "@/components/message/sub-agent-session-dialog"
@@ -129,6 +130,7 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
     childConnectionId,
     appliedPersona,
     requestedPersona,
+    requestedModel,
   } = useDelegationCardModel(source)
 
   // Unlike the inline DelegatedSubThread (which falls through to the generic
@@ -154,6 +156,7 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
           {agentType ? getAgentLabel(agentType) : t("unknownAgent")}
         </span>
         <PersonaLabel persona={appliedPersona} className="text-[11px]" />
+        <RequestedModelLabel model={requestedModel} className="text-[11px]" />
         {taskId && (
           <span
             className="shrink-0 font-mono text-[11px] text-muted-foreground"

@@ -60,6 +60,16 @@ export interface DelegationCardModel {
    *  means no persona took effect — render NO secondary label rather than
    *  falling back to `requestedPersona` (Requirement 5.5 / R2-A4). */
   appliedPersona: AppliedPersona | null
+  /** The per-call model id this sub-agent was LAUNCHED WITH, read off the
+   *  broker's `requested_model`. Present from the running ack onward (the
+   *  backend commits it at spawn-Ok). Null means no per-call model was
+   *  nominated — the child inherited the user's configured default, so render
+   *  NOTHING rather than the word "default".
+   *
+   *  REQUESTED, never confirmed in use: codeg delivered this id to the child's
+   *  launch but never verified the endpoint honoured it (a relay may answer
+   *  with its own default model). Renderers must frame it that way. */
+  requestedModel: string | null
   /** The persona the caller NOMINATED (`raw_input.subagent_type`). Display-only,
    *  and only on a failure card, where it explains what was asked for
    *  (Requirement 5.4). Never a stand-in for `appliedPersona`. */
@@ -166,6 +176,10 @@ export function useDelegationCardModel(
     // failure has already committed `Native`, so an error card can legitimately
     // carry a persona.
     appliedPersona: toolOutput?.appliedPersona ?? null,
+    // Same source and same absence rule as the persona: the broker's payload is
+    // the only authority. There is deliberately no fallback to `raw_input.model`
+    // — that is what the LLM ASKED for, which may never have reached a spawn.
+    requestedModel: toolOutput?.requestedModel ?? null,
     requestedPersona: parsed.subagentType,
     // Broker-stamped meta alone is proof enough of a delegation — the
     // persisted Cursor shape has empty raw_input and no live binding.

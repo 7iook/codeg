@@ -455,6 +455,7 @@ mod happy_path_tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;

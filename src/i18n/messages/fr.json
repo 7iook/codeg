@@ -2889,6 +2889,8 @@
         "personaBestEffort": "au mieux",
         "personaIgnoredUnsupported": "ignoré — CLI non prise en charge",
         "personaRequested": "demandé : {name}",
+        "modelRequested": "· modèle demandé : {model}",
+        "modelRequestedTooltip": "Modèle demandé au lancement : {model}. codeg a transmis cet identifiant au lancement du sous-agent, mais ne peut pas confirmer que le endpoint l’a utilisé — un relais peut répondre avec son propre modèle par défaut.",
         "openDetail": "Voir la conversation",
         "detailTitle": "Conversation du sous-agent",
         "detailDescription": "Vue en lecture seule de la conversation du sous-agent délégué.",

@@ -28,6 +28,7 @@ import type { ToolCallState } from "@/lib/adapters/ai-elements-adapter"
 import { StatusBadge } from "@/components/message/delegation-status-badge"
 import {
   PersonaLabel,
+  RequestedModelLabel,
   RequestedPersonaNote,
 } from "@/components/message/persona-label"
 import { SubAgentSessionDialog } from "@/components/message/sub-agent-session-dialog"
@@ -74,6 +75,7 @@ export function DelegatedSubThread({
     childConnectionId,
     appliedPersona,
     requestedPersona,
+    requestedModel,
     hasModel,
   } = useDelegationCardModel({
     parentToolUseId,
@@ -111,6 +113,7 @@ export function DelegatedSubThread({
                 {agentType ? getAgentLabel(agentType) : t("unknownAgent")}
               </span>
               <PersonaLabel persona={appliedPersona} className="text-xs" />
+              <RequestedModelLabel model={requestedModel} className="text-xs" />
               {taskId && (
                 <span
                   className="shrink-0 font-mono text-xs text-muted-foreground"

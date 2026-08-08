@@ -174,6 +174,28 @@ pub struct DelegationSuccess {
     /// (R3 F2 rejects a symmetric `AppliedPersona::Failed` variant).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_persona: Option<super::persona::AppliedPersona>,
+    /// The per-call model id this delegation was LAUNCHED WITH — [`DelegationRequest::model`]
+    /// echoed back so the UI can show which model the sub-agent was started on.
+    ///
+    /// # Requested, never confirmed — the whole point of the name
+    ///
+    /// This is the id codeg DELIVERED to the child's launch, never evidence the
+    /// endpoint honoured it: a relay may silently answer with its own default
+    /// model instead of erroring (see [`DelegationRequest::model`]'s "What this
+    /// does NOT promise"). Rendering it as the model *in use* would assert
+    /// something this build never verified, so every consumer must frame it as
+    /// requested. That is why the field is not named `applied_model` — unlike
+    /// [`Self::applied_persona`], where the broker itself performs the
+    /// translation and so genuinely knows the effect, nothing here observes
+    /// the far side.
+    ///
+    /// # Timing invariant (same rule as `applied_persona`)
+    ///
+    /// Only populated once `spawn` returned Ok. A failed spawn delivered the id
+    /// nowhere, so its report leaves this `None` rather than claiming a model
+    /// was requested of a child that never started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
 }
 
 /// Broker-internal failure modes. Serialized via the wrapping
@@ -383,6 +405,19 @@ pub struct DelegationTaskReport {
     /// `None` on failure / cancel / setup-failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_persona: Option<super::persona::AppliedPersona>,
+    /// The per-call model id the delegation was launched with, mirrored from
+    /// [`DelegationSuccess::requested_model`] onto the status / terminal report
+    /// so `get_delegation_status` polling carries it too — without this mirror
+    /// the field would silently vanish on the polling path.
+    ///
+    /// Same invariants as there: REQUESTED not confirmed (a relay may answer
+    /// with its own default model), and only populated once the spawn returned
+    /// Ok. Unlike `applied_persona`, this is also carried on the still-running
+    /// snapshot: the value is a launch fact that stays true for the task's
+    /// whole life, and it is already on the `RunningTask`, so blanking it mid-run
+    /// would drop information the broker holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
 }
 
 impl DelegationTaskReport {
@@ -529,6 +564,7 @@ mod tests {
             message: None,
             duration_ms: None,
             applied_persona: None,
+            requested_model: None,
         };
         let filled = report.with_task_id("t-1");
         assert_eq!(filled.task_id.as_deref(), Some("t-1"));

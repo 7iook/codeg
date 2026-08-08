@@ -2889,6 +2889,8 @@
         "personaBestEffort": "mejor esfuerzo",
         "personaIgnoredUnsupported": "ignorado — CLI no compatible",
         "personaRequested": "solicitado: {name}",
+        "modelRequested": "· modelo solicitado: {model}",
+        "modelRequestedTooltip": "Modelo solicitado al iniciar: {model}. codeg entregó este id al lanzar el subagente, pero no puede confirmar que el endpoint lo haya usado — un relay puede responder con su propio modelo predeterminado.",
         "openDetail": "Ver conversación",
         "detailTitle": "Conversación del subagente",
         "detailDescription": "Vista de solo lectura de la conversación del subagente delegado.",
