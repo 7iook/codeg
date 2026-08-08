@@ -8172,29 +8172,79 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
 ///
 /// # Verification status per agent (honest, anchored)
 ///
-/// VERIFIED to reach the CLI:
+/// Four tiers, strongest first. The distinction that matters: codeg can always
+/// prove it INJECTED the value; only the first tier is proof under codeg's own
+/// control, and only tier 3 is proof it does not work.
+///
+/// TIER 1 — takes effect by codeg's OWN argv translation (in-repo, testable
+/// here, cannot regress without a test failing):
 /// * `Kiro` — `KIRO_MODEL` → `--model <id>` argv, verbatim, no allowlist
 ///   (`connection::kiro_launch_args`, `connection.rs:229-234`).
 /// * `Cursor` — the CLI reads no model env var, but codeg translates
 ///   `CURSOR_MODEL` into a root-level `--model <id>` argv element before the
 ///   `acp` subcommand (`connection.rs:1099-1107`).
+///
+/// TIER 2 — the target CLI documents the key as a model selector (external
+/// evidence; codeg injects and the vendor's contract says it is read. Weaker
+/// than tier 1: it can regress silently if the vendor changes it):
 /// * `Grok` — `GROK_DEFAULT_MODEL`, verified against the 0.2.94 binary and
-///   documented at the [`agent_env_keys`] arm.
+///   documented at the [`agent_env_keys`] arm; xAI's settings reference lists
+///   it as "session default model (same idea as `-m` / `--model`)".
 /// * `KimiCode` — `KIMI_MODEL_NAME`; the `KIMI_MODEL_*` family is the only
 ///   non-interactive path and wins over `~/.kimi-code/config.toml` (see the
 ///   [`agent_env_keys`] arm).
+/// * `ClaudeCode` — `ANTHROPIC_MODEL` is a documented Claude Code env var and
+///   selects the model (vendor docs: `code.claude.com/docs/en/env-vars` +
+///   `support.claude.com` "Claude Code model configuration", which gives
+///   `export ANTHROPIC_MODEL=…` as THE way to set a default model).
+/// * `Gemini` — `GEMINI_MODEL` is documented as precedence level 2 in the
+///   gemini-cli model-selection order, directly under the `--model` flag
+///   (`docs/cli/model-routing.md` § "Model selection precedence").
 ///
-/// UNVERIFIED (a dedicated key exists and is what the panel/provider path
-/// uses, but this repo carries no evidence the CLI reads it at launch):
-/// `ClaudeCode` (`ANTHROPIC_MODEL`), `Gemini` (`GEMINI_MODEL`), `Codex`
-/// (`OPENAI_MODEL`).
+/// TIER 3 — DISPROVEN: the key is written but the CLI does NOT read it:
+/// * `Codex` (`OPENAI_MODEL`). Codex's model comes from `config.toml`'s root
+///   `model` (or `--model` / `-c model=…`), NOT from the environment: its
+///   published list of "stable public environment variables that Codex reads
+///   directly" (`developers.openai.com/codex/environment-variables`) has no
+///   model variable at all, and its documented precedence chain
+///   (`codex/config-basic` § "Configuration precedence") is CLI flags →
+///   project config → profile → user config → system config → built-in
+///   defaults, with no env layer for `model`. Nothing in codeg translates
+///   `OPENAI_MODEL` into codex argv either — the only two `--model` argv
+///   translations in this crate are Kiro's and Cursor's (`connection.rs:232`
+///   and `connection.rs:1106`; a repo-wide `git grep '"--model"'` finds no
+///   third). So a per-call model for Codex is INERT: it reaches the child's
+///   environment and is then ignored.
 ///
-/// NO EVIDENCE AT ALL: the remaining agent types fall into the `_ =>`
-/// catch-all and get `OPENAI_MODEL` because that is the least-surprising
-/// default for an OpenAI-compatible CLI — nothing in this repo shows their
-/// CLIs read it. A per-call model for those agents may simply be inert. It is
-/// written anyway rather than dropped, because a key the CLI ignores is
-/// harmless, whereas silently discarding the LLM's request would be invisible.
+///   Do NOT "fix" this by writing codex's `config.toml` from the delegation
+///   path. That file is global, shared, user-authored (and comment-preserving
+///   on the panel path — see `acp_update_agent_config_core`), so a per-call
+///   override would leak out of its call and mutate the user's default. The
+///   correct fix, if this is ever wanted, is per-spawn argv (`--model <id>` /
+///   `-c model=…`) at the Codex launch site, which is a behaviour change and
+///   out of this doc's scope. `OPENAI_MODEL` remains the right key for the
+///   PROVIDER cascade ([`parse_provider_model`]) — that path writes the root
+///   `model` in `config.toml` separately via [`provider_codex_model_action`],
+///   which is what actually takes effect there.
+///
+/// TIER 4 — NO EVIDENCE EITHER WAY: the remaining types (`OpenCode`, `Cline`,
+/// `OpenClaw`, `CodeBuddy`, `Pi`, `Hermes`, and any [`AgentType::Custom`]) fall
+/// into the `_ =>` catch-all and get `OPENAI_MODEL` because that is the
+/// least-surprising default for an OpenAI-compatible CLI. Neither this repo nor
+/// a vendor doc consulted here shows their CLIs read it, and none was found
+/// showing they don't; a per-call model may simply be inert for them too.
+///
+/// `Custom(&'static str)` is structurally unknowable, not merely unresearched:
+/// the CLI is registered by the user at runtime, so codeg cannot know its
+/// launch contract. The promise for custom agents is exactly per-spawn env
+/// injection — `OPENAI_MODEL` is set in that child's environment and consuming
+/// it is the custom CLI's responsibility.
+///
+/// The value is written even where it is inert rather than dropped, because
+/// dropping it would discard the LLM's explicit request invisibly. What callers
+/// must NOT do is describe this as uniform support: see
+/// [`crate::acp::delegation::types::DelegateToAgentParams`]'s "Delivery, not
+/// adoption" note, which is the user-facing half of this contract.
 pub(crate) fn per_call_model_env_key(agent_type: AgentType) -> &'static str {
     match agent_type {
         // codeg-side launch knob → `--model <id>` argv. NOT in agent_env_keys.

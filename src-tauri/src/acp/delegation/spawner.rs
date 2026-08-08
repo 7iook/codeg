@@ -93,8 +93,9 @@ pub trait ConnectionSpawner: Send + Sync {
     /// * [`crate::acp::delegation::persona::LaunchOption::Model`] — from
     ///   `model`; merged under the agent's model key (`KIRO_MODEL` →
     ///   `--model <id>` argv for Kiro, `ANTHROPIC_MODEL` for Claude Code, ...).
-    ///   See `commands::acp::per_call_model_env_key` for which agents this is
-    ///   actually verified to reach.
+    ///   See `commands::acp::per_call_model_env_key` for the per-agent tiering
+    ///   of what evidence exists that the value takes effect (it is inert for
+    ///   Codex).
     ///
     /// An EMPTY slice = nothing nominated / the target CLI resolved the persona
     /// to a first-turn Hint or Ignored effect instead (neither reaches the
