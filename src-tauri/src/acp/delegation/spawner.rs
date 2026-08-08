@@ -146,6 +146,53 @@ pub trait ConnectionSpawner: Send + Sync {
     /// session) is reused instead of double-spawned.
     ///
     /// Returns the connection id to use for the next prompt.
+    ///
+    /// # Takes no launch knobs — deliberately (R7.4), and the asymmetry is real
+    ///
+    /// This signature has no `launch_options` parameter, so a continued or
+    /// revived delegation does not re-nominate the persona or the model the
+    /// first turn was started with. The production impl threads an EMPTY slice
+    /// (see `manager::ConnectionManagerSpawner::spawn_for_resume`). That was
+    /// decided for the persona as R7.4 and the reasoning carries over unchanged
+    /// to the model: a resume replays an EXISTING session, and the knobs are
+    /// launch-time inputs of the session that already exists.
+    ///
+    /// The distinction that makes the argument hold is that the two continuation
+    /// paths are not the same mechanism:
+    ///
+    /// * [`ConnectionSpawner::send_followup_prompt`] reuses a LIVE connection
+    ///   and spawns no process at all. A launch-time knob is not "declined"
+    ///   there, it is physically inapplicable — the process was launched one or
+    ///   more turns ago and its argv cannot be rewritten. Whatever persona and
+    ///   model that launch resolved are still in force, because it is still the
+    ///   same process.
+    /// * `spawn_for_resume` DOES start a fresh process, so it is the only path
+    ///   where re-applying a knob would even be possible. Declining to is a
+    ///   choice, not a constraint.
+    ///
+    /// Before changing that choice, note that the two knobs do NOT carry the
+    /// same user-visible stakes, even though they ride the same mechanism:
+    ///
+    /// * Falling back to the DEFAULT PERSONA is conservative in the direction
+    ///   that matters — a generic prompt and typically fewer permissions than a
+    ///   specialised persona. The continued turn can be less capable than the
+    ///   first; it does not gain authority it was never granted.
+    /// * Falling back to the DEFAULT MODEL is not conservative in any
+    ///   direction. A continued turn can silently run on a different model than
+    ///   the turn before it — possibly far cheaper (quality regression
+    ///   mid-conversation, with no event marking where it changed) or far more
+    ///   expensive (unbudgeted spend on a turn the user never re-authorised).
+    ///   The failure is invisible either way: the delegation card shows the
+    ///   model that was REQUESTED, not the one the resumed process actually
+    ///   launched on.
+    ///
+    /// So "resume is conservative because it drops the knobs" is only true of
+    /// the persona. For the model, dropping the knob is a silent substitution,
+    /// and the reason to keep doing it is the invariant (a resume replays the
+    /// session it is resuming), not harmlessness. Adding knobs here would break
+    /// that invariant and needs a fresh argument first — see
+    /// `docs/specs/delegate-persona-passthrough/design.md` (R7.4). If that
+    /// argument is ever made, the model case needs the louder half of it.
     async fn spawn_for_resume(
         &self,
         parent_connection_id: &str,

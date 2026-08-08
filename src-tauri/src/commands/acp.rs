@@ -8830,6 +8830,21 @@ pub(crate) async fn build_session_runtime_env(
 /// session-id-derived value would flip the fingerprint the moment a real
 /// session id is assigned and make every session look "stale". Currently only
 /// OpenClaw's reset flag (set iff `session_id` is None at spawn).
+///
+/// # This is NOT the lever for per-call launch knobs
+///
+/// The keys here are per-launch *by name*: `OPENCLAW_RESET_SESSION` is never
+/// something the user configures, so excluding it loses no staleness signal.
+/// Delegation's per-call knobs are different in kind — they land on keys the
+/// settings panel ALSO writes (`KIRO_AGENT`, `KIRO_MODEL`, `ANTHROPIC_MODEL`,
+/// `OPENAI_MODEL`, …). Adding those here would stop a user's genuine model or
+/// persona change from marking running sessions stale, silently disabling a
+/// working feature — a worse bug than the one it would fix, and one
+/// `tests/delegation_fingerprint_stability.rs` deliberately fails on (verified
+/// by temporarily adding `KIRO_MODEL` / `KIRO_AGENT` here: the two
+/// `a_user_configured_*_still_flips_the_fingerprint` tests went red).
+/// Per-call knobs are excluded POSITIONALLY instead, by
+/// `manager::spawn_env_and_fingerprint` hashing the pre-merge map.
 fn is_volatile_fingerprint_key(key: &str) -> bool {
     key == "OPENCLAW_RESET_SESSION"
 }
@@ -8842,10 +8857,7 @@ fn is_volatile_fingerprint_key(key: &str) -> bool {
 /// the wire (only the resulting `stale` bool reaches the frontend) — so a
 /// non-cryptographic hash would do; SHA-256 keeps it deterministic and matches
 /// the rest of the codebase.
-pub(crate) fn fingerprint_config(
-    agent_type: AgentType,
-    runtime_env: &BTreeMap<String, String>,
-) -> String {
+pub fn fingerprint_config(agent_type: AgentType, runtime_env: &BTreeMap<String, String>) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     // BTreeMap iterates in sorted key order → deterministic across calls.

@@ -116,6 +116,21 @@ pub struct DelegationRequest {
     /// What survives verbatim is the id itself; what is normalized is only
     /// its framing (trim / blank / control characters -- see below).
     ///
+    /// # Applies to this call's launch only — not to later turns
+    ///
+    /// The nomination is a launch-time input, so it binds the process this call
+    /// starts and nothing after it. A later turn that reuses the still-live
+    /// connection (`send_followup_prompt`) spawns no process at all, so it keeps
+    /// running on whatever this launch resolved — the id stays in force because
+    /// it is still the same process. A later turn that has to revive a dead
+    /// child (`spawn_for_resume`) DOES start a fresh process, and deliberately
+    /// does not re-apply this id: it falls back to the agent's configured
+    /// default model. That asymmetry is load-bearing and is documented on
+    /// [`super::spawner::ConnectionSpawner::spawn_for_resume`] — unlike the
+    /// persona, whose default is conservative, a resumed turn can silently run
+    /// on a cheaper or costlier model than the turn before it, and the card
+    /// still shows the model that was REQUESTED.
+    ///
     /// # What this does NOT promise
     ///
     /// Delivery, not adoption. codeg guarantees the id reaches the child's

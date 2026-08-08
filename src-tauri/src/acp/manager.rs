@@ -410,6 +410,43 @@ impl ConnectionManager {
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
     ) -> Result<String, AcpError> {
+        self.spawn_agent_with_fingerprint(
+            agent_type,
+            working_dir,
+            session_id,
+            runtime_env,
+            owner_window_label,
+            emitter,
+            preferred_mode_id,
+            preferred_config_values,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::spawn_agent`] plus an explicit config fingerprint.
+    ///
+    /// `config_fingerprint = None` (what `spawn_agent` passes) means "derive it
+    /// from `runtime_env`", which is correct for every spawn whose env IS the
+    /// user's config. `Some(fp)` is for the one caller whose env is not:
+    /// `ConnectionManagerSpawner::spawn_child_inner` merges per-call launch
+    /// knobs into the map, and hashing the post-merge result would produce a
+    /// fingerprint the canonical recompute can never reproduce — marking the
+    /// session permanently stale. See
+    /// [`spawn_env_and_fingerprint`] for the full rationale.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_agent_with_fingerprint(
+        &self,
+        agent_type: AgentType,
+        working_dir: Option<String>,
+        session_id: Option<String>,
+        runtime_env: BTreeMap<String, String>,
+        owner_window_label: String,
+        emitter: EventEmitter,
+        preferred_mode_id: Option<String>,
+        preferred_config_values: BTreeMap<String, String>,
+        config_fingerprint: Option<String>,
+    ) -> Result<String, AcpError> {
         // Connection dedup: when resuming an agent session (session_id is
         // Some), look for a live AgentConnection that already represents
         // the same external session in the same working_dir for the same
@@ -482,6 +519,7 @@ impl ConnectionManager {
             preferred_mode_id,
             preferred_config_values,
             self.delegation_snapshot(),
+            config_fingerprint,
         )
         .await?;
 
@@ -3145,6 +3183,72 @@ pub fn merge_launch_options_into_runtime_env(
     runtime_env
 }
 
+/// Build a spawn's runtime env AND the config fingerprint that spawn should be
+/// judged stale against, as one operation — because the two must be derived from
+/// DIFFERENT maps and deriving them apart is what caused the defect below.
+///
+/// Returns `(env_for_the_child, fingerprint_for_staleness)`:
+///
+/// * the env is the POST-merge map, so per-call launch knobs really do reach the
+///   child (delivery is unchanged — see
+///   [`merge_launch_options_into_runtime_env`]);
+/// * the fingerprint is taken from the PRE-merge map, i.e. the user-config
+///   surface alone.
+///
+/// # The defect this closes
+///
+/// [`crate::commands::acp::compute_session_config_fingerprint`] recomputes a
+/// canonical fingerprint from [`crate::commands::acp::build_session_runtime_env`]
+/// — which knows nothing about per-call knobs — and
+/// [`ConnectionManager::refresh_connection_staleness`] flags every connection
+/// whose stored fingerprint differs. A child spawned with a persona or a
+/// per-call model therefore had a fingerprint the canonical recompute could
+/// never reproduce, so any settings save marked that live session
+/// "stale / needs restart" even though the user's config had not changed. The
+/// persona half was latent since that feature landed; the model half doubled it.
+///
+/// # Why the exemption cannot be by key NAME
+///
+/// [`crate::commands::acp::is_volatile_fingerprint_key`] excludes keys that are
+/// per-launch *by name* — `OPENCLAW_RESET_SESSION` is never user-configurable,
+/// so excluding it loses no signal. Per-call knobs are different in kind: they
+/// land on keys the settings panel ALSO writes (`KIRO_AGENT`, `KIRO_MODEL`,
+/// `ANTHROPIC_MODEL`, `OPENAI_MODEL`, …). Exempting those by name would mean a
+/// user genuinely switching their configured model no longer marks running
+/// sessions stale — silently disabling a working feature, a worse bug than the
+/// one being fixed. The distinguishing fact is not the key's name but *whether
+/// THIS spawn injected it per-call*, which is positional information: it exists
+/// only as the difference between the two maps, at this one call site.
+///
+/// # Why not "report which keys the merge wrote" and exempt that set
+///
+/// Threading a `written_keys` set into the digest was rejected: it makes the
+/// fingerprint a function of `(user_config, per_call_knobs)` rather than of
+/// `user_config` alone, while `refresh_config_staleness` computes exactly ONE
+/// canonical value per `AgentType` and compares it against EVERY live connection
+/// of that type. A per-connection input therefore cannot round-trip through that
+/// comparison — two children of the same agent, one with a knob and one without,
+/// would need two different canonical values and only one exists. Fingerprinting
+/// the pre-merge map keeps the invariant the comparison already relies on
+/// ("fingerprint = pure function of user config"), needs no new parameter on
+/// [`crate::commands::acp::fingerprint_config`], and leaves its ten-odd existing
+/// call sites untouched.
+///
+/// Callers with no launch options (every non-delegation spawn) get exactly the
+/// previous behaviour: an empty slice means the two maps are equal.
+pub fn spawn_env_and_fingerprint(
+    runtime_env: BTreeMap<String, String>,
+    agent_type: AgentType,
+    launch_options: &[crate::acp::delegation::persona::LaunchOption],
+) -> (BTreeMap<String, String>, String) {
+    // Fingerprint FIRST, from the pre-merge map: this is the same surface
+    // `build_session_runtime_env` produces, hence the same value the canonical
+    // recompute will arrive at.
+    let fingerprint = crate::commands::acp::fingerprint_config(agent_type, &runtime_env);
+    let merged = merge_launch_options_into_runtime_env(runtime_env, agent_type, launch_options);
+    (merged, fingerprint)
+}
+
 /// Production impl of `ConnectionSpawner` used by `DelegationBroker`.
 ///
 /// Bundles `Arc<ConnectionManager>` with `Arc<AppDatabase>` because
@@ -3237,11 +3341,17 @@ impl ConnectionManagerSpawner {
         // and `model_merge_*` tests against
         // `merge_launch_options_into_runtime_env`; the argv translation it feeds
         // is pinned by `connection::kiro_launch_args_*`.
-        let runtime_env =
-            merge_launch_options_into_runtime_env(runtime_env, agent_type, &launch_options);
+        //
+        // STALENESS INVARIANT: the config fingerprint is taken from the
+        // PRE-merge map and passed down explicitly, so a per-call knob cannot
+        // make this live session look "stale" on the next settings save. See
+        // `spawn_env_and_fingerprint` for why the exemption cannot be by key
+        // name, and `tests/delegation_fingerprint_stability.rs` for the pins.
+        let (runtime_env, config_fingerprint) =
+            spawn_env_and_fingerprint(runtime_env, agent_type, &launch_options);
 
         self.manager
-            .spawn_agent(
+            .spawn_agent_with_fingerprint(
                 agent_type,
                 effective_working_dir,
                 session_id,
@@ -3250,6 +3360,7 @@ impl ConnectionManagerSpawner {
                 emitter,
                 preferred_mode_id,
                 preferred_config_values,
+                Some(config_fingerprint),
             )
             .await
             .map_err(|e| SpawnerError::Spawn(e.to_string()))
@@ -3296,6 +3407,19 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
         // persona (R7.4), nor re-pick a model: the original launch's knobs are
         // what the session was created with. So an EMPTY slice is threaded here,
         // never the original call's options.
+        //
+        // The two knobs are equally declined but not equally harmless, and the
+        // difference is worth knowing before anyone "fixes" this: the default
+        // persona is conservative (generic prompt, typically fewer permissions),
+        // whereas the default MODEL can make a continued turn silently run on a
+        // cheaper or far costlier model than the first turn did. The rationale
+        // and the reason it is still the right call live on the trait method
+        // `delegation::spawner::ConnectionSpawner::spawn_for_resume`.
+        //
+        // Note this is also the only continuation path where a knob COULD be
+        // re-applied: `send_followup_prompt` reuses a live connection and spawns
+        // nothing, so there a launch-time knob is physically inapplicable rather
+        // than declined.
         self.spawn_child_inner(
             parent_connection_id,
             agent_type,
