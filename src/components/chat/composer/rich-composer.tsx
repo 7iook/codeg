@@ -294,6 +294,14 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
       []
     )
 
+    // The placeholder is read through a ref rather than baked in, so a host
+    // that changes its hint (the task drawer swaps one per follow-up scenario)
+    // repaints instead of remounting the editor. A remount would take the
+    // document with it — including badges whose bytes live out of band and
+    // cannot be recovered from the serialized text.
+    const placeholderRef = useRef(placeholder)
+    const getPlaceholder = useCallback(() => placeholderRef.current ?? "", [])
+
     const editor = useEditor({
       // Static export / SSR safety: never render on the server.
       immediatelyRender: false,
@@ -304,7 +312,10 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
       // render — the React Compiler lint can't prove that. Mirrors Tiptap's own
       // React suggestion pattern (render() → component.ref.onKeyDown).
       // eslint-disable-next-line react-hooks/refs
-      extensions: buildComposerExtensions({ placeholder, mentionController }),
+      extensions: buildComposerExtensions({
+        placeholder: getPlaceholder,
+        mentionController,
+      }),
       editable: !disabled,
       autofocus: autoFocus ? "end" : false,
       editorProps: {
@@ -421,6 +432,17 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
     useEffect(() => {
       editor?.setEditable(!disabled, false)
     }, [editor, disabled])
+
+    useEffect(() => {
+      placeholderRef.current = placeholder
+      // Tiptap resolves the placeholder while building decorations, which only
+      // happens on a transaction — so an empty one is what makes a changed hint
+      // appear. Nothing is inserted, and it is skipped entirely on the first
+      // pass (the editor already painted this value at creation).
+      const view = editor?.view
+      if (!view) return
+      view.dispatch(view.state.tr)
+    }, [editor, placeholder])
 
     useImperativeHandle(
       ref,

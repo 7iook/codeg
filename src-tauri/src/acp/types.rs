@@ -647,6 +647,13 @@ pub struct AgentOptionsSnapshot {
     /// `#[serde(default)]` keeps older snapshots deserializable.
     #[serde(default)]
     pub available_commands: Vec<AvailableCommandInfo>,
+    /// What the agent accepts in a prompt, captured from the same probe. A
+    /// composer with no live session (the to-do task boxes) needs this to
+    /// encode an attached image the way THIS agent takes it — natively, or as
+    /// an embedded resource blob for the agents that reject image content.
+    /// `None` when the agent advertised nothing within the probe window.
+    #[serde(default)]
+    pub prompt_capabilities: Option<PromptCapabilitiesInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1156,6 +1156,10 @@ export interface AgentOptionsSnapshot {
   /** Slash commands captured during the same transient probe as modes/config
    *  (empty when the agent advertises none in the probe window). */
   available_commands: AvailableCommandInfo[]
+  /** What the agent accepts in a prompt, from the same probe. Lets a composer
+   *  with no live session (the to-do task boxes) encode an attached image the
+   *  way this agent takes it. Null when the agent advertised none. */
+  prompt_capabilities?: PromptCapabilitiesInfo | null
 }
 
 export interface AgentDelegationDefaults {

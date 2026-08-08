@@ -942,6 +942,7 @@ pub async fn requeue_canceled(
     conn: &DatabaseConnection,
     id: i32,
     note: Option<&str>,
+    blocks: &[serde_json::Value],
 ) -> Result<bool, DbError> {
     let now = Utc::now();
     let txn = conn.begin().await?;
@@ -968,13 +969,21 @@ pub async fn requeue_canceled(
         txn.rollback().await?;
         return Ok(false);
     }
-    if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
+    // An attachment is an instruction on its own: a screenshot with no sentence
+    // still has to reach the next run, so the action is recorded whenever
+    // EITHER part is present.
+    let note = note.map(str::trim).filter(|n| !n.is_empty());
+    if note.is_some() || !blocks.is_empty() {
         record_event(
             &txn,
             id,
             "user_action",
             "user",
-            Some(serde_json::json!({ "action": "requeue", "note": note })),
+            Some(serde_json::json!({
+                "action": "requeue",
+                "note": note.unwrap_or_default(),
+                "blocks": blocks,
+            })),
         )
         .await?;
     }
@@ -2265,7 +2274,7 @@ mod tests {
             .await
             .unwrap());
         assert!(cancel(&db.conn, t.id, None).await.unwrap());
-        assert!(requeue_canceled(&db.conn, t.id, None).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id, None, &[]).await.unwrap());
         assert_eq!(
             get_model(&db.conn, t.id).await.unwrap().verdict.as_deref(),
             Some("blocked"),
@@ -2280,7 +2289,7 @@ mod tests {
             .unwrap());
         assert!(cancel(&db.conn, t.id, None).await.unwrap());
         assert!(get_model(&db.conn, t.id).await.unwrap().scheduled_at.is_none());
-        assert!(requeue_canceled(&db.conn, t.id, None).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id, None, &[]).await.unwrap());
         assert!(get_model(&db.conn, t.id).await.unwrap().scheduled_at.is_none());
 
         // A due plan claims the task and clears the stale verdict with it.
@@ -2295,7 +2304,7 @@ mod tests {
 
         // The auto-process arm holds the same invariant.
         assert!(cancel(&db.conn, t.id, None).await.unwrap());
-        assert!(requeue_canceled(&db.conn, t.id, None).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id, None, &[]).await.unwrap());
         let seq = claim_for_run(&db.conn, t.id, WorkTaskStatus::Todo, "user")
             .await
             .unwrap()
@@ -2303,7 +2312,7 @@ mod tests {
         assert!(start_running(&db.conn, t.id, seq, 1, "c2").await.unwrap());
         assert!(set_verdict(&db.conn, t.id, seq, "blocked", None).await.unwrap());
         assert!(cancel(&db.conn, t.id, None).await.unwrap());
-        assert!(requeue_canceled(&db.conn, t.id, None).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id, None, &[]).await.unwrap());
         assert_eq!(
             auto_claim_next(&db.conn, folder_id, 0).await.unwrap(),
             Some(t.id)
@@ -2428,7 +2437,7 @@ mod tests {
         );
 
         // Requeue resurrects it; the next claim bumps the generation.
-        assert!(requeue_canceled(&db.conn, t.id, None).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id, None, &[]).await.unwrap());
         let seq2 = claim_for_run(&db.conn, t.id, WorkTaskStatus::Todo, "user")
             .await
             .unwrap()
@@ -2892,7 +2901,7 @@ mod tests {
         // …and so does requeueing an archived canceled task.
         assert!(cancel(&db.conn, t.id, None).await.unwrap());
         assert!(set_archived(&db.conn, t.id, true).await.unwrap());
-        assert!(requeue_canceled(&db.conn, t.id, None).await.unwrap());
+        assert!(requeue_canceled(&db.conn, t.id, None, &[]).await.unwrap());
         let row = get(&db.conn, t.id).await.unwrap();
         assert_eq!(row.status, WorkTaskStatus::Todo);
         assert!(row.archived_at.is_none());

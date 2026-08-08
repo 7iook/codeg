@@ -2830,15 +2830,45 @@ export async function workTaskEvents(
   return getTransport().call("work_task_events", { taskId, limit })
 }
 
+/**
+ * Drop an uploaded image's base64 from a task's blocks in every mode where the
+ * call leaves through an HTTP body, the same rule (and the same helper) a chat
+ * send follows: the bytes already live in the uploads dir, and the engine's
+ * dispatch re-inlines them from the uri (`acp::prompt_hydration`) when the task
+ * eventually runs.
+ */
+function stripUploadedTaskBlocks(
+  blocks: PromptInputBlock[] | null | undefined
+): PromptInputBlock[] {
+  if (!blocks || blocks.length === 0) return []
+  return stripUploadedImagePayloads(
+    blocks,
+    !isDesktop() || getActiveRemoteConnectionId() !== null
+  )
+}
+
 export async function workTaskCreate(draft: WorkTaskDraft): Promise<WorkTask> {
-  return getTransport().call("work_task_create", { draft })
+  return getTransport().call("work_task_create", {
+    draft: { ...draft, config: stripUploadedTaskConfig(draft.config) },
+  })
+}
+
+/** {@link stripUploadedTaskBlocks} over a whole task config. */
+function stripUploadedTaskConfig(config: WorkTaskConfig): WorkTaskConfig {
+  return {
+    ...config,
+    prompt_blocks: stripUploadedTaskBlocks(config.prompt_blocks),
+  }
 }
 
 export async function workTaskUpdate(
   id: number,
   draft: WorkTaskDraft
 ): Promise<WorkTask> {
-  return getTransport().call("work_task_update", { id, draft })
+  return getTransport().call("work_task_update", {
+    id,
+    draft: { ...draft, config: stripUploadedTaskConfig(draft.config) },
+  })
 }
 
 /** Persist the pending column's drag order (index → sort_order). */
@@ -2860,12 +2890,21 @@ export async function workTaskStart(id: number): Promise<void> {
   return getTransport().call("work_task_start", { id })
 }
 
-/** failed → queued. `note` (optional) reaches the retry prompt. */
+/**
+ * failed → queued. `note` (optional) reaches the retry prompt, and `blocks`
+ * carries whatever the note box attached out of band (images, pasted bytes) —
+ * stripped of uploaded payloads on the way out, exactly like a chat send.
+ */
 export async function workTaskRetry(
   id: number,
-  note?: string | null
+  note?: string | null,
+  blocks?: PromptInputBlock[] | null
 ): Promise<void> {
-  return getTransport().call("work_task_retry", { id, note: note ?? null })
+  return getTransport().call("work_task_retry", {
+    id,
+    note: note ?? null,
+    blocks: stripUploadedTaskBlocks(blocks),
+  })
 }
 
 /**
@@ -2874,9 +2913,14 @@ export async function workTaskRetry(
  */
 export async function workTaskRequeue(
   id: number,
-  note?: string | null
+  note?: string | null,
+  blocks?: PromptInputBlock[] | null
 ): Promise<void> {
-  return getTransport().call("work_task_requeue", { id, note: note ?? null })
+  return getTransport().call("work_task_requeue", {
+    id,
+    note: note ?? null,
+    blocks: stripUploadedTaskBlocks(blocks),
+  })
 }
 
 /**
@@ -2898,12 +2942,14 @@ export async function workTaskSchedule(
 export async function workTaskReturn(
   id: number,
   feedback: string,
-  intent?: FollowUpIntent
+  intent?: FollowUpIntent,
+  blocks?: PromptInputBlock[] | null
 ): Promise<void> {
   return getTransport().call("work_task_return", {
     id,
     feedback,
     intent: intent ?? null,
+    blocks: stripUploadedTaskBlocks(blocks),
   })
 }
 
@@ -3012,7 +3058,9 @@ export async function workTaskTemplateSave(draft: {
   title: string
   config: WorkTaskConfig
 }): Promise<WorkTaskTemplate> {
-  return getTransport().call("work_task_template_save", { draft })
+  return getTransport().call("work_task_template_save", {
+    draft: { ...draft, config: stripUploadedTaskConfig(draft.config) },
+  })
 }
 
 export async function workTaskTemplateDelete(id: number): Promise<void> {

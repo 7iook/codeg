@@ -196,8 +196,17 @@ pub async fn work_task_start_all_core(folder_id: Option<i32>) -> Result<u32, DbE
 }
 
 /// failed → queued, optionally with a note explaining what to do differently.
-pub async fn work_task_retry_core(id: i32, note: Option<String>) -> Result<(), DbError> {
-    engine()?.retry(id, note).await.map_err(DbError::Validation)
+/// `blocks` carries whatever the note box attached out of band (images, pasted
+/// bytes) as raw prompt blocks.
+pub async fn work_task_retry_core(
+    id: i32,
+    note: Option<String>,
+    blocks: Vec<serde_json::Value>,
+) -> Result<(), DbError> {
+    engine()?
+        .retry(id, note, blocks)
+        .await
+        .map_err(DbError::Validation)
 }
 
 /// canceled → todo. Pure DB (no engine needed) — the user starts it again
@@ -208,8 +217,9 @@ pub async fn work_task_requeue_core(
     db: &AppDatabase,
     id: i32,
     note: Option<String>,
+    blocks: Vec<serde_json::Value>,
 ) -> Result<(), DbError> {
-    if !work_task_service::requeue_canceled(&db.conn, id, note.as_deref()).await? {
+    if !work_task_service::requeue_canceled(&db.conn, id, note.as_deref(), &blocks).await? {
         return Err(DbError::Validation("task is not canceled".to_string()));
     }
     emit_event(
@@ -263,16 +273,17 @@ pub async fn work_task_return_core(
     id: i32,
     feedback: String,
     intent: Option<String>,
+    blocks: Vec<serde_json::Value>,
 ) -> Result<(), DbError> {
     let intent = FollowUpIntent::from_wire(intent.as_deref()).map_err(DbError::Validation)?;
     let feedback = feedback.trim().to_string();
-    // A self-check is a complete instruction on its own; everything else is
-    // only as good as what the user typed.
-    if feedback.is_empty() && !intent.allows_empty() {
+    // A self-check is a complete instruction on its own, and so is an attached
+    // screenshot; everything else is only as good as what the user typed.
+    if feedback.is_empty() && blocks.is_empty() && !intent.allows_empty() {
         return Err(DbError::Validation("feedback is required".to_string()));
     }
     engine()?
-        .return_task(id, intent, feedback)
+        .return_task(id, intent, feedback, blocks)
         .await
         .map_err(DbError::Validation)
 }
@@ -559,8 +570,12 @@ pub async fn work_task_start_all(folder_id: Option<i32>) -> Result<u32, DbError>
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn work_task_retry(id: i32, note: Option<String>) -> Result<(), DbError> {
-    work_task_retry_core(id, note).await
+pub async fn work_task_retry(
+    id: i32,
+    note: Option<String>,
+    blocks: Option<Vec<serde_json::Value>>,
+) -> Result<(), DbError> {
+    work_task_retry_core(id, note, blocks.unwrap_or_default()).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -570,8 +585,16 @@ pub async fn work_task_requeue(
     db: tauri::State<'_, AppDatabase>,
     id: i32,
     note: Option<String>,
+    blocks: Option<Vec<serde_json::Value>>,
 ) -> Result<(), DbError> {
-    work_task_requeue_core(&EventEmitter::Tauri(app), &db, id, note).await
+    work_task_requeue_core(
+        &EventEmitter::Tauri(app),
+        &db,
+        id,
+        note,
+        blocks.unwrap_or_default(),
+    )
+    .await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -591,8 +614,9 @@ pub async fn work_task_return(
     id: i32,
     feedback: String,
     intent: Option<String>,
+    blocks: Option<Vec<serde_json::Value>>,
 ) -> Result<(), DbError> {
-    work_task_return_core(id, feedback, intent).await
+    work_task_return_core(id, feedback, intent, blocks.unwrap_or_default()).await
 }
 
 #[cfg(feature = "tauri-runtime")]

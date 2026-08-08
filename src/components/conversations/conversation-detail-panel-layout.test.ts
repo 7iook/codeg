@@ -143,8 +143,10 @@ describe("ConversationDetailPanel new conversation layout", () => {
     const pickerStart = messageInputSource.indexOf(
       "{hasFolderBranchPicker && ("
     )
+    // The picker row is the last thing inside the composer wrapper; the
+    // server-file dialog that follows it sits outside, so it anchors the slice.
     const pickerEnd = messageInputSource.indexOf(
-      "<ImagePreviewDialog",
+      "{!attach.showNativePaperclip && (",
       pickerStart
     )
     expect(pickerStart).toBeGreaterThan(-1)

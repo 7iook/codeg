@@ -27,7 +27,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::MissedTickBehavior;
 
 use crate::acp::manager::ConnectionManager;
-use crate::acp::types::{AcpEvent, EventEnvelope, PromptInputBlock};
+use crate::acp::types::{AcpEvent, EventEnvelope, PromptCapabilitiesInfo, PromptInputBlock};
 use crate::acp::work_task_tools::{TaskReportAck, WorkTaskToolAccess};
 use crate::acp::InternalEventBus;
 use crate::commands::acp::{build_session_runtime_env, verify_agent_installed};
@@ -272,10 +272,12 @@ enum LaunchMode {
     Fresh,
     /// Retry after failure: resume the session if possible and ask to continue.
     Retry,
-    /// A follow-up on a reviewed task: the user's text, framed by their intent.
+    /// A follow-up on a reviewed task: the user's text, framed by their intent,
+    /// plus whatever the composer attached out of band (images, pasted bytes).
     Return {
         intent: FollowUpIntent,
         feedback: String,
+        attachments: Vec<serde_json::Value>,
     },
     /// Merge generation: the agent lands the task onto the base branch itself
     /// (sync base into the worktree, resolve conflicts, merge into base). The
@@ -426,14 +428,23 @@ impl TaskEngine {
         self: &Arc<Self>,
         task_id: i32,
         note: Option<String>,
+        attachments: Vec<serde_json::Value>,
     ) -> Result<(), String> {
         let task = work_task_service::get_model(&self.db.conn, task_id)
             .await
             .map_err(|e| e.to_string())?;
         self.preflight_folder(task.folder_id).await?;
         let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
-        let action = note
-            .map(|note| serde_json::json!({ "action": "retry", "note": note }));
+        // An attachment is an instruction on its own: a screenshot with no
+        // sentence still has to reach the retry prompt, so the action is
+        // recorded whenever EITHER part is present.
+        let action = (note.is_some() || !attachments.is_empty()).then(|| {
+            serde_json::json!({
+                "action": "retry",
+                "note": note.unwrap_or_default(),
+                "blocks": attachments,
+            })
+        });
         match work_task_service::claim_for_run_with_action(
             &self.db.conn,
             task_id,
@@ -464,6 +475,7 @@ impl TaskEngine {
         task_id: i32,
         intent: FollowUpIntent,
         feedback: String,
+        attachments: Vec<serde_json::Value>,
     ) -> Result<(), String> {
         let task = work_task_service::get_model(&self.db.conn, task_id)
             .await
@@ -478,6 +490,7 @@ impl TaskEngine {
                 "action": "return",
                 "intent": intent.as_str(),
                 "feedback": feedback,
+                "blocks": attachments,
             })),
         )
         .await
@@ -489,7 +502,11 @@ impl TaskEngine {
         self.spawn_launch(
             task_id,
             task.folder_id,
-            LaunchMode::Return { intent, feedback },
+            LaunchMode::Return {
+                intent,
+                feedback,
+                attachments,
+            },
         );
         Ok(())
     }
@@ -971,7 +988,31 @@ impl TaskEngine {
         };
         emit_conversation_upsert(&self.emitter, &self.db.conn, conversation_id).await;
 
-        let blocks = compose_prompt(&cfg, &task, &mode, &settings, resumed, &self.db.conn).await?;
+        let mut blocks =
+            compose_prompt(&cfg, &task, &mode, &settings, resumed, &self.db.conn).await?;
+        // Re-encode attached images for the agent that actually answered the
+        // handshake. A task's blocks are STORED — the composer picked their
+        // encoding from a transient probe that may not have landed, possibly
+        // months ago, and the task's agent can change between then and this
+        // run. The live session's advertised capabilities are the only truth.
+        //
+        // Only for a prompt that actually carries an image, and only then do we
+        // wait: `spawn_agent` returns before a FRESH session's handshake
+        // completes, so the capabilities are typically still unpublished here.
+        // Every other launch (the overwhelming majority) pays nothing.
+        if blocks.iter().any(carries_image) {
+            match self
+                .manager
+                .wait_for_prompt_capabilities(&conn_id, IMAGE_CAPABILITY_WAIT)
+                .await
+            {
+                Some(caps) => reencode_images(&mut blocks, &caps),
+                None => tracing::warn!(
+                    "[work_task] task {task_id}: agent never advertised prompt capabilities; \
+                     sending attached images as stored"
+                ),
+            }
+        }
 
         // Register for completion correlation BEFORE prompting so a fast
         // TurnComplete can't race ahead of the index entry.
@@ -2542,12 +2583,11 @@ async fn compose_prompt(
             // and the user attached a note when re-queueing it. Review feedback
             // cannot exist here — that needs a session — but match on the kind
             // rather than assume it.
-            if let Some(Outstanding {
-                kind: OutstandingKind::Restart,
-                text,
-            }) = outstanding_instruction(conn, task.id).await
-            {
-                blocks.push(restart_note_block(&text));
+            if let Some(outstanding) = outstanding_instruction(conn, task.id).await {
+                if matches!(outstanding.kind, OutstandingKind::Restart) {
+                    blocks.push(restart_note_block(&outstanding.text));
+                    blocks.extend(attachment_blocks(&outstanding.attachments, task.id));
+                }
             }
         }
         LaunchMode::Retry => {
@@ -2580,9 +2620,16 @@ async fn compose_prompt(
                         text: format!("Latest review feedback to address:\n{}", outstanding.text),
                     },
                 });
+                // Whatever the user attached to that instruction follows it, so
+                // the replay carries the screenshot as well as the sentence.
+                blocks.extend(attachment_blocks(&outstanding.attachments, task.id));
             }
         }
-        LaunchMode::Return { intent, feedback } => {
+        LaunchMode::Return {
+            intent,
+            feedback,
+            attachments,
+        } => {
             if !resumed {
                 // Session resume failed — the fresh session has no context, so
                 // replay the task before the feedback.
@@ -2597,6 +2644,7 @@ async fn compose_prompt(
             blocks.push(PromptInputBlock::Text {
                 text: follow_up_text(*intent, feedback),
             });
+            blocks.extend(attachment_blocks(attachments, task.id));
         }
         LaunchMode::Merge {
             root_path,
@@ -2757,6 +2805,107 @@ fn follow_up_text(intent: FollowUpIntent, feedback: &str) -> String {
     }
 }
 
+/// The attachment blocks recorded on a `user_action` payload, if any. Absent on
+/// every event written before follow-ups could carry attachments, so a missing
+/// or malformed field simply means "nothing was attached".
+fn payload_blocks(payload: &serde_json::Value) -> Vec<serde_json::Value> {
+    payload
+        .get("blocks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Parse stored attachment blocks, dropping (with a warning) any that no longer
+/// deserialize. Unlike the task's own prompt, an attachment is an addition to
+/// the instruction — losing one must not stop the run that carries the rest.
+fn attachment_blocks(raw: &[serde_json::Value], task_id: i32) -> Vec<PromptInputBlock> {
+    raw.iter()
+        .filter_map(|v| match serde_json::from_value::<PromptInputBlock>(v.clone()) {
+            Ok(block) => Some(block),
+            Err(e) => {
+                tracing::warn!("[work_task] task {task_id}: dropping bad attachment block: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
+/// How long a launch waits for the agent to advertise what a prompt may carry,
+/// before sending its attached images in whatever shape they were stored. Only
+/// image-bearing prompts ever wait, and only until the handshake lands — which
+/// is the same round trip the prompt itself is about to need anyway.
+const IMAGE_CAPABILITY_WAIT: Duration = Duration::from_secs(20);
+
+/// Whether this block carries image bytes in either of the two wire encodings.
+fn carries_image(block: &PromptInputBlock) -> bool {
+    match block {
+        PromptInputBlock::Image { .. } => true,
+        PromptInputBlock::Resource {
+            mime_type, blob, ..
+        } => {
+            blob.is_some()
+                && mime_type
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("image/"))
+        }
+        _ => false,
+    }
+}
+
+/// Swap every attached image into the shape the connected agent advertised.
+///
+/// Two wire encodings carry the same bytes: a native `Image` block, and a
+/// `Resource` whose `blob` holds them under an image mime type (what agents
+/// that reject image content but accept embedded context — e.g. Grok — take).
+/// The composer picks one at compose time from a probe; this picks again at
+/// dispatch, when the session has actually said what it accepts.
+///
+/// Only image-carrying blocks are touched, and only to move between those two
+/// encodings — never to invent or drop content. An agent that advertises
+/// neither is left alone: there is no third shape to reach for, and rewriting
+/// into one it also rejects would only obscure the error it is about to raise.
+fn reencode_images(blocks: &mut [PromptInputBlock], caps: &PromptCapabilitiesInfo) {
+    for (index, block) in blocks.iter_mut().enumerate() {
+        match block {
+            PromptInputBlock::Image {
+                data,
+                mime_type,
+                uri,
+            } if !caps.image && caps.embedded_context => {
+                *block = PromptInputBlock::Resource {
+                    // A path-less image (a pasted screenshot) needs some stable
+                    // identifier; its position in this prompt is one.
+                    uri: uri
+                        .clone()
+                        .unwrap_or_else(|| format!("clipboard://work-task-image-{index}")),
+                    mime_type: Some(mime_type.clone()),
+                    text: None,
+                    blob: Some(std::mem::take(data)),
+                };
+            }
+            PromptInputBlock::Resource {
+                uri,
+                mime_type,
+                text: None,
+                blob: Some(blob),
+            } if caps.image
+                && !caps.embedded_context
+                && mime_type
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("image/")) =>
+            {
+                *block = PromptInputBlock::Image {
+                    data: std::mem::take(blob),
+                    mime_type: mime_type.clone().unwrap_or_default(),
+                    uri: Some(uri.clone()),
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A restart note reaches the agent as context, not as the task itself.
 fn restart_note_block(note: &str) -> PromptInputBlock {
     PromptInputBlock::Text {
@@ -2779,6 +2928,10 @@ enum OutstandingKind {
 struct Outstanding {
     kind: OutstandingKind,
     text: String,
+    /// Raw prompt blocks the user attached to that instruction (images, pasted
+    /// bytes). Kept unparsed here — `attachment_blocks` validates at the point
+    /// the prompt is composed.
+    attachments: Vec<serde_json::Value>,
 }
 
 /// The user instruction the agent still owes a turn to, if any.
@@ -2840,6 +2993,7 @@ async fn outstanding_instruction(
                         return Some(Outstanding {
                             kind: OutstandingKind::Review(intent),
                             text: text.to_string(),
+                            attachments: payload_blocks(&payload),
                         });
                     }
                     "retry" | "requeue" => {
@@ -2847,6 +3001,7 @@ async fn outstanding_instruction(
                         return Some(Outstanding {
                             kind: OutstandingKind::Restart,
                             text: text.to_string(),
+                            attachments: payload_blocks(&payload),
                         });
                     }
                     // Other user actions (delete, …) neither carry nor consume
@@ -3173,6 +3328,7 @@ mod tests {
         LaunchMode::Return {
             intent,
             feedback: "please fix the copy".to_string(),
+            attachments: Vec::new(),
         }
     }
 
@@ -3304,6 +3460,7 @@ mod tests {
             &LaunchMode::Return {
                 intent: FollowUpIntent::Verify,
                 feedback: String::new(),
+                attachments: Vec::new(),
             },
             &WorkTaskFolderSettings::default(),
             true,
@@ -3432,6 +3589,199 @@ mod tests {
         // The task's own brief still opens the prompt, so the transcript's
         // phase divider keeps matching on it.
         assert_eq!(prompt_head(&blocks), "Fix the login flow and add tests.");
+    }
+
+    /// A screenshot pasted into the follow-up box has to reach the agent as an
+    /// image block, right behind the sentence that framed it — dropping it
+    /// would leave the framing pointing at nothing.
+    #[tokio::test]
+    async fn a_follow_up_carries_its_attachments_after_the_framing() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let blocks = compose_prompt(
+            &task_config(),
+            &task_row(),
+            &LaunchMode::Return {
+                intent: FollowUpIntent::Revise,
+                feedback: "the header is wrong, see this".to_string(),
+                attachments: vec![
+                    serde_json::json!({
+                        "type": "image", "data": "aGk=", "mime_type": "image/png", "uri": null,
+                    }),
+                    // A block that no longer deserializes is dropped, not fatal:
+                    // one bad attachment must not stop the run carrying the rest.
+                    serde_json::json!({ "type": "not_a_block" }),
+                ],
+            },
+            &WorkTaskFolderSettings::default(),
+            true,
+            &db.conn,
+        )
+        .await
+        .expect("compose");
+        // The framing sentence, then the image it refers to, then the worktree
+        // guard every prompt ends with.
+        let framing = blocks
+            .iter()
+            .position(
+                |b| matches!(b, PromptInputBlock::Text { text } if text.contains("the header is wrong, see this")),
+            )
+            .expect("the feedback is in there");
+        assert!(
+            matches!(
+                blocks.get(framing + 1),
+                Some(PromptInputBlock::Image { data, .. }) if data == "aGk="
+            ),
+            "the image follows the framing text, unparseable blocks aside: {blocks:?}"
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b, PromptInputBlock::Image { .. }))
+                .count(),
+            1
+        );
+    }
+
+    /// The same attachments have to survive the replay path: a run interrupted
+    /// before it answered owes the user the screenshot as well as the sentence.
+    #[tokio::test]
+    async fn an_outstanding_instruction_replays_its_attachments() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let id = seeded_task(&db.conn).await;
+        user_action(
+            &db.conn,
+            id,
+            serde_json::json!({
+                "action": "retry",
+                "note": "it looked like this",
+                "blocks": [
+                    { "type": "image", "data": "aGk=", "mime_type": "image/png", "uri": null },
+                ],
+            }),
+        )
+        .await;
+
+        let outstanding = outstanding_instruction(&db.conn, id)
+            .await
+            .expect("an outstanding instruction");
+        assert_eq!(outstanding.attachments.len(), 1);
+
+        let mut row = task_row();
+        row.id = id;
+        let blocks = compose_prompt(
+            &task_config(),
+            &row,
+            &LaunchMode::Retry,
+            &WorkTaskFolderSettings::default(),
+            true,
+            &db.conn,
+        )
+        .await
+        .expect("compose");
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, PromptInputBlock::Image { data, .. } if data == "aGk=")),
+            "the replayed instruction keeps its image: {blocks:?}"
+        );
+    }
+
+    /// A task's image blocks are stored, so the encoding the composer chose can
+    /// be stale by the time the run happens (a slow probe then, a different
+    /// agent now). Dispatch re-encodes for whoever actually answered.
+    #[test]
+    fn images_are_reencoded_for_the_agent_that_answered() {
+        let caps = |image, embedded_context| PromptCapabilitiesInfo {
+            image,
+            audio: false,
+            embedded_context,
+        };
+        let image = || PromptInputBlock::Image {
+            data: "aGk=".to_string(),
+            mime_type: "image/png".to_string(),
+            uri: None,
+        };
+        let embedded = || PromptInputBlock::Resource {
+            uri: "file:///shot.png".to_string(),
+            mime_type: Some("image/png".to_string()),
+            text: None,
+            blob: Some("aGk=".to_string()),
+        };
+
+        // Native image → embedded blob for an agent that takes only the latter,
+        // with a stable synthetic uri for a path-less screenshot.
+        let mut blocks = vec![PromptInputBlock::Text { text: "see".into() }, image()];
+        reencode_images(&mut blocks, &caps(false, true));
+        assert!(
+            matches!(
+                &blocks[1],
+                PromptInputBlock::Resource { uri, mime_type, text: None, blob: Some(b) }
+                    if uri == "clipboard://work-task-image-1"
+                        && mime_type.as_deref() == Some("image/png")
+                        && b == "aGk="
+            ),
+            "{:?}",
+            blocks[1]
+        );
+        // The prose beside it is untouched.
+        assert!(matches!(&blocks[0], PromptInputBlock::Text { text } if text == "see"));
+
+        // …and back, for an agent that takes images but not embedded context.
+        let mut blocks = vec![embedded()];
+        reencode_images(&mut blocks, &caps(true, false));
+        assert!(
+            matches!(
+                &blocks[0],
+                PromptInputBlock::Image { data, mime_type, uri: Some(u) }
+                    if data == "aGk=" && mime_type == "image/png" && u == "file:///shot.png"
+            ),
+            "{:?}",
+            blocks[0]
+        );
+
+        // An agent that takes both, or neither, gets exactly what was stored:
+        // there is no better shape to reach for in either case.
+        for c in [caps(true, true), caps(false, false)] {
+            let mut blocks = vec![image(), embedded()];
+            reencode_images(&mut blocks, &c);
+            assert!(matches!(&blocks[0], PromptInputBlock::Image { uri: None, .. }));
+            assert!(matches!(&blocks[1], PromptInputBlock::Resource { blob: Some(_), .. }));
+        }
+
+        // A non-image embedded resource (a pasted text file) is never turned
+        // into an image, whatever the agent accepts.
+        let mut blocks = vec![PromptInputBlock::Resource {
+            uri: "clipboard://notes".to_string(),
+            mime_type: Some("text/markdown".to_string()),
+            text: None,
+            blob: Some("aGk=".to_string()),
+        }];
+        reencode_images(&mut blocks, &caps(true, false));
+        assert!(matches!(
+            &blocks[0],
+            PromptInputBlock::Resource { mime_type, .. }
+                if mime_type.as_deref() == Some("text/markdown")
+        ));
+    }
+
+    /// An event written before follow-ups could carry attachments has no
+    /// `blocks` field at all — that has to read as "nothing was attached".
+    #[tokio::test]
+    async fn a_legacy_instruction_without_blocks_still_replays() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let id = seeded_task(&db.conn).await;
+        user_action(
+            &db.conn,
+            id,
+            serde_json::json!({ "action": "return", "intent": "revise", "feedback": "redo it" }),
+        )
+        .await;
+
+        let outstanding = outstanding_instruction(&db.conn, id)
+            .await
+            .expect("an outstanding instruction");
+        assert_eq!(outstanding.text, "redo it");
+        assert!(outstanding.attachments.is_empty());
     }
 
     /// Two ways a busy task could hide its own instruction: `list_events`
