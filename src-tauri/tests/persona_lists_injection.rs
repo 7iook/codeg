@@ -61,6 +61,8 @@ fn ctx_with_persona_lists(persona_lists: Option<&str>) -> CompanionContext {
             ask: false,
             sessions: false,
             tasks: false,
+            automations: false,
+            taskboard: false,
         },
         custom_agents: Vec::new(),
         disabled_agents: Vec::new(),

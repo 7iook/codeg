@@ -110,6 +110,27 @@ impl WorkTaskToolAccess for NoTaskTools {
     }
 }
 
+/// Chat-authoring stub: this test only drives `delegate_to_agent`'s wire shape,
+/// never the authoring arms.
+struct NoAuthoring;
+#[async_trait]
+impl codeg_lib::acp::chat_authoring::ChatAuthoringAccess for NoAuthoring {
+    async fn create_automation(
+        &self,
+        _ctx: codeg_lib::acp::chat_authoring::AuthoringContext,
+        _spec: codeg_lib::acp::chat_authoring::NewAutomationSpec,
+    ) -> codeg_lib::acp::chat_authoring::AuthoringOutcome {
+        codeg_lib::acp::chat_authoring::AuthoringOutcome::rejected("automation", "no authoring")
+    }
+    async fn create_work_task(
+        &self,
+        _ctx: codeg_lib::acp::chat_authoring::AuthoringContext,
+        _spec: codeg_lib::acp::chat_authoring::NewWorkTaskSpec,
+    ) -> codeg_lib::acp::chat_authoring::AuthoringOutcome {
+        codeg_lib::acp::chat_authoring::AuthoringOutcome::rejected("work_task", "no authoring")
+    }
+}
+
 // ── Harness ─────────────────────────────────────────────────────────────────
 
 /// Send one `BrokerMessage::Call` whose `arguments` JSON is exactly `input`
@@ -150,6 +171,7 @@ async fn launch_option_for_wire_input(input: serde_json::Value) -> Option<Option
         Arc::new(NoQuestions),
         Arc::new(NoSessionInfo),
         Arc::new(NoTaskTools),
+        Arc::new(NoAuthoring),
     );
 
     let (mut client, mut server) = tokio::io::duplex(16 * 1024);

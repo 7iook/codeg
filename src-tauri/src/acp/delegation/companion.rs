@@ -44,19 +44,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex};
 
-// [merge-v0.23.0] union: keep both HEAD's continue/close-session imports and upstream's task_progress/task_complete imports
+// [merge-v0.23.5] union: HEAD's continue/close-session transport + upstream's
+// task_progress/task_complete and the new create_automation/create_work_task.
+use crate::acp::chat_authoring::{
+    NewAutomationSpec, NewWorkTaskSpec, MAX_PROMPT_CHARS, MAX_TITLE_CHARS,
+};
 use crate::acp::delegation::transport::{
     client_ask_round_trip, client_cancel, client_cancel_task_round_trip,
     client_close_session_round_trip, client_commit_feedback, client_continue_round_trip,
+    client_create_automation_round_trip, client_create_work_task_round_trip,
     client_feedback_round_trip, client_round_trip, client_session_round_trip,
     client_status_round_trip, client_task_complete_round_trip, client_task_progress_round_trip,
     BrokerAskRequest, BrokerCancelRequest, BrokerCancelTaskRequest, BrokerCloseSessionRequest,
-    BrokerCommitFeedbackRequest, BrokerContinueRequest, BrokerFeedbackRequest, BrokerRequest,
-    BrokerResponse, BrokerSessionRequest, BrokerStatusRequest, BrokerTaskCompleteRequest,
+    BrokerCommitFeedbackRequest, BrokerContinueRequest, BrokerCreateAutomationRequest,
+    BrokerCreateWorkTaskRequest, BrokerFeedbackRequest, BrokerRequest, BrokerResponse,
+    BrokerSessionRequest, BrokerStatusRequest, BrokerTaskCompleteRequest,
     BrokerTaskProgressRequest,
 };
 use crate::acp::question::parse_questions;
 use crate::acp::session_info::MAX_SESSION_MESSAGES;
+use crate::models::AutomationAction;
 
 /// Upper bound on one broker-side cancel round-trip. Bounds both
 /// `handle_cancel_notification` (so stdin dispatch can't stall behind a
@@ -148,11 +155,16 @@ pub struct CompanionFeatures {
     /// Work-task reporting tools (`task_progress` / `task_complete`) — injected
     /// only into spawns launched by the task engine.
     pub tasks: bool,
+    /// `create_automation` — save a scheduled/manual automation from chat.
+    pub automations: bool,
+    /// `create_work_task` — queue a card on the work-task board from chat.
+    pub taskboard: bool,
 }
 
 impl CompanionFeatures {
     /// Parse the comma-joined `--features` value (e.g.
-    /// `delegation,feedback,ask,sessions`). Unknown tokens are ignored. An absent
+    /// `delegation,feedback,ask,sessions,automations,taskboard`). Unknown tokens
+    /// are ignored. An absent
     /// value (`None`) defaults to delegation-only — backward compatible with a
     /// parent that predates feature gating (companion + listener ship together, so
     /// post-upgrade the parent always passes an explicit `--features`).
@@ -164,6 +176,8 @@ impl CompanionFeatures {
                 ask: false,
                 sessions: false,
                 tasks: false,
+                automations: false,
+                taskboard: false,
             };
         };
         let mut f = Self {
@@ -172,6 +186,8 @@ impl CompanionFeatures {
             ask: false,
             sessions: false,
             tasks: false,
+            automations: false,
+            taskboard: false,
         };
         for tok in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
             match tok {
@@ -180,6 +196,8 @@ impl CompanionFeatures {
                 "ask" => f.ask = true,
                 "sessions" => f.sessions = true,
                 "tasks" => f.tasks = true,
+                "automations" => f.automations = true,
+                "taskboard" => f.taskboard = true,
                 _ => {}
             }
         }
@@ -192,9 +210,12 @@ impl CompanionFeatures {
             "check_user_feedback" => self.feedback,
             "ask_user_question" => self.ask,
             "get_session_info" => self.sessions,
-            // [merge-v0.23.0] union: HEAD's continue_with_session/close_session (delegation group)
-            // + upstream's task_progress/task_complete (tasks group).
+            // [merge-v0.23.5] union: HEAD's continue_with_session/close_session (delegation group)
+            // + upstream's task_progress/task_complete (tasks) and
+            // create_automation/create_work_task (their own chat-authoring groups).
             "task_progress" | "task_complete" => self.tasks,
+            "create_automation" => self.automations,
+            "create_work_task" => self.taskboard,
             "delegate_to_agent"
             | "get_delegation_status"
             | "cancel_delegation"
@@ -843,6 +864,38 @@ async fn build_tools_call_spawn(
                 Box::pin(async move { client_task_complete_round_trip(&socket, &req).await });
             register_and_spawn(inflight, id, None, round_trip, render_task_ack).await
         }
+        "create_automation" => {
+            // Validate the shape HERE so a malformed call gets a synchronous
+            // -32602 the LLM can fix, rather than round-tripping bad data into
+            // the DB layer's error path.
+            let spec = match parse_automation_spec(&arguments) {
+                Ok(s) => s,
+                Err(msg) => return LineAction::Respond(err(id, -32602, msg)),
+            };
+            let req = BrokerCreateAutomationRequest {
+                token: ctx.token.clone(),
+                spec,
+            };
+            // No external_handle: a create either lands or it doesn't. Canceling
+            // only suppresses the response — there is no in-flight child to tear
+            // down broker-side.
+            let round_trip =
+                Box::pin(async move { client_create_automation_round_trip(&socket, &req).await });
+            register_and_spawn(inflight, id, None, round_trip, render_authoring_result).await
+        }
+        "create_work_task" => {
+            let spec = match parse_work_task_spec(&arguments) {
+                Ok(s) => s,
+                Err(msg) => return LineAction::Respond(err(id, -32602, msg)),
+            };
+            let req = BrokerCreateWorkTaskRequest {
+                token: ctx.token.clone(),
+                spec,
+            };
+            let round_trip =
+                Box::pin(async move { client_create_work_task_round_trip(&socket, &req).await });
+            register_and_spawn(inflight, id, None, round_trip, render_authoring_result).await
+        }
         other => LineAction::Respond(err(id, -32602, format!("unknown tool: {other}"))),
     }
 }
@@ -1275,6 +1328,105 @@ pub fn render_ask_result(outcome: &Value) -> Value {
     })
 }
 
+/// Read a required non-empty string argument, trimmed. `Err` carries the
+/// `-32602` message the dispatcher returns verbatim.
+fn required_string(arguments: &Value, field: &str, tool: &str) -> Result<String, String> {
+    arguments
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{tool} requires a non-empty `{field}` string"))
+}
+
+/// Read an optional string argument, trimmed. Absent, non-string, and
+/// whitespace-only all collapse to `None` — an LLM passing `""` to mean "use the
+/// default" gets the default rather than a validation error.
+fn optional_string(arguments: &Value, field: &str) -> Option<String> {
+    arguments
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The only cron arity this tool accepts: `min hour dom mon dow`.
+///
+/// The evaluator (`automation_service::normalize_cron`) remaps the POSIX
+/// day-of-week field ONLY for 5-field input; a 6/7-field expression passes
+/// through to the `cron` crate untouched, where `1` means Sunday. So
+/// `0 0 9 * * 1-5` — which an LLM would write meaning "weekdays at 09:00" —
+/// would silently fire Sunday through Thursday. Rejecting the arity here keeps
+/// the tool's advertised contract (5 fields, POSIX weekdays) the only one that
+/// can reach the DB, without touching how already-stored schedules are read.
+const CRON_FIELDS: usize = 5;
+
+/// Validate `create_automation` arguments into a [`NewAutomationSpec`]. Length
+/// caps are applied here (truncating, never rejecting) so an over-long
+/// generation still produces the automation the user asked for. Cron *syntax*
+/// is NOT parsed here — the main process owns the one authoritative evaluator,
+/// and its error comes back as a soft outcome the LLM can correct; only the
+/// field count is checked, because that is the one shape that would be accepted
+/// and then mean something other than what was asked (see [`CRON_FIELDS`]).
+fn parse_automation_spec(arguments: &Value) -> Result<NewAutomationSpec, String> {
+    let name = required_string(arguments, "name", "create_automation")?;
+    let prompt = required_string(arguments, "prompt", "create_automation")?;
+    let action = match optional_string(arguments, "action").as_deref() {
+        None | Some("launch_session") => AutomationAction::LaunchSession,
+        Some("enqueue_task") => AutomationAction::EnqueueTask,
+        Some(other) => {
+            return Err(format!(
+                "create_automation `action` must be launch_session or enqueue_task (got {other})"
+            ));
+        }
+    };
+    let cron = optional_string(arguments, "cron");
+    if let Some(expr) = cron.as_deref() {
+        let fields = expr.split_whitespace().count();
+        if fields != CRON_FIELDS {
+            return Err(format!(
+                "create_automation `cron` must have exactly {CRON_FIELDS} fields \
+                 (min hour day-of-month month day-of-week), got {fields}. A seconds \
+                 field is not supported — write '0 9 * * 1-5', not '0 0 9 * * 1-5'."
+            ));
+        }
+    }
+    Ok(NewAutomationSpec {
+        name: truncate_chars(&name, MAX_TITLE_CHARS),
+        prompt: truncate_chars(&prompt, MAX_PROMPT_CHARS),
+        cron,
+        timezone: optional_string(arguments, "timezone"),
+        action,
+        agent_type: optional_string(arguments, "agent_type"),
+        folder_path: optional_string(arguments, "folder_path"),
+        // Absent means "live now" (the common ask); an explicit non-bool is
+        // treated as absent rather than failing the whole call.
+        enabled: arguments
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+    })
+}
+
+/// Validate `create_work_task` arguments into a [`NewWorkTaskSpec`].
+fn parse_work_task_spec(arguments: &Value) -> Result<NewWorkTaskSpec, String> {
+    let title = required_string(arguments, "title", "create_work_task")?;
+    let prompt = required_string(arguments, "prompt", "create_work_task")?;
+    Ok(NewWorkTaskSpec {
+        title: truncate_chars(&title, MAX_TITLE_CHARS),
+        prompt: truncate_chars(&prompt, MAX_PROMPT_CHARS),
+        agent_type: optional_string(arguments, "agent_type"),
+        folder_path: optional_string(arguments, "folder_path"),
+    })
+}
+
+/// Character-safe truncation shared by both spec parsers.
+fn truncate_chars(s: &str, cap: usize) -> String {
+    crate::acp::chat_authoring::truncate_chars(s, cap)
+}
+
 /// Extract the `session_id` integer from the `get_session_info` arguments,
 /// tolerating a JSON number (int or whole float) or a numeric string — some MCP
 /// hosts stringify integer args. `None` for missing / non-integer / out-of-range,
@@ -1367,6 +1519,58 @@ pub fn render_task_ack(outcome: &Value) -> Value {
             "Not recorded."
         })
         .to_string();
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": false,
+        "structuredContent": outcome.clone(),
+    })
+}
+
+/// Map a `create_automation` / `create_work_task` round-trip outcome (a
+/// serialized [`crate::acp::chat_authoring::AuthoringOutcome`]) into an MCP
+/// `tools/call` result.
+///
+/// A refusal (feature off, folder not resolvable, bad cron) renders as readable
+/// text with `isError: false`: the LLM reads the note, tells the user, or
+/// retries with corrected arguments. Making it a tool error would abort the turn
+/// over something the model can recover from on its own.
+pub fn render_authoring_result(outcome: &Value) -> Value {
+    let created = outcome
+        .get("created")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let s = |k: &str| outcome.get(k).and_then(|v| v.as_str());
+    let noun = match s("kind") {
+        Some("work_task") => "task",
+        _ => "automation",
+    };
+    let text = if created {
+        let id = outcome.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let title = s("title").unwrap_or("(untitled)");
+        let mut out = format!("Created {noun} #{id}: {title}");
+        if let Some(folder) = s("folder_name") {
+            out.push_str(&format!("\nProject: {folder}"));
+        }
+        if let Some(agent) = s("agent_type") {
+            out.push_str(&format!("\nAgent: {agent}"));
+        }
+        match (s("cron"), s("timezone")) {
+            (Some(cron), Some(tz)) => out.push_str(&format!("\nSchedule: {cron} ({tz})")),
+            (Some(cron), None) => out.push_str(&format!("\nSchedule: {cron}")),
+            _ => {}
+        }
+        if let Some(next) = s("next_run_at") {
+            out.push_str(&format!("\nNext run: {next}"));
+        }
+        if let Some(note) = s("note") {
+            out.push_str(&format!("\n{note}"));
+        }
+        out
+    } else {
+        s("note")
+            .unwrap_or("Could not create it; no reason was reported.")
+            .to_string()
+    };
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": false,
@@ -1503,6 +1707,8 @@ mod tests {
             ask: false,
             sessions: false,
             tasks: false,
+            automations: false,
+            taskboard: false,
         })
     }
 
@@ -2209,6 +2415,8 @@ mod tests {
         ask: false,
         sessions: false,
         tasks: false,
+        automations: false,
+        taskboard: false,
     };
     const BOTH: CompanionFeatures = CompanionFeatures {
         delegation: true,
@@ -2216,6 +2424,8 @@ mod tests {
         ask: false,
         sessions: false,
         tasks: false,
+        automations: false,
+        taskboard: false,
     };
     const ASK_ONLY: CompanionFeatures = CompanionFeatures {
         delegation: false,
@@ -2223,6 +2433,8 @@ mod tests {
         ask: true,
         sessions: false,
         tasks: false,
+        automations: false,
+        taskboard: false,
     };
     const SESSIONS_ONLY: CompanionFeatures = CompanionFeatures {
         delegation: false,
@@ -2230,6 +2442,8 @@ mod tests {
         ask: false,
         sessions: true,
         tasks: false,
+        automations: false,
+        taskboard: false,
     };
 
     fn list_tool_names(action: LineAction) -> Vec<String> {
@@ -2508,6 +2722,237 @@ mod tests {
         let e = resp.error.unwrap();
         assert_eq!(e.code, -32602);
         assert!(e.message.contains("unknown tool"));
+    }
+
+    // -- chat authoring: feature gating + parsing + rendering ---------------
+
+    const AUTOMATIONS_ONLY: CompanionFeatures = CompanionFeatures {
+        delegation: false,
+        feedback: false,
+        ask: false,
+        sessions: false,
+        tasks: false,
+        automations: true,
+        taskboard: false,
+    };
+    const TASKBOARD_ONLY: CompanionFeatures = CompanionFeatures {
+        delegation: false,
+        feedback: false,
+        ask: false,
+        sessions: false,
+        tasks: false,
+        automations: false,
+        taskboard: true,
+    };
+
+    /// The two authoring groups gate independently: enabling one must not
+    /// surface the other's tool.
+    #[tokio::test]
+    async fn tools_list_gates_authoring_tools_independently() {
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        // Default ctx is delegation-only: neither appears.
+        let names = list_tool_names(dispatch_for_test(list).await);
+        assert!(!names.contains(&"create_automation".to_string()));
+        assert!(!names.contains(&"create_work_task".to_string()));
+
+        let names = list_tool_names(dispatch_with_features(AUTOMATIONS_ONLY, list).await);
+        assert_eq!(names, vec!["create_automation".to_string()]);
+
+        let names = list_tool_names(dispatch_with_features(TASKBOARD_ONLY, list).await);
+        assert_eq!(names, vec!["create_work_task".to_string()]);
+    }
+
+    /// Calling a tool whose group is off is rejected as an unknown tool — same
+    /// no-leak shape as the other gated tools.
+    #[tokio::test]
+    async fn authoring_tools_rejected_as_unknown_when_feature_off() {
+        for (name, args) in [
+            ("create_automation", json!({ "name": "n", "prompt": "p" })),
+            ("create_work_task", json!({ "title": "t", "prompt": "p" })),
+        ] {
+            let line = json!({
+                "jsonrpc": "2.0", "id": 40, "method": "tools/call",
+                "params": { "name": name, "arguments": args }
+            })
+            .to_string();
+            let resp = unwrap_respond(dispatch_for_test(&line).await);
+            let e = resp.error.unwrap();
+            assert_eq!(e.code, -32602);
+            assert!(e.message.contains("unknown tool"));
+        }
+        // Cross-gating: the automations group must not unlock the board tool.
+        let line = json!({
+            "jsonrpc": "2.0", "id": 41, "method": "tools/call",
+            "params": { "name": "create_work_task", "arguments": { "title": "t", "prompt": "p" } }
+        })
+        .to_string();
+        let resp = unwrap_respond(dispatch_with_features(AUTOMATIONS_ONLY, &line).await);
+        assert!(resp.error.unwrap().message.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn create_automation_spawns_when_valid_and_enabled() {
+        let line = json!({
+            "jsonrpc": "2.0", "id": 42, "method": "tools/call",
+            "params": { "name": "create_automation", "arguments": {
+                "name": "Nightly audit", "prompt": "audit deps", "cron": "0 3 * * *"
+            }}
+        })
+        .to_string();
+        assert!(matches!(
+            dispatch_with_features(AUTOMATIONS_ONLY, &line).await,
+            LineAction::Spawn(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_automation_missing_fields_rejected_synchronously() {
+        for (args, expect) in [
+            (json!({ "prompt": "p" }), "name"),
+            (json!({ "name": "n" }), "prompt"),
+            (json!({ "name": "  ", "prompt": "p" }), "name"),
+            (
+                json!({ "name": "n", "prompt": "p", "action": "delete_everything" }),
+                "action",
+            ),
+        ] {
+            let line = json!({
+                "jsonrpc": "2.0", "id": 43, "method": "tools/call",
+                "params": { "name": "create_automation", "arguments": args }
+            })
+            .to_string();
+            let resp = unwrap_respond(dispatch_with_features(AUTOMATIONS_ONLY, &line).await);
+            let e = resp.error.expect("bad arguments must be rejected");
+            assert_eq!(e.code, -32602);
+            assert!(e.message.contains(expect), "got: {}", e.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_work_task_missing_fields_rejected_synchronously() {
+        for (args, expect) in [
+            (json!({ "prompt": "p" }), "title"),
+            (json!({ "title": "t" }), "prompt"),
+        ] {
+            let line = json!({
+                "jsonrpc": "2.0", "id": 44, "method": "tools/call",
+                "params": { "name": "create_work_task", "arguments": args }
+            })
+            .to_string();
+            let resp = unwrap_respond(dispatch_with_features(TASKBOARD_ONLY, &line).await);
+            let e = resp.error.expect("bad arguments must be rejected");
+            assert_eq!(e.code, -32602);
+            assert!(e.message.contains(expect), "got: {}", e.message);
+        }
+    }
+
+    #[test]
+    fn parse_automation_spec_defaults_and_normalizes() {
+        let spec = parse_automation_spec(&json!({
+            "name": "  Nightly  ", "prompt": " do it ",
+            "cron": "  ", "timezone": "", "folder_path": " /repo/app "
+        }))
+        .unwrap();
+        // Trimmed…
+        assert_eq!(spec.name, "Nightly");
+        assert_eq!(spec.prompt, "do it");
+        assert_eq!(spec.folder_path.as_deref(), Some("/repo/app"));
+        // …and whitespace-only optionals collapse to "use the default", not to
+        // an empty cron that would make this a broken scheduled automation.
+        assert!(spec.cron.is_none());
+        assert!(spec.timezone.is_none());
+        // Defaults.
+        assert!(spec.enabled);
+        assert_eq!(spec.action, AutomationAction::LaunchSession);
+
+        let spec = parse_automation_spec(&json!({
+            "name": "n", "prompt": "p", "action": "enqueue_task", "enabled": false
+        }))
+        .unwrap();
+        assert_eq!(spec.action, AutomationAction::EnqueueTask);
+        assert!(!spec.enabled);
+    }
+
+    /// A 6-field cron is REJECTED, not silently accepted.
+    ///
+    /// `normalize_cron` remaps POSIX weekdays only for 5-field input; a 6-field
+    /// expression reaches the `cron` crate verbatim, where `1` is Sunday. So the
+    /// natural-looking `0 0 9 * * 1-5` would be stored happily and then fire
+    /// Sun–Thu instead of Mon–Fri. Nothing downstream can detect that, so the
+    /// arity gate here is the only thing standing between the LLM and a
+    /// wrong-by-two-days schedule.
+    #[test]
+    fn parse_automation_spec_rejects_non_five_field_cron() {
+        for expr in [
+            "0 0 9 * * 1-5",
+            "0 0 9 * * 1-5 2027",
+            "9 * * *",
+            "* * * * * *",
+        ] {
+            let err = parse_automation_spec(&json!({
+                "name": "n", "prompt": "p", "cron": expr
+            }))
+            .expect_err("non-5-field cron must be rejected");
+            assert!(err.contains("5 fields"), "got: {err}");
+        }
+        // The advertised 5-field form still goes through, extra whitespace and all.
+        let spec = parse_automation_spec(&json!({
+            "name": "n", "prompt": "p", "cron": "  0   9 * * 1-5 "
+        }))
+        .unwrap();
+        assert_eq!(spec.cron.as_deref(), Some("0   9 * * 1-5"));
+    }
+
+    #[test]
+    fn parse_specs_truncate_over_long_input() {
+        let long_title = "x".repeat(MAX_TITLE_CHARS + 50);
+        let long_prompt = "y".repeat(MAX_PROMPT_CHARS + 50);
+        let spec = parse_automation_spec(&json!({
+            "name": long_title, "prompt": long_prompt
+        }))
+        .unwrap();
+        assert_eq!(spec.name.chars().count(), MAX_TITLE_CHARS);
+        assert_eq!(spec.prompt.chars().count(), MAX_PROMPT_CHARS);
+
+        let spec = parse_work_task_spec(&json!({
+            "title": "t", "prompt": "p", "agent_type": "codex"
+        }))
+        .unwrap();
+        assert_eq!(spec.agent_type.as_deref(), Some("codex"));
+        assert!(spec.folder_path.is_none());
+    }
+
+    #[test]
+    fn render_authoring_result_created_summarizes() {
+        let outcome = json!({
+            "created": true, "kind": "automation", "id": 12, "title": "Nightly audit",
+            "folder_name": "app", "agent_type": "claude_code",
+            "cron": "0 3 * * *", "timezone": "Asia/Shanghai",
+            "next_run_at": "2026-08-08T03:00:00Z"
+        });
+        let rendered = render_authoring_result(&outcome);
+        assert_eq!(rendered["isError"], false);
+        let text = rendered["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Created automation #12"));
+        assert!(text.contains("Nightly audit"));
+        assert!(text.contains("0 3 * * * (Asia/Shanghai)"));
+        assert!(text.contains("2026-08-08T03:00:00Z"));
+        assert_eq!(rendered["structuredContent"]["id"], 12);
+    }
+
+    #[test]
+    fn render_authoring_result_refusal_is_soft_with_note() {
+        // A refusal must stay `isError: false` so the LLM reads the note and can
+        // tell the user / retry instead of the turn blowing up.
+        let outcome = json!({
+            "created": false, "kind": "work_task",
+            "note": "Creating board tasks from chat is turned off"
+        });
+        let rendered = render_authoring_result(&outcome);
+        assert_eq!(rendered["isError"], false);
+        let text = rendered["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("turned off"));
+        assert_eq!(rendered["structuredContent"]["created"], false);
     }
 
     #[test]
