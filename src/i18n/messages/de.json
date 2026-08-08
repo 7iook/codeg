@@ -2817,6 +2817,8 @@
       "messageList": {
         "attachedResources": "Angehängte Ressourcen",
         "loading": "Lädt...",
+        "loadEarlier": "Frühere Nachrichten laden",
+        "loadingEarlier": "Frühere Nachrichten werden geladen…",
         "error": "Fehler: {message}",
         "errorTitle": "Sitzung konnte nicht geladen werden",
         "errorActionReload": "Neu laden",

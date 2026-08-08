@@ -237,3 +237,165 @@ async fn feedback_settings_round_trip_defaults_off() {
 // The submit gate is per-connection (the agent's actual `check_user_feedback`
 // capability), unit-tested in `ConnectionManager::submit_feedback`
 // (`submit_feedback_rejected_when_tool_unavailable`), not via the global setting.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Response compression (allowlist predicate) + turn-window params
+// ────────────────────────────────────────────────────────────────────────────
+
+async fn build_test_server_with_state() -> (
+    TestServer,
+    Arc<AppState>,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let static_dir = tempfile::tempdir().expect("static dir");
+
+    let db = fresh_in_memory_db().await;
+    let state = Arc::new(AppState::new_for_test(db, data_dir.path().to_path_buf()));
+    let shutdown = Arc::new(ShutdownSignal::new());
+
+    let router = build_router(
+        state.clone(),
+        TEST_TOKEN.to_string(),
+        static_dir.path().to_path_buf(),
+        shutdown,
+    );
+
+    let server = TestServer::new(router).expect("test server");
+    (server, state, data_dir, static_dir)
+}
+
+#[tokio::test]
+async fn json_api_is_gzip_compressed_when_client_accepts() {
+    let (server, state, _data, _static) = build_test_server_with_state().await;
+    // Seed one folder so the JSON body clears the size-above threshold.
+    codeg_lib::db::service::folder_service::add_folder(
+        &state.db.conn,
+        "/tmp/codeg-compression-test-folder-with-a-reasonably-long-path",
+    )
+    .await
+    .expect("seed folder");
+
+    let resp = server
+        .post("/api/list_folders")
+        .add_header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .add_header("accept-encoding", "gzip")
+        .json(&json!({}))
+        .await;
+    assert_eq!(resp.status_code(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip"),
+        "JSON API responses must be gzip-compressed when the client accepts it"
+    );
+}
+
+#[tokio::test]
+async fn static_js_is_compressed_but_binary_download_is_not() {
+    let (server, _data, static_dir) = build_test_server().await;
+    let big_text = "console.log('x');\n".repeat(200);
+    std::fs::write(static_dir.path().join("chunk.js"), &big_text).expect("write js");
+    std::fs::write(static_dir.path().join("blob.bin"), vec![0u8; 4096]).expect("write bin");
+
+    let js = server
+        .get("/chunk.js")
+        .add_header("accept-encoding", "gzip")
+        .await;
+    assert_eq!(js.status_code(), 200);
+    assert_eq!(
+        js.headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip"),
+        "static JS must compress"
+    );
+
+    let bin = server
+        .get("/blob.bin")
+        .add_header("accept-encoding", "gzip")
+        .await;
+    assert_eq!(bin.status_code(), 200);
+    assert!(
+        bin.headers().get("content-encoding").is_none(),
+        "binary responses must stay identity-encoded (Content-Length preserved for progress)"
+    );
+    assert_eq!(
+        bin.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some("4096"),
+        "binary Content-Length must survive the compression layer"
+    );
+}
+
+#[tokio::test]
+async fn get_folder_conversation_accepts_turn_window_params() {
+    let (server, state, _data, _static) = build_test_server_with_state().await;
+    let folder_id = codeg_lib::db::service::folder_service::add_folder(
+        &state.db.conn,
+        "/tmp/codeg-window-param-test",
+    )
+    .await
+    .expect("seed folder")
+    .id;
+    let conv_id = codeg_lib::commands::conversations::create_conversation_core(
+        &state.db.conn,
+        folder_id,
+        codeg_lib::models::AgentType::ClaudeCode,
+        None,
+    )
+    .await
+    .expect("create conversation");
+
+    // tailTurns → windowed response: marker fields present even for an empty
+    // transcript (offset/total 0, fingerprint = seed).
+    let resp = server
+        .post("/api/get_folder_conversation")
+        .add_header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .json(&json!({ "conversationId": conv_id, "tailTurns": 50 }))
+        .await;
+    assert_eq!(resp.status_code(), 200);
+    let body = resp.json::<Value>();
+    assert_eq!(body["turns_offset"], 0);
+    assert_eq!(body["turns_total"], 0);
+    assert_eq!(body["assistant_turns_before_offset"], 0);
+    assert!(body["prefix_hash"].is_string());
+
+    // No params → legacy full response: none of the window fields serialize.
+    let resp = server
+        .post("/api/get_folder_conversation")
+        .add_header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .json(&json!({ "conversationId": conv_id }))
+        .await;
+    assert_eq!(resp.status_code(), 200);
+    let body = resp.json::<Value>();
+    assert!(body.get("turns_offset").is_none());
+    assert!(body.get("prefix_hash").is_none());
+
+    // Both selectors → invalid input.
+    let resp = server
+        .post("/api/get_folder_conversation")
+        .add_header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .json(&json!({ "conversationId": conv_id, "tailTurns": 5, "fromIndex": 3 }))
+        .await;
+    assert!(
+        resp.status_code().is_client_error(),
+        "tailTurns+fromIndex must be rejected, got {}",
+        resp.status_code()
+    );
+
+    // Turns page endpoint responds with the seam fields.
+    let resp = server
+        .post("/api/get_folder_conversation_turns")
+        .add_header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .json(&json!({ "conversationId": conv_id, "beforeIndex": 10, "limit": 5 }))
+        .await;
+    assert_eq!(resp.status_code(), 200);
+    let body = resp.json::<Value>();
+    assert_eq!(body["turns_total"], 0);
+    assert!(body["prefix_hash"].is_string());
+    assert!(body["prefix_hash_before_index"].is_string());
+}

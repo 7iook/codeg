@@ -28,6 +28,7 @@ import type {
   WorkTaskTemplate,
   ConversationSummary,
   ConversationDetail,
+  ConversationTurnsPage,
   DbConversationDetail,
   FolderInfo,
   AgentStats,
@@ -1789,10 +1790,35 @@ export async function importSelectedSessions(
   return getTransport().call("import_selected_sessions", { selections })
 }
 
+/**
+ * Fetch a conversation's detail, optionally windowed:
+ * - `{ tailTurns }` — last N turns, start aligned to a user-round boundary
+ * - `{ fromIndex }` — exact slice `turns[fromIndex..]` (window refresh)
+ * No window → legacy full response (also what an old server returns for any
+ * request; the windowed fields are then absent).
+ */
 export async function getFolderConversation(
-  conversationId: number
+  conversationId: number,
+  window?: { tailTurns?: number; fromIndex?: number }
 ): Promise<DbConversationDetail> {
-  return getTransport().call("get_folder_conversation", { conversationId })
+  return getTransport().call("get_folder_conversation", {
+    conversationId,
+    ...(window?.tailTurns != null ? { tailTurns: window.tailTurns } : {}),
+    ...(window?.fromIndex != null ? { fromIndex: window.fromIndex } : {}),
+  })
+}
+
+/** Fetch one page of older history ending just before `beforeIndex`. */
+export async function getFolderConversationTurns(
+  conversationId: number,
+  beforeIndex: number,
+  limit: number
+): Promise<ConversationTurnsPage> {
+  return getTransport().call("get_folder_conversation_turns", {
+    conversationId,
+    beforeIndex,
+    limit,
+  })
 }
 
 export async function removeFolderFromHistory(path: string): Promise<void> {

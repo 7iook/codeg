@@ -2817,6 +2817,8 @@
       "messageList": {
         "attachedResources": "附加资源",
         "loading": "加载中...",
+        "loadEarlier": "加载更早的消息",
+        "loadingEarlier": "正在加载更早的消息…",
         "error": "错误：{message}",
         "errorTitle": "会话加载失败",
         "errorActionReload": "重新加载",

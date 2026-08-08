@@ -597,6 +597,46 @@ export interface DbConversationDetail {
    * mid-stream, which would otherwise double-render against the live reply.
    */
   in_flight_user_turn_id?: string | null
+  /**
+   * Turn-window metadata, present only when the request asked for a window
+   * (`tailTurns`/`fromIndex`); their absence marks a legacy full response
+   * (old server) and disables windowed merging. `turns` then holds
+   * `full[turns_offset..]` while every other field still describes the full
+   * transcript. See `src/lib/turn-window.ts` for the derivation helpers.
+   */
+  turns_offset?: number | null
+  turns_total?: number | null
+  /** Assistant turns in `full[0..turns_offset)` (baseline globalization). */
+  assistant_turns_before_offset?: number | null
+  /**
+   * Structural fingerprint of `full[0..turns_offset)` as a fixed-width 16-hex
+   * string (a raw u64 JSON number would be rounded past 2^53-1). Compared on
+   * window refreshes to detect prefix rewrites (compaction), and used as the
+   * seed for client-side chain extension.
+   */
+  prefix_hash?: string | null
+  /**
+   * Max timestamp across `full[0..turns_offset)`; absent when the window
+   * covers the whole transcript. A background overlay turn may only be
+   * retired by the watermark rule when its timestamp is STRICTLY greater
+   * than this bound (its persisted twin is then provably inside the window).
+   */
+  uncovered_prefix_max_ts?: string | null
+}
+
+/** One page of older history for reverse infinite scroll:
+ *  `full[turns_offset .. turns_offset + turns.length)`. */
+export interface ConversationTurnsPage {
+  turns: MessageTurn[]
+  turns_offset: number
+  turns_total: number
+  assistant_turns_before_offset: number
+  /** H(0..turns_offset) — adopted as the window fingerprint after a prepend. */
+  prefix_hash: string
+  /** H(0..min(beforeIndex, total)) — must equal the client's current window
+   *  fingerprint for the page to legally join the loaded window. */
+  prefix_hash_before_index: string
+  uncovered_prefix_max_ts?: string | null
 }
 
 export type ConversationStatus =

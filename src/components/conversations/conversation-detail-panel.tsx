@@ -73,8 +73,10 @@ import {
   createChatConversation,
   createChatDir,
   createConversation,
+  getFolderConversation,
   openSettingsWindow,
 } from "@/lib/api"
+import { isWindowedDetail } from "@/lib/turn-window"
 import {
   flushRetryDelayMs,
   forkSendBlockedByQueue,
@@ -2151,22 +2153,31 @@ export function ConversationDetailPanel() {
     conversations
   )
 
-  const getExportData = useCallback(() => {
+  const getExportData = useCallback(async () => {
     if (!activeConversationTab?.conversationId) return null
     const session = getRuntimeSession(activeConversationTab.conversationId)
     if (!session?.detail) return null
+    let detail = session.detail
+    // The loaded detail may be a tail WINDOW (paginated loading); an export
+    // must cover the whole transcript, so fetch the legacy full response on
+    // demand. The window is full when it starts at offset 0.
+    if (isWindowedDetail(detail) && detail.turns_offset > 0) {
+      detail = await getFolderConversation(
+        session.dbConversationId ?? activeConversationTab.conversationId
+      )
+    }
     return {
-      summary: session.detail.summary,
-      turns: session.detail.turns,
-      sessionStats: session.detail.session_stats,
+      summary: detail.summary,
+      turns: detail.turns,
+      sessionStats: detail.session_stats,
       labels: exportLabels,
     }
   }, [activeConversationTab, exportLabels])
 
   const handleExportMarkdown = useCallback(async () => {
-    const data = getExportData()
-    if (!data) return
     try {
+      const data = await getExportData()
+      if (!data) return
       const result = await exportAsMarkdown(data)
       if (result === "saved") toast.success(t("exportSuccess"))
       // "cancelled": user dismissed the Save dialog — stay silent,
@@ -2178,9 +2189,9 @@ export function ConversationDetailPanel() {
   }, [getExportData, t])
 
   const handleExportHtml = useCallback(async () => {
-    const data = getExportData()
-    if (!data) return
     try {
+      const data = await getExportData()
+      if (!data) return
       const result = await exportAsHtml(data)
       if (result === "saved") toast.success(t("exportSuccess"))
     } catch (err) {
@@ -2190,12 +2201,15 @@ export function ConversationDetailPanel() {
   }, [getExportData, t])
 
   const handleExportImage = useCallback(async () => {
-    const data = getExportData()
-    if (!data) return
     const taskId = `export-image-${Date.now()}`
     addTask(taskId, t("exportImage"))
     updateTask(taskId, { status: "running" })
     try {
+      const data = await getExportData()
+      if (!data) {
+        updateTask(taskId, { status: "completed" })
+        return
+      }
       const result = await exportAsImage(data)
       updateTask(taskId, { status: "completed" })
       if (result === "saved") toast.success(t("exportSuccess"))

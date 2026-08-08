@@ -2817,6 +2817,8 @@
       "messageList": {
         "attachedResources": "الموارد المرفقة",
         "loading": "جارٍ التحميل...",
+        "loadEarlier": "تحميل الرسائل السابقة",
+        "loadingEarlier": "جارٍ تحميل الرسائل السابقة…",
         "error": "خطأ: {message}",
         "errorTitle": "فشل تحميل الجلسة",
         "errorActionReload": "إعادة تحميل",

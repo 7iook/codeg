@@ -2817,6 +2817,8 @@
       "messageList": {
         "attachedResources": "Recursos adjuntos",
         "loading": "Cargando...",
+        "loadEarlier": "Cargar mensajes anteriores",
+        "loadingEarlier": "Cargando mensajes anteriores…",
         "error": "Error del chat: {message}",
         "errorTitle": "Error al cargar la sesión",
         "errorActionReload": "Recargar",
