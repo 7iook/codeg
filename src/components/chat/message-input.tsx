@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
+import { isImeCompositionKey } from "@/lib/ime-composition"
 import { Button } from "@/components/ui/button"
 import {
   BookOpenText,
@@ -1235,7 +1236,7 @@ export function MessageInput({
   // lets normal editing proceed.
   const handleExternalMenuKeyDown = useCallback(
     (event: KeyboardEvent): boolean => {
-      if (event.isComposing) return false
+      if (isImeCompositionKey(event)) return false
       if (!slashMenuOpen || slashAutocompleteCount === 0) return false
       if (event.key === "ArrowDown") {
         setSlashSelectedIndex((i) =>
@@ -1285,7 +1286,7 @@ export function MessageInput({
   // (the editor handles that Escape to close the menu first).
   const handleContainerKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.nativeEvent.isComposing) return
+      if (isImeCompositionKey(e)) return
       if (
         isEditingQueueItem &&
         e.key === "Escape" &&

@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { DropdownRadioItemContent } from "@/components/chat/dropdown-radio-item-content"
 import { rankByTextMatch } from "@/lib/fuzzy-text-match"
+import { isImeCompositionKey } from "@/lib/ime-composition"
 import { cn } from "@/lib/utils"
 import type { AvailableCommandInfo } from "@/lib/types"
 
@@ -241,6 +242,9 @@ export function ComposerAddMenu({
                 value={slashSearch}
                 onChange={(e) => setSlashSearch(e.target.value)}
                 onKeyDown={(e) => {
+                  // Arrow/Enter belong to the IME while a CJK candidate is up,
+                  // not to this command list.
+                  if (isImeCompositionKey(e)) return
                   if (e.key === "ArrowDown") {
                     e.preventDefault()
                     const container = e.currentTarget.closest(

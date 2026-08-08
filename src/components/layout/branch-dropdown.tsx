@@ -60,6 +60,7 @@ import type {
 } from "@/lib/branch-selector-rows"
 import { useScrollbarSafeDismiss } from "@/hooks/use-scrollbar-safe-dismiss"
 import { useGitQuickActions } from "@/hooks/use-git-quick-actions"
+import { useImeGuard } from "@/hooks/use-ime-guard"
 import type { FolderDetail, GitBranchList } from "@/lib/types"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useTabActions } from "@/contexts/tab-context"
@@ -95,6 +96,7 @@ interface BranchDropdownProps {
 // machinery (git event subscriptions + dialogs).
 export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
   const t = useTranslations("Folder.branchDropdown")
+  const ime = useImeGuard()
   const tCommon = useTranslations("Folder.common")
   const activeFolder = folder
   const refreshFolder = useAppWorkspaceStore((s) => s.refreshFolder)
@@ -641,8 +643,9 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
             placeholder={t("dialogs.branchNamePlaceholder")}
             value={newBranchName}
             onChange={(e) => setNewBranchName(e.target.value)}
+            {...ime.props}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing || e.key === "Process") return
+              if (ime.isComposing(e)) return
               if (e.key === "Enter") handleNewBranch()
             }}
             autoFocus
@@ -677,8 +680,9 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
                 placeholder={t("dialogs.branchNamePlaceholder")}
                 value={worktreeBranchName}
                 onChange={(e) => setWorktreeBranchName(e.target.value)}
+                {...ime.props}
                 onKeyDown={(e) => {
-                  if (e.nativeEvent.isComposing || e.key === "Process") return
+                  if (ime.isComposing(e)) return
                   if (e.key === "Enter") handleNewWorktree()
                 }}
                 autoFocus

@@ -11,6 +11,7 @@ import {
 } from "react"
 import { Reorder, useDragControls } from "motion/react"
 import { useLocale, useTranslations } from "next-intl"
+import { useImeGuard } from "@/hooks/use-ime-guard"
 import { useSearchParams } from "next/navigation"
 import {
   AlertCircle,
@@ -3860,6 +3861,7 @@ function AgentReorderItem({
 }
 
 export function AcpAgentSettings() {
+  const ime = useImeGuard()
   const locale = useLocale()
   const t = useTranslations("AcpAgentSettings")
   const rawTranslator = t as unknown as AcpTranslator
@@ -9173,7 +9175,14 @@ supports_websockets = true`}
                                                             modelId
                                                           )
                                                         }}
+                                                        {...ime.props}
                                                         onKeyDown={(event) => {
+                                                          if (
+                                                            ime.isComposing(
+                                                              event
+                                                            )
+                                                          )
+                                                            return
                                                           if (
                                                             event.key ===
                                                             "Enter"
@@ -11458,7 +11467,9 @@ supports_websockets = true`}
               value={customVersionInput}
               placeholder={customInstallAgent?.registry_version ?? "1.0.0"}
               onChange={(e) => setCustomVersionInput(e.target.value)}
+              {...ime.props}
               onKeyDown={(e) => {
+                if (ime.isComposing(e)) return
                 if (
                   e.key === "Enter" &&
                   isValidCustomVersion(customVersionInput)

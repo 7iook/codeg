@@ -43,6 +43,7 @@ import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useTerminalContext } from "@/contexts/terminal-context"
 import { useThemeColor, useZoomLevel } from "@/hooks/use-appearance"
 import { useSortedAvailableAgents } from "@/hooks/use-sorted-available-agents"
+import { useImeGuard } from "@/hooks/use-ime-guard"
 import {
   openImportSessionsWindow,
   openProjectBootWindow,
@@ -271,6 +272,7 @@ const FolderHeader = memo(function FolderHeader({
   // returns a fresh `t` on every parent render, so passing it down would defeat
   // this component's memo and re-render every header on each status event.
   const t = useTranslations("Folder.sidebar")
+  const ime = useImeGuard()
   // Only flag a stale default once the live list is known; before fresh,
   // `availableAgents` is the localStorage seed and may legitimately omit a
   // newly-enabled agent.
@@ -675,8 +677,9 @@ const FolderHeader = memo(function FolderHeader({
           <Input
             value={aliasValue}
             onChange={(e) => setAliasValue(e.target.value)}
+            {...ime.props}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing || e.key === "Process") return
+              if (ime.isComposing(e)) return
               if (e.key === "Enter") confirmAlias()
             }}
             placeholder={t("folderHeaderMenu.setAliasPlaceholder")}

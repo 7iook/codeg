@@ -14,6 +14,7 @@ import { type Editor, type JSONContent } from "@tiptap/core"
 import { EditorContent, useEditor } from "@tiptap/react"
 import { exitSuggestion } from "@tiptap/suggestion"
 
+import { isImeCompositionKey } from "@/lib/ime-composition"
 import { matchShortcutEvent } from "@/lib/keyboard-shortcuts"
 import { cn } from "@/lib/utils"
 
@@ -326,6 +327,11 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
           ...(ariaLabel ? { "aria-label": ariaLabel } : {}),
         },
         handleKeyDown: (view, event) => {
+          // Mid-IME-composition every key belongs to the input method, so hand
+          // it straight back to the editor before any menu can claim it — the
+          // Enter that picks a CJK candidate must not select a slash command
+          // (`decideComposerKey` repeats this for the submit/newline path).
+          if (isImeCompositionKey(event) || view.composing) return false
           // The internal `@` panel's suggestion plugin owns its navigation keys;
           // never submit/break while it is open.
           if (mentionOpenRef.current) return false
