@@ -1248,6 +1248,8 @@
     "customAgentSkillsHint": "Déclare que cet agent lit le magasin partagé .agents/skills (répertoires global et projet) et l'ajoute à toutes les matrices de compétences. Les compétences qui y sont liées sont visibles par tous les agents qui lisent ce magasin partagé.",
     "customAgentSkillsDirLabel": "Répertoire de skills dédié",
     "customAgentSkillsDirHint": "Chemin absolu du répertoire depuis lequel cet agent charge ses skills — son propre magasin, en plus du magasin partagé ou à sa place. ~ est remplacé par le répertoire personnel ; les skills liées y sont placées en premier.",
+    "customAgentMcpLabel": "Prise en charge de MCP",
+    "customAgentMcpHint": "Transmet le compagnon MCP intégré de codeg à cet agent au démarrage de la session — le canal derrière la délégation, le retour en direct et les outils de tâches. Désactivez-le pour un agent qui refuse les serveurs MCP et ne parvient pas à se connecter ; le changement s'applique à la prochaine connexion.",
     "customAgentIconNotAnImage": "Choisissez un fichier image.",
     "customAgentIconTooLarge": "L'icône doit faire moins de {limit} Ko.",
     "customAgentIconReadFailed": "Impossible de lire cette image.",
@@ -2411,6 +2413,7 @@
         },
         "backendErrors": {
           "initializeTimeout": "Le handshake de connexion de {agent} a expiré (aucune réponse après 60 secondes). Ouvrez Paramètres pour vérifier la configuration de l'agent et du réseau.",
+          "mcpRejectedByAgent": "{agent} a refusé la session alors que le compagnon MCP de codeg était joint : {message} Si cet agent ne prend pas en charge MCP, désactivez « Prise en charge de MCP » dans les Paramètres puis reconnectez-vous.",
           "processExited": "Le processus {agent} s'est arrêté de manière inattendue.",
           "spawnFailed": "Impossible de démarrer {agent} : {message}",
           "downloadFailed": "Échec du téléchargement de {agent} : {message}",

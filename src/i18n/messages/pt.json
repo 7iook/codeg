@@ -1248,6 +1248,8 @@
     "customAgentSkillsHint": "Declara que este agente lê o repositório compartilhado .agents/skills (diretórios global e de projeto) e o adiciona a todas as matrizes de habilidades. Habilidades vinculadas lá ficam visíveis para todos os agentes que leem esse repositório compartilhado.",
     "customAgentSkillsDirLabel": "Diretório de skills dedicado",
     "customAgentSkillsDirHint": "Caminho absoluto do diretório de onde este agente carrega skills — o seu próprio repositório, além do compartilhado ou no lugar dele. ~ expande para o diretório pessoal; skills vinculadas são colocadas aqui primeiro.",
+    "customAgentMcpLabel": "Suporte a MCP",
+    "customAgentMcpHint": "Envia o companheiro MCP integrado do codeg para este agente ao iniciar a sessão — o canal por trás da delegação, do feedback ao vivo e das ferramentas de tarefas. Desative para um agente que rejeita servidores MCP e não consegue conectar; a mudança vale a partir da próxima conexão.",
     "customAgentIconNotAnImage": "Selecione um arquivo de imagem.",
     "customAgentIconTooLarge": "O ícone deve ter menos de {limit} KB.",
     "customAgentIconReadFailed": "Não foi possível ler essa imagem.",
@@ -2411,6 +2413,7 @@
         },
         "backendErrors": {
           "initializeTimeout": "O handshake de conexão de {agent} expirou (sem resposta após 60 segundos). Abra Configurações para verificar a configuração do agente e da rede.",
+          "mcpRejectedByAgent": "{agent} recusou a sessão com o companheiro MCP do codeg anexado: {message} Se este agente não suporta MCP, desative “Suporte a MCP” nas Configurações e conecte novamente.",
           "processExited": "O processo de {agent} encerrou inesperadamente.",
           "spawnFailed": "Falha ao iniciar {agent}: {message}",
           "downloadFailed": "Falha no download de {agent}: {message}",

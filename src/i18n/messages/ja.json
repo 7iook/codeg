@@ -1248,6 +1248,8 @@
     "customAgentSkillsHint": "このエージェントが共有の .agents/skills ディレクトリ（グローバルおよびプロジェクト）を読み取ることを宣言し、すべてのスキルマトリクスに追加します。共有ディレクトリにリンクしたスキルは、同じディレクトリを読むほかのエージェントからも見えます。",
     "customAgentSkillsDirLabel": "専用スキルディレクトリ",
     "customAgentSkillsDirHint": "このエージェントがスキルを読み込むディレクトリの絶対パスです。共有ストアと併用も単独利用も可能です。~ はホームディレクトリに展開され、リンクしたスキルはまずここに配置されます。",
+    "customAgentMcpLabel": "MCP サポート",
+    "customAgentMcpHint": "セッション開始時に codeg 内蔵の codeg-mcp コンパニオンをこのエージェントへ渡します。委任・リアルタイムフィードバック・タスクツールはこの経路を使います。MCP サーバーを受け付けず接続に失敗するエージェントではオフにしてください。設定は次回の接続から有効になります。",
     "customAgentIconNotAnImage": "画像ファイルを選んでください。",
     "customAgentIconTooLarge": "アイコンは {limit} KB 未満にしてください。",
     "customAgentIconReadFailed": "その画像を読み込めませんでした。",
@@ -2411,6 +2413,7 @@
         },
         "backendErrors": {
           "initializeTimeout": "{agent} の接続ハンドシェイクがタイムアウトしました（60 秒以内に応答なし）。設定を開いてエージェントとネットワーク設定を確認してください。",
+          "mcpRejectedByAgent": "codeg の MCP コンパニオンを渡した際、{agent} がセッションを拒否しました: {message} このエージェントが MCP に対応していない場合は、設定で「MCP サポート」をオフにして再接続してください。",
           "processExited": "{agent} プロセスが予期せず終了しました。",
           "spawnFailed": "{agent} の起動に失敗しました: {message}",
           "downloadFailed": "{agent} のダウンロードに失敗しました: {message}",

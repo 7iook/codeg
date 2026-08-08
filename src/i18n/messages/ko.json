@@ -1248,6 +1248,8 @@
     "customAgentSkillsHint": "이 에이전트가 공유 .agents/skills 디렉터리(전역 및 프로젝트)를 읽는다고 선언하고 모든 스킬 매트릭스에 추가합니다. 공유 디렉터리에 연결된 스킬은 해당 디렉터리를 읽는 다른 에이전트에게도 보입니다.",
     "customAgentSkillsDirLabel": "전용 스킬 디렉터리",
     "customAgentSkillsDirHint": "이 에이전트가 스킬을 불러오는 디렉터리의 절대 경로입니다. 공유 저장소와 함께 또는 단독으로 사용할 수 있습니다. ~ 는 홈 디렉터리로 확장되며, 연결된 스킬은 이 디렉터리에 우선 배치됩니다.",
+    "customAgentMcpLabel": "MCP 지원",
+    "customAgentMcpHint": "세션을 시작할 때 codeg 내장 codeg-mcp 동반 프로세스를 이 에이전트에 전달합니다. 위임, 실시간 피드백, 작업 도구가 이 채널을 사용합니다. MCP 서버를 거부해 연결에 실패하는 에이전트라면 꺼 두세요. 변경은 다음 연결부터 적용됩니다.",
     "customAgentIconNotAnImage": "이미지 파일을 선택하세요.",
     "customAgentIconTooLarge": "아이콘은 {limit} KB 미만이어야 합니다.",
     "customAgentIconReadFailed": "해당 이미지를 읽을 수 없습니다.",
@@ -2411,6 +2413,7 @@
         },
         "backendErrors": {
           "initializeTimeout": "{agent} 연결 핸드셰이크가 시간 초과되었습니다(60초 동안 응답 없음). 설정을 열어 에이전트 및 네트워크 구성을 확인하세요.",
+          "mcpRejectedByAgent": "codeg의 MCP 동반 프로세스를 전달하는 동안 {agent}이(가) 세션을 거부했습니다: {message} 이 에이전트가 MCP를 지원하지 않는다면 설정에서 ‘MCP 지원’을 끄고 다시 연결하세요.",
           "processExited": "{agent} 프로세스가 예기치 않게 종료되었습니다.",
           "spawnFailed": "{agent} 시작 실패: {message}",
           "downloadFailed": "{agent} 다운로드 실패: {message}",

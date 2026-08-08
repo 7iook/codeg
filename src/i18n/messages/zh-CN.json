@@ -1248,6 +1248,8 @@
     "customAgentSkillsHint": "声明该智能体会读取共享的 .agents/skills 目录（全局与项目级），并将其加入所有技能矩阵。链接到共享目录的技能对读取该目录的其他智能体同样可见。",
     "customAgentSkillsDirLabel": "专属技能目录",
     "customAgentSkillsDirHint": "该智能体自身加载技能的目录绝对路径 —— 可与共享目录并存，也可单独使用。~ 会展开为主目录；链接技能时优先放入此目录。",
+    "customAgentMcpLabel": "MCP 支持",
+    "customAgentMcpHint": "会话建立时向该智能体注入 codeg 内置的 codeg-mcp 伴生进程 —— 委托、实时反馈与任务工具都依赖它。若该智能体不支持 MCP、连接时报错，请关闭此项；设置在下次连接时生效。",
     "customAgentIconNotAnImage": "请选择图片文件。",
     "customAgentIconTooLarge": "图标需小于 {limit} KB。",
     "customAgentIconReadFailed": "无法读取该图片。",
@@ -2411,6 +2413,7 @@
         },
         "backendErrors": {
           "initializeTimeout": "{agent} 连接握手超时（60 秒未响应），请前往设置页面检查智能体和网络配置。",
+          "mcpRejectedByAgent": "附带 codeg 的 MCP 伴生进程时，{agent} 拒绝了本次会话：{message} 如果该智能体不支持 MCP，请在设置中关闭它的“MCP 支持”后重新连接。",
           "processExited": "{agent} 进程意外退出。",
           "spawnFailed": "启动 {agent} 失败：{message}",
           "downloadFailed": "{agent} 下载失败：{message}",

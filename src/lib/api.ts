@@ -838,6 +838,13 @@ export interface CustomAgentInfo {
   source: string
   /** Optional command that prints the locally installed version. */
   versionProbe: string | null
+  /**
+   * User declaration that the agent accepts MCP servers on the ACP wire —
+   * for a custom agent, codeg's built-in codeg-mcp companion. Off means the
+   * connection is made without it, for agents that fail `session/new` when
+   * any server is sent.
+   */
+  supportsMcp: boolean
   /** False when the definition cannot launch here (e.g. no build for this OS). */
   launchable: boolean
   problem: string | null
@@ -883,8 +890,64 @@ export async function acpSaveCustomAgent(params: {
   source?: string
   /** Optional version-probe command; full-replace like the skills fields. */
   versionProbe?: string | null
+  /**
+   * MCP declaration. Omitted = the backend keeps the stored row's value (or
+   * on, for a new row) — the safe default here is what is already stored.
+   */
+  supportsMcp?: boolean
 }): Promise<void> {
   return getTransport().call("acp_save_custom_agent", { params })
+}
+
+/**
+ * Change ONE declaration on a stored custom-agent definition.
+ *
+ * `acp_save_custom_agent` is a full replace: a declaration the payload leaves
+ * out is cleared, not kept — so a caller that edits one field has to send every
+ * other field back. That makes the payload only as fresh as whatever the caller
+ * is holding, and the settings page renders several independent cards over the
+ * SAME definition, each loaded once on mount. Sending a card's own snapshot
+ * therefore lets it revert a save another card made after it mounted (turn MCP
+ * off in one card, flip a skills switch in the other, and MCP comes back on).
+ *
+ * So the definition is re-read here, immediately before the write, and the
+ * patch is applied to THAT. Callers pass only what they are actually changing,
+ * and a stale card cannot resurrect a value it never showed. The remaining
+ * window is read-to-write, which is as narrow as this gets without a
+ * compare-and-swap on the backend.
+ */
+export async function acpPatchCustomAgent(
+  registryId: string,
+  patch: Partial<
+    Pick<
+      CustomAgentInfo,
+      "skillsSharedStore" | "skillsDir" | "supportsMcp" | "versionProbe"
+    >
+  >
+): Promise<void> {
+  const current = (await acpListCustomAgents()).find(
+    (a) => a.registryId === registryId
+  )
+  if (!current) {
+    // Deleted from another window while this card was open. Failing is right:
+    // saving would re-create the definition the user just removed.
+    throw new Error(`Custom agent ${registryId} no longer exists`)
+  }
+  return acpSaveCustomAgent({
+    registryId: current.registryId,
+    name: current.name,
+    description: current.description,
+    version: current.version,
+    distributionKind: current.distributionKind as CustomDistributionKind,
+    spec: current.spec,
+    iconUrl: current.iconUrl,
+    source: current.source,
+    skillsSharedStore: current.skillsSharedStore,
+    skillsDir: current.skillsDir,
+    supportsMcp: current.supportsMcp,
+    versionProbe: current.versionProbe,
+    ...patch,
+  })
 }
 
 export async function acpDeleteCustomAgent(

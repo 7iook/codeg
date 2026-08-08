@@ -930,12 +930,6 @@ mod tests {
         );
     }
 
-    // OpenClaw rejects MCP server entries inside `mcpServers` (the empty `[]`
-    // field is still serialized and tolerated) and fails session/new on any
-    // entry, so it must be the only agent with `supports_mcp == false`. Every
-    // other agent (current and future) keeps it `true`. Iterating the full
-    // registry means a newly-added agent that wrongly opts out — or a
-    // regression flipping OpenClaw back on — trips this assert.
     // Only Claude Code and Codex ship as a third-party ACP adapter wrapping a
     // vendor CLI of a different name. Every other agent's registry `cmd` IS the
     // vendor CLI, so claiming an adapter relation for one would make preflight
@@ -963,9 +957,18 @@ mod tests {
         }
     }
 
+    // OpenClaw rejects MCP server entries inside `mcpServers` (the empty `[]`
+    // field is still serialized and tolerated) and fails session/new on any
+    // entry, so it must be the only BUILT-IN with `supports_mcp == false`.
+    // Every other built-in (current and future) keeps it `true`, so a newly
+    // added agent that wrongly opts out — or a regression flipping OpenClaw
+    // back on — trips this assert. Custom agents are deliberately out of
+    // scope: their flag is a stored, user-set declaration
+    // (`CustomAgentDef::supports_mcp`), so a registry hydrated by another test
+    // may legitimately hold an opted-out one.
     #[test]
-    fn only_openclaw_opts_out_of_mcp() {
-        for agent_type in all_acp_agents() {
+    fn only_builtin_openclaw_opts_out_of_mcp() {
+        for agent_type in builtin_acp_agents() {
             let meta = get_agent_meta(agent_type);
             assert_eq!(
                 meta.supports_mcp,

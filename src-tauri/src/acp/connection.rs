@@ -296,6 +296,48 @@ pub enum ConnectionCommand {
 /// by the outer `.map_err(...)` in `run_connection`.
 const INIT_TIMEOUT_SENTINEL: &str = "__codeg_init_timeout__";
 
+/// Sentinel appended to a `session/new` failure when codeg had just forwarded
+/// MCP servers to a *custom* agent, so the outer `.map_err(...)` can raise
+/// `AcpError::McpRejectedByAgent` and point the user at the `supports_mcp`
+/// switch. Same trick as [`INIT_TIMEOUT_SENTINEL`] — the inner future is typed
+/// to `sacp::Error`, which has nowhere to carry a codeg error kind.
+const MCP_SUSPECT_SENTINEL: &str = "__codeg_mcp_suspect__";
+
+/// Mark a `session/new` failure as possibly caused by the MCP servers codeg put
+/// on the wire.
+///
+/// Restricted to custom agents on purpose. A built-in's `supports_mcp` is a
+/// repository constant already verified against the real agent, so blaming MCP
+/// there would send the user chasing a switch that isn't wrong (and that they
+/// cannot flip). A custom agent's is a user declaration about a binary codeg
+/// knows nothing about — the case this hint is for. An empty list rules MCP out
+/// entirely, since then nothing was forwarded to reject.
+fn tag_mcp_suspect(
+    err: sacp::Error,
+    agent_type: AgentType,
+    mcp_servers: &[McpServer],
+) -> sacp::Error {
+    if mcp_servers.is_empty() || !matches!(agent_type, AgentType::Custom(_)) {
+        return err;
+    }
+    // Also log it. The coded error reaches the desktop webview through the
+    // global `acp://event` emit, but a web/remote client that has not attached
+    // yet never sees it — the connection is removed from the manager map as
+    // soon as this task unwinds, so there is no state left to snapshot. That
+    // loss is not specific to this hint (it costs `initialize_timeout`,
+    // `spawn_failed` and every protocol error just the same), and repairing it
+    // means changing how long terminal connections are retained. Until then the
+    // log is the one channel that survives on every transport.
+    tracing::warn!(
+        "[ACP][{}] session/new failed with {} MCP server(s) attached; if this agent \
+         does not accept MCP, turn off \"MCP support\" for it in settings: {}",
+        agent_type,
+        mcp_servers.len(),
+        err
+    );
+    sacp::util::internal_error(format!("{err}{MCP_SUSPECT_SENTINEL}"))
+}
+
 /// RAII guard that removes the `AgentConnection` entry from the manager
 /// map when dropped. Runs on both normal task exit AND task panic, so a
 /// panic inside `run_connection` can't leak a stale map entry.
@@ -3408,7 +3450,11 @@ async fn run_connection(
             // (`session/new`'s `mcpServers`). Almost all do; OpenClaw rejects
             // any server entry and fails session creation, so it must receive
             // NONE — neither user-configured servers nor the built-in codeg-mcp
-            // companion. (The `mcpServers` key itself is always serialized as
+            // companion. A custom agent carries the same flag as a stored
+            // declaration the user flips in settings, for the same reason:
+            // codeg cannot know whether an arbitrary ACP agent tolerates the
+            // field, and one that doesn't fails to connect at all until it is
+            // turned off. (The `mcpServers` key itself is always serialized as
             // `[]` by the ACP schema and OpenClaw tolerates the empty list; the
             // gate only guarantees the list stays empty for it.) This is the
             // single chokepoint feeding session/new, session/load, and the
@@ -3929,7 +3975,8 @@ async fn run_connection(
                             agent_type,
                             build_new_session_request(agent_type, &cwd, mcp_servers.clone()),
                         )
-                        .await?;
+                        .await
+                        .map_err(|e| tag_mcp_suspect(e, agent_type, &mcp_servers))?;
                         let fallback_sid = new_resp.session_id.0.to_string();
                         let initial_config_options = new_resp.config_options.clone();
                         let grok_meta = if agent_type == AgentType::Grok {
@@ -4018,7 +4065,8 @@ async fn run_connection(
                     agent_type,
                     build_new_session_request(agent_type, &cwd, mcp_servers.clone()),
                 )
-                .await?;
+                .await
+                .map_err(|e| tag_mcp_suspect(e, agent_type, &mcp_servers))?;
                 let sid = new_resp.session_id.0.to_string();
                 let initial_config_options = new_resp.config_options.clone();
                 let grok_meta = if agent_type == AgentType::Grok {
@@ -4095,6 +4143,10 @@ async fn run_connection(
             let raw = e.to_string();
             if raw.contains(INIT_TIMEOUT_SENTINEL) {
                 AcpError::InitializeTimeout
+            } else if raw.contains(MCP_SUSPECT_SENTINEL) {
+                // Strip the marker so the user sees the agent's own words, then
+                // let the frontend append the `supports_mcp` suggestion.
+                AcpError::mcp_rejected(raw.replace(MCP_SUSPECT_SENTINEL, ""))
             } else {
                 AcpError::protocol(raw)
             }
@@ -9984,6 +10036,79 @@ mod tests {
         );
     }
 
+    fn stdio_server(name: &str) -> McpServer {
+        McpServer::Stdio(McpServerStdio::new(
+            name,
+            std::path::PathBuf::from("/usr/local/bin/node"),
+        ))
+    }
+
+    // The `supports_mcp` hint fires only where the declaration could actually
+    // be wrong: a custom agent that was handed server entries.
+    #[test]
+    fn mcp_suspect_tags_only_custom_agents_with_servers() {
+        let servers = vec![stdio_server("codeg")];
+
+        let tagged = tag_mcp_suspect(
+            sacp::util::internal_error("session/new failed: unknown field `mcpServers`"),
+            AgentType::Custom("my-agent"),
+            &servers,
+        );
+        assert!(
+            tagged.to_string().contains(MCP_SUSPECT_SENTINEL),
+            "a custom agent that received MCP servers must be tagged"
+        );
+
+        // Nothing was forwarded, so MCP cannot be the cause.
+        let empty = tag_mcp_suspect(
+            sacp::util::internal_error("session/new failed: boom"),
+            AgentType::Custom("my-agent"),
+            &[],
+        );
+        assert!(
+            !empty.to_string().contains(MCP_SUSPECT_SENTINEL),
+            "an empty server list rules MCP out"
+        );
+
+        // A built-in's flag is a verified repository constant, and the user has
+        // no switch to flip — blaming MCP would misdirect them.
+        let builtin = tag_mcp_suspect(
+            sacp::util::internal_error("session/new failed: boom"),
+            AgentType::ClaudeCode,
+            &servers,
+        );
+        assert!(
+            !builtin.to_string().contains(MCP_SUSPECT_SENTINEL),
+            "built-in agents must never be tagged"
+        );
+    }
+
+    // The sentinel is a transport detail: it must be consumed by the
+    // translation, never shown. This mirrors the `.map_err` in
+    // `run_connection`, which cannot be called directly from a unit test.
+    #[test]
+    fn mcp_suspect_sentinel_translates_to_code_and_is_stripped() {
+        let raw = tag_mcp_suspect(
+            sacp::util::internal_error("Unsupported parameter: mcpServers"),
+            AgentType::Custom("my-agent"),
+            &[stdio_server("codeg")],
+        )
+        .to_string();
+
+        let err = AcpError::mcp_rejected(raw.replace(MCP_SUSPECT_SENTINEL, ""));
+
+        assert_eq!(err.code(), Some("mcp_rejected_by_agent"));
+        let shown = err.to_string();
+        assert!(
+            shown.contains("Unsupported parameter: mcpServers"),
+            "the agent's own message must survive: {shown}"
+        );
+        assert!(
+            !shown.contains(MCP_SUSPECT_SENTINEL),
+            "the sentinel must never reach the user: {shown}"
+        );
+    }
+
     #[test]
     fn build_resume_session_request_sets_claude_raw_meta() {
         let cwd = std::path::PathBuf::from("/tmp/codeg");
@@ -11867,6 +11992,7 @@ mod tests {
             skills_dir: None,
             source: Default::default(),
             version_probe: None,
+            supports_mcp: true,
         };
         assert!(hydrate(&[def("delegate-on"), def("delegate-off")]).is_empty());
 

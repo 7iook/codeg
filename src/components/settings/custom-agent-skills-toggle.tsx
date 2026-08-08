@@ -25,9 +25,8 @@ import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import {
   acpListCustomAgents,
-  acpSaveCustomAgent,
+  acpPatchCustomAgent,
   type CustomAgentInfo,
-  type CustomDistributionKind,
 } from "@/lib/api"
 
 interface CustomAgentSkillsToggleProps {
@@ -66,46 +65,22 @@ export function CustomAgentSkillsToggle({
     }
   }, [registryId])
 
-  // One save path for both declarations, always sending the full definition —
-  // a save that dropped either field would silently erase the other choice.
-  const saveDeclarations = useCallback(
-    async (
-      current: CustomAgentInfo,
-      next: { skillsSharedStore: boolean; skillsDir: string | null }
-    ) => {
-      await acpSaveCustomAgent({
-        registryId: current.registryId,
-        name: current.name,
-        description: current.description,
-        version: current.version,
-        distributionKind: current.distributionKind as CustomDistributionKind,
-        spec: current.spec,
-        iconUrl: current.iconUrl,
-        // Whole-definition re-save: every field must ride along, or this
-        // card would silently reset it (provenance and the version probe
-        // included).
-        source: current.source,
-        versionProbe: current.versionProbe,
-        ...next,
-      })
-    },
-    []
-  )
-
+  // Each handler patches ONLY the declaration it owns. `acpPatchCustomAgent`
+  // re-reads the definition and carries the rest across, so this card can
+  // neither reset a field it does not show (provenance, the version probe, the
+  // MCP declaration) nor revert one the MCP card changed after this one
+  // mounted. The switch and the directory are separate patches for the same
+  // reason: flipping the switch must not commit a path the user is mid-way
+  // through typing, and saving a path must not resend a stale switch.
   const handleToggle = useCallback(
     async (next: boolean) => {
       if (!info) return
       setSaving(true)
       // Optimistic: the switch reflects the target state while the save runs
-      // and snaps back on failure. The directory rides along unchanged, from
-      // its saved value — not the draft — so flipping the switch can never
-      // commit a path the user was still typing.
+      // and snaps back on failure.
       setInfo({ ...info, skillsSharedStore: next })
       try {
-        await saveDeclarations(info, {
-          skillsSharedStore: next,
-          skillsDir: info.skillsDir,
-        })
+        await acpPatchCustomAgent(info.registryId, { skillsSharedStore: next })
       } catch (err) {
         if (mountedRef.current) {
           setInfo({ ...info, skillsSharedStore: !next })
@@ -115,7 +90,7 @@ export function CustomAgentSkillsToggle({
         if (mountedRef.current) setSaving(false)
       }
     },
-    [info, saveDeclarations]
+    [info]
   )
 
   const handleSaveDir = useCallback(async () => {
@@ -123,10 +98,7 @@ export function CustomAgentSkillsToggle({
     const next = dirDraft.trim() || null
     setSaving(true)
     try {
-      await saveDeclarations(info, {
-        skillsSharedStore: info.skillsSharedStore,
-        skillsDir: next,
-      })
+      await acpPatchCustomAgent(info.registryId, { skillsDir: next })
       // The backend may have normalized the path (`~` expansion); re-read so
       // the card shows what was actually stored.
       const list = await acpListCustomAgents()
@@ -141,7 +113,7 @@ export function CustomAgentSkillsToggle({
     } finally {
       if (mountedRef.current) setSaving(false)
     }
-  }, [dirDraft, info, saveDeclarations])
+  }, [dirDraft, info])
 
   if (!info) return null
 

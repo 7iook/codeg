@@ -1248,6 +1248,8 @@
     "customAgentSkillsHint": "聲明該智能體會讀取共享的 .agents/skills 目錄（全域與專案級），並將其加入所有技能矩陣。連結到共享目錄的技能對讀取該目錄的其他智能體同樣可見。",
     "customAgentSkillsDirLabel": "專屬技能目錄",
     "customAgentSkillsDirHint": "該智慧體自身載入技能的目錄絕對路徑 —— 可與共享目錄並存，也可單獨使用。~ 會展開為主目錄；連結技能時優先放入此目錄。",
+    "customAgentMcpLabel": "MCP 支援",
+    "customAgentMcpHint": "工作階段建立時向該智慧體注入 codeg 內建的 codeg-mcp 伴生行程 —— 委派、即時回饋與任務工具都依賴它。若該智慧體不支援 MCP、連線時報錯，請關閉此項；設定會在下次連線時生效。",
     "customAgentIconNotAnImage": "請選擇圖片檔案。",
     "customAgentIconTooLarge": "圖示需小於 {limit} KB。",
     "customAgentIconReadFailed": "無法讀取該圖片。",
@@ -2411,6 +2413,7 @@
         },
         "backendErrors": {
           "initializeTimeout": "{agent} 連線交握逾時（60 秒未回應），請前往設定頁面檢查智能體與網路設定。",
+          "mcpRejectedByAgent": "附帶 codeg 的 MCP 伴生程序時，{agent} 拒絕了本次會話：{message} 如果該智能體不支援 MCP，請在設定中關閉它的「MCP 支援」後重新連線。",
           "processExited": "{agent} 處理程序意外結束。",
           "spawnFailed": "啟動 {agent} 失敗：{message}",
           "downloadFailed": "{agent} 下載失敗：{message}",

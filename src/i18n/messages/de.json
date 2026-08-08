@@ -1248,6 +1248,8 @@
     "customAgentSkillsHint": "Erklärt, dass dieser Agent den gemeinsamen .agents/skills-Speicher liest (globale und Projekt-Verzeichnisse), und nimmt ihn in alle Skill-Matrizen auf. Dort verknüpfte Skills sind für alle Agenten sichtbar, die diesen Speicher lesen.",
     "customAgentSkillsDirLabel": "Dediziertes Skills-Verzeichnis",
     "customAgentSkillsDirHint": "Absoluter Pfad des Verzeichnisses, aus dem dieser Agent Skills lädt — sein eigener Speicher, zusätzlich zum geteilten oder an dessen Stelle. ~ wird zum Home-Verzeichnis erweitert; verknüpfte Skills landen zuerst hier.",
+    "customAgentMcpLabel": "MCP-Unterstützung",
+    "customAgentMcpHint": "Übergibt den in codeg integrierten MCP-Begleitprozess beim Sitzungsstart an diesen Agenten — der Kanal hinter Delegation, Live-Feedback und Aufgaben-Tools. Für einen Agenten, der MCP-Server ablehnt und deshalb keine Verbindung aufbaut, ausschalten; die Änderung gilt ab der nächsten Verbindung.",
     "customAgentIconNotAnImage": "Bitte eine Bilddatei auswählen.",
     "customAgentIconTooLarge": "Das Symbol muss kleiner als {limit} KB sein.",
     "customAgentIconReadFailed": "Dieses Bild konnte nicht gelesen werden.",
@@ -2411,6 +2413,7 @@
         },
         "backendErrors": {
           "initializeTimeout": "Der Verbindungs-Handshake von {agent} hat nach 60 Sekunden das Zeitlimit überschritten. Öffnen Sie die Einstellungen, um Agenten- und Netzwerkkonfiguration zu prüfen.",
+          "mcpRejectedByAgent": "{agent} hat die Sitzung abgelehnt, während codegs MCP-Begleitprozess angehängt war: {message} Falls dieser Agent MCP nicht unterstützt, deaktivieren Sie „MCP-Unterstützung“ in den Einstellungen und verbinden Sie erneut.",
           "processExited": "{agent}-Prozess wurde unerwartet beendet.",
           "spawnFailed": "{agent} konnte nicht gestartet werden: {message}",
           "downloadFailed": "{agent}-Download fehlgeschlagen: {message}",

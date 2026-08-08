@@ -46,6 +46,7 @@ import {
 } from "@/lib/custom-agents"
 import { AgentIcon } from "@/components/agent-icon"
 import { AddCustomAgentDialog } from "@/components/settings/add-custom-agent-dialog"
+import { CustomAgentMcpToggle } from "@/components/settings/custom-agent-mcp-toggle"
 import { CustomAgentSkillsToggle } from "@/components/settings/custom-agent-skills-toggle"
 import {
   AlertDialog,
@@ -10676,6 +10677,9 @@ supports_websockets = true`}
                       </Button>
                     </div>
                     <CustomAgentSkillsToggle
+                      registryId={customAgentId(selectedAgent.agent_type) ?? ""}
+                    />
+                    <CustomAgentMcpToggle
                       registryId={customAgentId(selectedAgent.agent_type) ?? ""}
                     />
                     <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/5 p-3">

@@ -241,6 +241,10 @@ export function AddCustomAgentDialog({
   const [manualSkills, setManualSkills] = useState(false)
   const [manualSkillsDir, setManualSkillsDir] = useState("")
   const [manualVersionProbe, setManualVersionProbe] = useState("")
+  // Whether codeg may put MCP servers (its codeg-mcp companion) on the ACP
+  // wire for this agent. On by default — the value almost every agent works
+  // with, and the one a new definition should start from.
+  const [manualSupportsMcp, setManualSupportsMcp] = useState(true)
   // Provenance of the definition being edited ("registry" | "manual"),
   // carried through the save so an edit never rewrites where the definition
   // came from. Null until the edit prefill lands (and always in add mode).
@@ -298,6 +302,7 @@ export function AddCustomAgentDialog({
         setManualSkills(found.skillsSharedStore)
         setManualSkillsDir(found.skillsDir ?? "")
         setManualVersionProbe(found.versionProbe ?? "")
+        setManualSupportsMcp(found.supportsMcp)
         setEditSource(found.source)
       })
       .catch((err) => {
@@ -333,6 +338,7 @@ export function AddCustomAgentDialog({
     setManualSkills(false)
     setManualSkillsDir("")
     setManualVersionProbe("")
+    setManualSupportsMcp(true)
     setEditSource(null)
   }, [open])
 
@@ -439,6 +445,7 @@ export function AddCustomAgentDialog({
         // IS the manual provenance.
         source: editing ? (editSource ?? undefined) : "manual",
         versionProbe: manualVersionProbe.trim() || null,
+        supportsMcp: manualSupportsMcp,
       })
       toast.success(
         editing
@@ -462,6 +469,7 @@ export function AddCustomAgentDialog({
     manualSkills,
     manualSkillsDir,
     manualVersionProbe,
+    manualSupportsMcp,
     editing,
     editSource,
     onAdded,
@@ -809,6 +817,23 @@ export function AddCustomAgentDialog({
               <p className="text-[11px] text-muted-foreground">
                 {t("customAgentSkillsDirHint")}
               </p>
+            </div>
+
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id="custom-agent-mcp"
+                checked={manualSupportsMcp}
+                onCheckedChange={(v) => setManualSupportsMcp(v === true)}
+                className="mt-0.5"
+              />
+              <div className="space-y-0.5">
+                <Label htmlFor="custom-agent-mcp" className="text-xs">
+                  {t("customAgentMcpLabel")}
+                </Label>
+                <p className="text-[11px] text-muted-foreground">
+                  {t("customAgentMcpHint")}
+                </p>
+              </div>
             </div>
 
             <div className="space-y-1">
