@@ -174,6 +174,7 @@ export function CustomStyleSection() {
   const { shortcuts } = useShortcutSettings()
   const isMac = useIsMac()
 
+  const [expanded, setExpanded] = useState(false)
   const [cssDialogOpen, setCssDialogOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [importDraft, setImportDraft] = useState("")
@@ -186,8 +187,9 @@ export function CustomStyleSection() {
 
   // 生效值要在 AppearanceProvider 把覆盖写进 DOM **之后**再读。Provider 是父级，
   // 它的 effect 晚于本组件的 effect 运行，所以这里必须让到下一帧，否则读到的是上
-  // 一轮的值（色板会慢一拍）。
+  // 一轮的值（色板会慢一拍）。折叠期间没人看这些取值，索性不去读样式表。
   useEffect(() => {
+    if (!expanded) return
     const frame = requestAnimationFrame(() => {
       const next: Record<string, string> = {}
       for (const token of CUSTOM_THEME_TOKENS) {
@@ -197,6 +199,7 @@ export function CustomStyleSection() {
     })
     return () => cancelAnimationFrame(frame)
   }, [
+    expanded,
     customTheme,
     isDarkMode,
     themeColor,
@@ -244,6 +247,28 @@ export function CustomStyleSection() {
     [shortcuts.toggle_custom_style, isMac, t]
   )
 
+  // 折叠起来之后，标题行是唯一能看出「这里到底改了什么」的地方，所以把当前状态
+  // 压成一句摘要放在右侧。
+  const summary = useMemo(() => {
+    if (customStyleSuppressed) return t("customStyle.summarySuspended")
+    const parts: string[] = []
+    const count = Object.keys(overrides).length
+    if (customThemeEnabled && count > 0) {
+      parts.push(t("customStyle.summaryTokens", { count }))
+    }
+    if (customCssEnabled && customCss) parts.push(t("customStyle.summaryCss"))
+    return parts.length > 0
+      ? parts.join(" · ")
+      : t("customStyle.summaryDefault")
+  }, [
+    customStyleSuppressed,
+    customThemeEnabled,
+    customCssEnabled,
+    customCss,
+    overrides,
+    t,
+  ])
+
   const themeDisabled = !customThemeEnabled || customStyleSuppressed
   const fieldLabel = "text-xs font-medium text-muted-foreground"
 
@@ -263,220 +288,265 @@ export function CustomStyleSection() {
       ))
 
   return (
-    <section className="rounded-xl border bg-card p-4 space-y-4">
-      <div className="flex items-center gap-2">
-        <Palette className="h-4 w-4 text-muted-foreground" />
+    <Collapsible
+      open={expanded}
+      onOpenChange={setExpanded}
+      className="overflow-hidden rounded-xl border bg-card"
+      asChild
+    >
+      <section>
+        {/* 按钮套在 h2 里（而不是 h2 套在按钮里）：role=button 会把后代语义压平，
+            标题就从设置页的标题列表里消失了。这里标题行没有嵌套的可交互元素，用原
+            生 button 即可，回车/空格也不用自己接。 */}
         <h2 className="text-sm font-semibold">
-          {t("customStyle.sectionTitle")}
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="group/custom-style-toggle flex w-full flex-wrap items-center justify-between gap-3 border-b border-transparent p-4 text-left transition-colors hover:bg-muted/50 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50 data-[state=open]:border-border"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <Palette className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {t("customStyle.sectionTitle")}
+                <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]/custom-style-toggle:rotate-180" />
+              </span>
+              <span
+                className={cn(
+                  "truncate text-[11px] font-normal text-muted-foreground",
+                  customStyleSuppressed && "text-foreground"
+                )}
+              >
+                {summary}
+              </span>
+            </button>
+          </CollapsibleTrigger>
         </h2>
-      </div>
 
-      <p className="text-xs text-muted-foreground leading-5">
-        {t("customStyle.sectionDescription")}
-      </p>
+        {/* ===== 逃生舱状态横幅 =====
+            留在折叠区外面：自定义 CSS 把界面弄坏之后，用户就是靠这里的「恢复」
+            按钮救回来的，藏进折叠区等于把逃生舱本身锁上了。 */}
+        {customStyleSuppressed && (
+          // 折叠时上方留白由标题行的 p-4 提供；展开时标题行多出一条分隔线，得自己补。
+          <div className={cn("px-4 pb-4", expanded && "pt-4")}>
+            <div className="flex items-start gap-2 rounded-md border border-dashed bg-muted/40 p-3">
+              <ShieldAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground leading-5">
+                  {safeStyleRequested
+                    ? t("customStyle.suspendedBySafeParam")
+                    : t("customStyle.suspendedByShortcut")}
+                </p>
+                {!safeStyleRequested && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCustomStyleSuspended(false)}
+                  >
+                    {t("customStyle.resume")}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
-      {/* ===== 逃生舱状态横幅 ===== */}
-      {customStyleSuppressed && (
-        <div className="flex items-start gap-2 rounded-md border border-dashed bg-muted/40 p-3">
-          <ShieldAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-          <div className="space-y-1.5">
-            <p className="text-xs text-muted-foreground leading-5">
-              {safeStyleRequested
-                ? t("customStyle.suspendedBySafeParam")
-                : t("customStyle.suspendedByShortcut")}
+        <CollapsibleContent
+          className={cn("space-y-4 p-4", customStyleSuppressed && "pt-0")}
+        >
+          <p className="text-xs text-muted-foreground leading-5">
+            {t("customStyle.sectionDescription")}
+          </p>
+
+          {/* ===== 配色覆盖 ===== */}
+          <div className="space-y-3">
+            <label className="flex items-center gap-2">
+              <Switch
+                checked={customThemeEnabled}
+                onCheckedChange={setCustomThemeEnabled}
+              />
+              <span className="text-xs text-muted-foreground">
+                {t("customStyle.enableTheme")}
+              </span>
+            </label>
+
+            <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              {isDarkMode ? (
+                <Moon className="size-3 shrink-0" />
+              ) : (
+                <Sun className="size-3 shrink-0" />
+              )}
+              {t(
+                isDarkMode
+                  ? "customStyle.editingDark"
+                  : "customStyle.editingLight"
+              )}
             </p>
-            {!safeStyleRequested && (
+
+            <div className="space-y-1.5">
+              {renderTokens(BASIC_THEME_TOKENS)}
+            </div>
+
+            {/* 圆角：@theme inline 里 7 个圆角尺寸全由 --radius 派生，一个滑块即可全局改。 */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className={fieldLabel}>{t("customStyle.radius")}</label>
+                <span className="text-[11px] tabular-nums text-muted-foreground">
+                  {radiusRem.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}
+                  rem
+                </span>
+              </div>
+              <Slider
+                value={[radiusRem]}
+                min={RADIUS_RANGE.min}
+                max={RADIUS_RANGE.max}
+                step={RADIUS_RANGE.step}
+                disabled={themeDisabled}
+                aria-label={t("customStyle.radius")}
+                onValueChange={([v]) =>
+                  setCustomThemeToken("radius", `${v}rem`)
+                }
+              />
+              <p className="text-[11px] text-muted-foreground leading-4">
+                {t("customStyle.radiusHint")}
+              </p>
+            </div>
+
+            <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+              <CollapsibleTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-2 h-7 px-2 text-xs text-muted-foreground"
+                >
+                  <ChevronDown
+                    className={cn(
+                      "size-3 transition-transform",
+                      advancedOpen && "rotate-180"
+                    )}
+                  />
+                  {t("customStyle.advanced", {
+                    count: ADVANCED_THEME_TOKENS.length,
+                  })}
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="space-y-1.5 pt-2">
+                {renderTokens(ADVANCED_THEME_TOKENS)}
+              </CollapsibleContent>
+            </Collapsible>
+          </div>
+
+          {/* ===== 自由 CSS ===== */}
+          <div className="space-y-2 border-t pt-4">
+            <label className="flex items-center gap-2">
+              <Switch
+                checked={customCssEnabled}
+                onCheckedChange={setCustomCssEnabled}
+              />
+              <span className="text-xs text-muted-foreground">
+                {t("customStyle.enableCss")}
+              </span>
+            </label>
+            <p className="flex items-start gap-1.5 text-[11px] leading-4 text-muted-foreground">
+              <ShieldAlert className="mt-px size-3 shrink-0" />
+              {t("customStyle.cssRisk")}
+            </p>
+            <div className="flex items-center gap-2">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setCustomStyleSuspended(false)}
+                onClick={() => setCssDialogOpen(true)}
               >
-                {t("customStyle.resume")}
+                <Code2 className="size-3.5" />
+                {t("customStyle.editCss")}
               </Button>
-            )}
+              <span className="text-[11px] tabular-nums text-muted-foreground">
+                {customCss
+                  ? t("customStyle.cssPresent", {
+                      size: (customCss.length / 1024).toFixed(1),
+                    })
+                  : t("customStyle.cssEmpty")}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-4">
+              {escapeHint}
+            </p>
           </div>
-        </div>
-      )}
 
-      {/* ===== 配色覆盖 ===== */}
-      <div className="space-y-3">
-        <label className="flex items-center gap-2">
-          <Switch
-            checked={customThemeEnabled}
-            onCheckedChange={setCustomThemeEnabled}
-          />
-          <span className="text-xs text-muted-foreground">
-            {t("customStyle.enableTheme")}
-          </span>
-        </label>
-
-        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          {isDarkMode ? (
-            <Moon className="size-3 shrink-0" />
-          ) : (
-            <Sun className="size-3 shrink-0" />
-          )}
-          {t(
-            isDarkMode ? "customStyle.editingDark" : "customStyle.editingLight"
-          )}
-        </p>
-
-        <div className="space-y-1.5">{renderTokens(BASIC_THEME_TOKENS)}</div>
-
-        {/* 圆角：@theme inline 里 7 个圆角尺寸全由 --radius 派生，一个滑块即可全局改。 */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <label className={fieldLabel}>{t("customStyle.radius")}</label>
-            <span className="text-[11px] tabular-nums text-muted-foreground">
-              {radiusRem.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}rem
-            </span>
-          </div>
-          <Slider
-            value={[radiusRem]}
-            min={RADIUS_RANGE.min}
-            max={RADIUS_RANGE.max}
-            step={RADIUS_RANGE.step}
-            disabled={themeDisabled}
-            aria-label={t("customStyle.radius")}
-            onValueChange={([v]) => setCustomThemeToken("radius", `${v}rem`)}
-          />
-          <p className="text-[11px] text-muted-foreground leading-4">
-            {t("customStyle.radiusHint")}
-          </p>
-        </div>
-
-        <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-          <CollapsibleTrigger asChild>
+          {/* ===== 导入 / 导出 / 清空 ===== */}
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void onCopyTheme()}
+              disabled={isEmptyCustomTheme(customTheme)}
+            >
+              {t("customStyle.copyTheme")}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setImportOpen(true)}
+            >
+              {t("customStyle.importTheme")}
+            </Button>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="-ml-2 h-7 px-2 text-xs text-muted-foreground"
+              disabled={isEmptyCustomTheme(customTheme)}
+              onClick={() => replaceCustomTheme(EMPTY_CUSTOM_THEME)}
             >
-              <ChevronDown
-                className={cn(
-                  "size-3 transition-transform",
-                  advancedOpen && "rotate-180"
-                )}
+              {t("customStyle.clearTheme")}
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-4">
+            {t("customStyle.interopHint")}
+          </p>
+
+          <CustomCssDialog
+            open={cssDialogOpen}
+            onOpenChange={setCssDialogOpen}
+          />
+
+          <Dialog open={importOpen} onOpenChange={setImportOpen}>
+            <DialogContent className="sm:max-w-xl">
+              <DialogHeader>
+                <DialogTitle>{t("customStyle.importTitle")}</DialogTitle>
+                <DialogDescription>
+                  {t("customStyle.importDescription")}
+                </DialogDescription>
+              </DialogHeader>
+              <Textarea
+                value={importDraft}
+                onChange={(e) => setImportDraft(e.target.value)}
+                spellCheck={false}
+                rows={10}
+                className="font-mono text-[11px]"
+                placeholder='{"cssVars":{"light":{"primary":"oklch(0.6 0.2 250)"}}}'
               />
-              {t("customStyle.advanced", {
-                count: ADVANCED_THEME_TOKENS.length,
-              })}
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="space-y-1.5 pt-2">
-            {renderTokens(ADVANCED_THEME_TOKENS)}
-          </CollapsibleContent>
-        </Collapsible>
-      </div>
-
-      {/* ===== 自由 CSS ===== */}
-      <div className="space-y-2 border-t pt-4">
-        <label className="flex items-center gap-2">
-          <Switch
-            checked={customCssEnabled}
-            onCheckedChange={setCustomCssEnabled}
-          />
-          <span className="text-xs text-muted-foreground">
-            {t("customStyle.enableCss")}
-          </span>
-        </label>
-        <p className="flex items-start gap-1.5 text-[11px] leading-4 text-muted-foreground">
-          <ShieldAlert className="mt-px size-3 shrink-0" />
-          {t("customStyle.cssRisk")}
-        </p>
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setCssDialogOpen(true)}
-          >
-            <Code2 className="size-3.5" />
-            {t("customStyle.editCss")}
-          </Button>
-          <span className="text-[11px] tabular-nums text-muted-foreground">
-            {customCss
-              ? t("customStyle.cssPresent", {
-                  size: (customCss.length / 1024).toFixed(1),
-                })
-              : t("customStyle.cssEmpty")}
-          </span>
-        </div>
-        <p className="text-[11px] text-muted-foreground leading-4">
-          {escapeHint}
-        </p>
-      </div>
-
-      {/* ===== 导入 / 导出 / 清空 ===== */}
-      <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => void onCopyTheme()}
-          disabled={isEmptyCustomTheme(customTheme)}
-        >
-          {t("customStyle.copyTheme")}
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setImportOpen(true)}
-        >
-          {t("customStyle.importTheme")}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          disabled={isEmptyCustomTheme(customTheme)}
-          onClick={() => replaceCustomTheme(EMPTY_CUSTOM_THEME)}
-        >
-          {t("customStyle.clearTheme")}
-        </Button>
-      </div>
-      <p className="text-[11px] text-muted-foreground leading-4">
-        {t("customStyle.interopHint")}
-      </p>
-
-      <CustomCssDialog open={cssDialogOpen} onOpenChange={setCssDialogOpen} />
-
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>{t("customStyle.importTitle")}</DialogTitle>
-            <DialogDescription>
-              {t("customStyle.importDescription")}
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea
-            value={importDraft}
-            onChange={(e) => setImportDraft(e.target.value)}
-            spellCheck={false}
-            rows={10}
-            className="font-mono text-[11px]"
-            placeholder='{"cssVars":{"light":{"primary":"oklch(0.6 0.2 250)"}}}'
-          />
-          <DialogFooter>
-            <Button
-              variant="ghost"
-              onClick={() => void onReadClipboard()}
-              className="mr-auto"
-            >
-              {t("customStyle.readClipboard")}
-            </Button>
-            <Button variant="ghost" onClick={() => setImportOpen(false)}>
-              {t("customStyle.cancel")}
-            </Button>
-            <Button onClick={onImport} disabled={!importDraft.trim()}>
-              {t("customStyle.importConfirm")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </section>
+              <DialogFooter>
+                <Button
+                  variant="ghost"
+                  onClick={() => void onReadClipboard()}
+                  className="mr-auto"
+                >
+                  {t("customStyle.readClipboard")}
+                </Button>
+                <Button variant="ghost" onClick={() => setImportOpen(false)}>
+                  {t("customStyle.cancel")}
+                </Button>
+                <Button onClick={onImport} disabled={!importDraft.trim()}>
+                  {t("customStyle.importConfirm")}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </CollapsibleContent>
+      </section>
+    </Collapsible>
   )
 }

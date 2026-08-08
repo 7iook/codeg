@@ -92,6 +92,10 @@
     "customStyle": {
       "sectionTitle": "Estilo personalizado",
       "sectionDescription": "Ajuste as cores do tema atual ou injete o seu próprio CSS. As substituições ficam sobre a predefinição base, por isso permanecem ao trocar de predefinição.",
+      "summarySuspended": "Suspenso",
+      "summaryDefault": "Predefinição inalterada",
+      "summaryTokens": "{count, plural, one {# substituição} other {# substituições}}",
+      "summaryCss": "CSS personalizado",
       "suspendedByShortcut": "O estilo personalizado está suspenso. Nada do que definir aqui terá efeito até retomá-lo.",
       "suspendedBySafeParam": "Esta janela foi aberta no modo de aparência segura, por isso o estilo personalizado é ignorado aqui. As outras janelas não são afetadas.",
       "resume": "Retomar estilo personalizado",

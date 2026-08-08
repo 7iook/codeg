@@ -92,6 +92,10 @@
     "customStyle": {
       "sectionTitle": "自定义样式",
       "sectionDescription": "在当前主题的基础上微调配色，或写入自己的 CSS。覆盖叠加在基底预设之上，切换预设后依然保留。",
+      "summarySuspended": "已停用",
+      "summaryDefault": "跟随预设",
+      "summaryTokens": "{count, plural, other {# 项覆盖}}",
+      "summaryCss": "自定义 CSS",
       "suspendedByShortcut": "自定义样式已停用。在恢复之前，这里的设置都不会生效。",
       "suspendedBySafeParam": "本窗口以安全外观模式打开，自定义样式在此不生效，其它窗口不受影响。",
       "resume": "恢复自定义样式",

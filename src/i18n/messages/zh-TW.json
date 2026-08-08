@@ -92,6 +92,10 @@
     "customStyle": {
       "sectionTitle": "自訂樣式",
       "sectionDescription": "在目前主題的基礎上微調配色，或寫入自己的 CSS。覆寫疊加在基底預設之上，切換預設後依然保留。",
+      "summarySuspended": "已停用",
+      "summaryDefault": "跟隨預設",
+      "summaryTokens": "{count, plural, other {# 項覆寫}}",
+      "summaryCss": "自訂 CSS",
       "suspendedByShortcut": "自訂樣式已停用。在恢復之前，這裡的設定都不會生效。",
       "suspendedBySafeParam": "本視窗以安全外觀模式開啟，自訂樣式在此不生效，其它視窗不受影響。",
       "resume": "恢復自訂樣式",

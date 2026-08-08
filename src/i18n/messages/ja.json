@@ -92,6 +92,10 @@
     "customStyle": {
       "sectionTitle": "カスタムスタイル",
       "sectionDescription": "現在のテーマの配色を微調整したり、独自の CSS を適用したりできます。上書きはベースプリセットの上に重なるため、プリセットを切り替えても保持されます。",
+      "summarySuspended": "一時停止中",
+      "summaryDefault": "プリセットのまま",
+      "summaryTokens": "{count, plural, one {上書き # 件} other {上書き # 件}}",
+      "summaryCss": "カスタム CSS",
       "suspendedByShortcut": "カスタムスタイルは一時停止中です。再開するまで、ここでの設定は反映されません。",
       "suspendedBySafeParam": "このウィンドウはセーフ外観モードで開かれているため、カスタムスタイルは適用されません。他のウィンドウには影響しません。",
       "resume": "カスタムスタイルを再開",

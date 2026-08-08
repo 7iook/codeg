@@ -92,6 +92,10 @@
     "customStyle": {
       "sectionTitle": "Style personnalisé",
       "sectionDescription": "Ajustez les couleurs du thème actuel ou injectez votre propre CSS. Les remplacements se superposent au préréglage de base et sont conservés lorsque vous en changez.",
+      "summarySuspended": "Suspendu",
+      "summaryDefault": "Préréglage inchangé",
+      "summaryTokens": "{count, plural, one {# remplacement} other {# remplacements}}",
+      "summaryCss": "CSS personnalisé",
       "suspendedByShortcut": "Le style personnalisé est suspendu. Rien de ce que vous réglez ici ne s'appliquera tant que vous ne l'aurez pas réactivé.",
       "suspendedBySafeParam": "Cette fenêtre a été ouverte en mode d'apparence sûre : le style personnalisé y est ignoré. Les autres fenêtres ne sont pas affectées.",
       "resume": "Réactiver le style personnalisé",

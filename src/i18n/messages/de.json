@@ -92,6 +92,10 @@
     "customStyle": {
       "sectionTitle": "Eigener Stil",
       "sectionDescription": "Feinjustiere die Farben des aktuellen Themes oder füge eigenes CSS ein. Überschreibungen liegen über der Basisvorlage und bleiben beim Wechsel der Vorlage erhalten.",
+      "summarySuspended": "Ausgesetzt",
+      "summaryDefault": "Vorlage unverändert",
+      "summaryTokens": "{count, plural, one {# Überschreibung} other {# Überschreibungen}}",
+      "summaryCss": "Eigenes CSS",
       "suspendedByShortcut": "Der eigene Stil ist ausgesetzt. Nichts, was du hier einstellst, wirkt, bis du ihn fortsetzt.",
       "suspendedBySafeParam": "Dieses Fenster wurde im sicheren Darstellungsmodus geöffnet, daher wird eigener Stil hier ignoriert. Andere Fenster sind nicht betroffen.",
       "resume": "Eigenen Stil fortsetzen",

@@ -92,6 +92,10 @@
     "customStyle": {
       "sectionTitle": "사용자 지정 스타일",
       "sectionDescription": "현재 테마의 색상을 미세 조정하거나 직접 작성한 CSS를 적용합니다. 재정의는 기본 프리셋 위에 얹히므로 프리셋을 바꿔도 유지됩니다.",
+      "summarySuspended": "일시 중지됨",
+      "summaryDefault": "프리셋 기본값",
+      "summaryTokens": "{count, plural, one {재정의 #개} other {재정의 #개}}",
+      "summaryCss": "사용자 지정 CSS",
       "suspendedByShortcut": "사용자 지정 스타일이 일시 중지되었습니다. 다시 켜기 전까지 여기서 설정한 내용은 적용되지 않습니다.",
       "suspendedBySafeParam": "이 창은 안전 외관 모드로 열려 사용자 지정 스타일이 적용되지 않습니다. 다른 창에는 영향이 없습니다.",
       "resume": "사용자 지정 스타일 재개",

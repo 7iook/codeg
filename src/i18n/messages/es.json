@@ -92,6 +92,10 @@
     "customStyle": {
       "sectionTitle": "Estilo personalizado",
       "sectionDescription": "Ajusta los colores del tema actual o inyecta tu propio CSS. Las anulaciones se aplican sobre el preajuste base, así que se conservan al cambiar de preajuste.",
+      "summarySuspended": "Suspendido",
+      "summaryDefault": "Preajuste sin cambios",
+      "summaryTokens": "{count, plural, one {# anulación} other {# anulaciones}}",
+      "summaryCss": "CSS personalizado",
       "suspendedByShortcut": "El estilo personalizado está suspendido. Nada de lo que configures aquí surtirá efecto hasta que lo reanudes.",
       "suspendedBySafeParam": "Esta ventana se abrió en modo de apariencia segura, por lo que el estilo personalizado se ignora aquí. Las demás ventanas no se ven afectadas.",
       "resume": "Reanudar estilo personalizado",
