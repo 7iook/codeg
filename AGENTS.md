@@ -50,6 +50,24 @@ cargo insta review
 INSTA_UPDATE=auto cargo test --features test-utils     # 自动写新 .snap
 ```
 
+## 本地打包安装器
+
+```powershell
+pwsh -File scripts/build-local-installer.ps1              # 验证 + 打包 + 落到 dist-installer/
+pwsh -File scripts/build-local-installer.ps1 -SkipVerify  # 代码刚验证过,只要包
+```
+
+**不要直接跑 `pnpm tauri build`** —— 默认会打 MSI,而本仓配了 `externalBin`
+sidecar,WiX `light.exe` 必然以 ICE30 失败(tauri#14681,项目 CI 同样跳过 MSI)。
+另外工具 shell 常带 `NODE_ENV=development`,那会让 Next 16 预渲染以
+`useContext null` 失败。上面的脚本处理掉这些前提。
+
+本地构建**不产更新器签名**(私钥是 CI secret),所以打包命令会在安装器已经产出
+之后仍以非零码退出 —— 脚本按产物存在与否判断成败,并会明确告知。正式发布走
+CI(推 tag → `release.yml`)。
+
+完整背景与排障表:[`docs/releasing/local-build.md`](docs/releasing/local-build.md)
+
 ## 架构
 
 ### 双模式运行

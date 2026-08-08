@@ -55,6 +55,36 @@ function parseArgs(argv) {
   return args
 }
 
+/**
+ * Where cargo actually writes build artifacts.
+ *
+ * NOT `src-tauri/target` — that is only the default. `CARGO_TARGET_DIR` (env),
+ * `build.target-dir` (config.toml) and a workspace root all move it, and on a
+ * machine that sets any of them the hardcoded relative path does not exist, so
+ * the staging step below failed with "expected ... but it does not exist" even
+ * though the cargo build had just succeeded.
+ *
+ * `cargo metadata` is cargo's own answer to the question, so it honours every
+ * mechanism without this script having to know them. Falls back to the default
+ * only when the query itself fails (no cargo on PATH is already fatal at the
+ * build step below).
+ */
+function resolveTargetDir() {
+  try {
+    const out = execFileSync(
+      "cargo",
+      ["metadata", "--format-version", "1", "--no-deps"],
+      { encoding: "utf8", cwd: SRC_TAURI, maxBuffer: 32 * 1024 * 1024 }
+    )
+    const dir = JSON.parse(out).target_directory
+    if (typeof dir === "string" && dir.length > 0) return dir
+    throw new Error("metadata carried no target_directory")
+  } catch (e) {
+    log(`cargo metadata failed (${e.message}); assuming ./target`)
+    return join(SRC_TAURI, "target")
+  }
+}
+
 function resolveHostTriple() {
   try {
     const out = execFileSync("rustc", ["-vV"], { encoding: "utf8" })
@@ -101,8 +131,7 @@ function main() {
   )
 
   const built = join(
-    SRC_TAURI,
-    "target",
+    resolveTargetDir(),
     target,
     "release",
     `${BIN_NAME}${ext}`
