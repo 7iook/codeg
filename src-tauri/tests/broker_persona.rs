@@ -270,13 +270,17 @@ async fn concurrent_same_agent_distinct_personas_do_not_cross() {
     assert_eq!(args.len(), 2, "both concurrent delegations spawned");
     let mut options: Vec<Option<String>> = args
         .iter()
-        // Exhaustive `match` on purpose, mirroring
-        // `launch_option_variants_are_exactly_kiro_persona_and_model_v2`: a
-        // THIRD `LaunchOption` variant must break this test, which a
-        // `.map()`/`if let` over the slice would not do. Neither request here
-        // sets `model`, so `Model` is unreachable in this scenario — it is
-        // matched (and asserted absent) rather than wildcarded so the break
-        // survives.
+        // RUNTIME shape sentinel, not a compile-time one. A slice pattern
+        // cannot be exhaustive over length, so the `other =>` arm below is
+        // unavoidable and a THIRD `LaunchOption` variant will NOT break this
+        // test at compile time — it fails here only if such an option actually
+        // reaches spawn in this scenario. The compile-time exhaustiveness
+        // guarantee lives in exactly two places, both matching on the enum
+        // itself: `launch_option_variants_are_exactly_kiro_persona_and_model_v2`
+        // in `persona.rs`, and the `match option` in
+        // `manager::merge_launch_options_into_runtime_env` (no `_ =>` arm).
+        // Neither request here sets `model`, so `Model` is asserted absent
+        // rather than wildcarded, which keeps the failure message specific.
         .map(|a| match a.launch_options.as_slice() {
             [] => None,
             [LaunchOption::KiroPersona(n)] => Some(n.clone()),
@@ -500,6 +504,9 @@ async fn concurrent_distinct_models_do_not_cross() {
     assert_eq!(args.len(), 2, "both concurrent delegations spawned");
     let mut models: Vec<String> = args
         .iter()
+        // Runtime shape assertion (a slice pattern cannot be exhaustive over
+        // length). Compile-time variant exhaustiveness is enforced elsewhere —
+        // see the note on the same pattern earlier in this file.
         .map(|a| match a.launch_options.as_slice() {
             [LaunchOption::Model(m)] => m.clone(),
             other => panic!("expected exactly one Model option, got {other:?}"),
@@ -510,5 +517,86 @@ async fn concurrent_distinct_models_do_not_cross() {
         models,
         vec!["model-a".to_string(), "model-b".to_string()],
         "each concurrent spawn keeps its own model — no cross-contamination"
+    );
+}
+
+/// Cross-dimension isolation under concurrency: A carries a persona and NO
+/// model, B carries a model and NO persona, dispatched simultaneously. Neither
+/// may acquire the other's knob.
+///
+/// # Why this is not covered by the two tests above
+///
+/// `concurrent_same_agent_distinct_personas_do_not_cross` varies ONE dimension
+/// (two personas, no model anywhere) and `concurrent_distinct_models_do_not_cross`
+/// varies the other (two models, no persona anywhere). In both, the absent
+/// dimension is absent from BOTH requests, so a leak of it has nothing to leak
+/// FROM — a broker that appended every call's knobs to one shared vector would
+/// still pass them as long as the two calls agreed on which dimensions were set.
+/// `persona_and_model_coexist_on_one_delegation` covers two knobs in ONE call,
+/// which is a different property again (composition, not isolation).
+///
+/// This test is the asymmetric case: each request sets exactly one dimension,
+/// and they are DIFFERENT dimensions. A shared / reused knob vector shows up
+/// here as a spawn carrying BOTH options while its request asked for one.
+#[tokio::test]
+async fn concurrent_persona_only_and_model_only_do_not_bleed() {
+    let (broker, mock) = enabled_broker().await;
+    mock.queue_spawn(Ok("c-mix-a".into())).await;
+    mock.queue_spawn(Ok("c-mix-b".into())).await;
+    mock.queue_send(Ok(92)).await;
+    mock.queue_send(Ok(93)).await;
+
+    // Both Kiro so `agent_type` cannot disambiguate the two spawns, and so the
+    // persona takes the Native leg (a real launch option) rather than a Hint.
+    let (ack_a, ack_b) = tokio::join!(
+        broker.start_delegation(request_with(
+            AgentType::Kiro,
+            "pt-mix-a",
+            Some("recon-agent"),
+            None,
+        )),
+        broker.start_delegation(request_with(
+            AgentType::Kiro,
+            "pt-mix-b",
+            None,
+            Some("model-only-b"),
+        ))
+    );
+    assert_eq!(ack_a.status, TaskStatus::Running);
+    assert_eq!(ack_b.status, TaskStatus::Running);
+
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(args.len(), 2, "both concurrent delegations spawned");
+
+    // Pop order under `join!` is nondeterministic, so classify by CONTENT and
+    // assert on the resulting set. Each arm is exhaustive on purpose (mirroring
+    // the sibling concurrency tests): a third `LaunchOption` variant, or a
+    // spawn carrying two options when its request set one, lands in a `panic!`
+    // arm that names the leak rather than silently sorting into place.
+    let mut seen: Vec<Vec<String>> = args
+        .iter()
+        .map(|a| match a.launch_options.as_slice() {
+            [LaunchOption::KiroPersona(n)] => vec![format!("persona={n}")],
+            [LaunchOption::Model(m)] => vec![format!("model={m}")],
+            [] => panic!(
+                "a spawn received NO launch option, but each request set exactly one: {:?}",
+                a.launch_options
+            ),
+            other => panic!(
+                "a spawn received {} launch options but its request set exactly ONE — \
+                 the other call's knob bled across: {other:?}",
+                other.len()
+            ),
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            vec!["model=model-only-b".to_string()],
+            vec!["persona=recon-agent".to_string()],
+        ],
+        "the persona-only call must not acquire B's model and the model-only \
+         call must not acquire A's persona"
     );
 }
