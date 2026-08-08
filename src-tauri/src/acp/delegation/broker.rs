@@ -1752,10 +1752,27 @@ fn running_ack(
     // Embed the literal task_id in the message so it survives clients that only
     // surface the MCP `content` text (not `structuredContent`) — without it the
     // LLM couldn't call get_delegation_status / cancel_delegation.
+    //
+    // The first sentence `"Delegation successful. task_id=<id>."` is a
+    // cross-module sentinel: `parse_delegate_task_id` in `commands/conversations.rs`
+    // and `cursor_companion_title_from_content` in `acp/connection.rs` both
+    // key off this exact prefix to recover the delegation identity from
+    // clients that persist only the tool result's prose (Codex, Cursor).
+    // Do NOT change that first sentence.
+    //
+    // The rest of the message is the strongest lever we have to steer the
+    // parent LLM's NEXT tool call: nothing pushes sub-completion to the
+    // parent, so if it does not immediately block on
+    // get_delegation_status(wait_ms=0) the sub finishes into the void from
+    // the parent's point of view (the workbench still sees it; the parent
+    // LLM does not). See `.agent-workspace/.archive/2026-08-09/
+    // sub-completion-notify-recon/` for the recon that motivates this wording.
     let message = format!(
-        "Delegation successful. task_id={call_id}. Call get_delegation_status \
-         with this id in the task_ids array (optionally wait_ms) to collect the \
-         result, or cancel_delegation to stop it."
+        "Delegation successful. task_id={call_id}. \
+         NEXT STEP (mandatory): call get_delegation_status(task_ids=[<every task_id you dispatched this turn, including \"{call_id}\">], wait_ms=0) as your very next tool call. \
+         `wait_ms=0` is an unbounded block that returns the moment ANY task reaches a terminal state — do NOT use a smaller positive value (they get capped at 60s and force you into a re-poll loop). \
+         Do NOT output any text between polls: no \"waiting\", no \"still running\", no status recap — narration between polls stacks the workbench UI into a wall of \"still running\" cards. \
+         Only speak to the user once you have a terminal result to report, or use cancel_delegation to stop the task if you no longer want it."
     );
     DelegationTaskReport {
         task_id: Some(call_id),
@@ -5664,9 +5681,11 @@ impl DelegationBroker {
                     None,
                 );
                 ack.message = Some(format!(
-                    "Continue successful. task_id={task_id}. Call get_delegation_status \
-                     with this id in the task_ids array (optionally wait_ms) to collect \
-                     the new turn's result, or cancel_delegation / close_session when done."
+                    "Continue successful. task_id={task_id}. \
+                     NEXT STEP (mandatory): call get_delegation_status(task_ids=[\"{task_id}\"], wait_ms=0) as your very next tool call to collect the new turn's result. \
+                     `wait_ms=0` blocks until terminal — do NOT use a smaller positive value (capped at 60s, forces a re-poll loop). \
+                     Do NOT output any text between polls: narration stacks the workbench UI into a wall of \"still running\" cards. \
+                     Use cancel_delegation to stop, or close_session when done."
                 ));
                 if let Some(op) = inner.operations.get_mut(continuation_id) {
                     op.report = Some(ack.clone());
