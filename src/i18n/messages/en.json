@@ -4075,6 +4075,26 @@
     "saveFailed": "Failed to save question settings",
     "loadFailed": "Failed to load: {detail}"
   },
+  "NotificationSoundSettings": {
+    "title": "Notification sounds",
+    "description": "Play a short sound when an agent event fires. These are the same events the chat channels push — configured here for this device only.",
+    "enable": "Enable notification sounds",
+    "enableHint": "Off by default. Sounds play in the workspace window of this browser or app only.",
+    "volume": "Volume",
+    "preview": "Preview",
+    "previewEvent": "Preview the {event} sound",
+    "onlyWhenUnfocused": "Only when the window is not focused",
+    "onlyWhenUnfocusedHint": "Stay silent while you are looking at Codeg.",
+    "eventsTitle": "Events",
+    "eventsHint": "Pick a tone per event, or “Silent” to skip it. Repeats of the same event within a couple of seconds play once.",
+    "toneNone": "Silent",
+    "toneChime": "Chime",
+    "toneDing": "Ding",
+    "toneBlip": "Blip",
+    "tonePop": "Pop",
+    "toneAlert": "Alert",
+    "toneDescend": "Descending"
+  },
   "LogsSettings": {
     "loading": "Loading…",
     "sectionTitle": "Runtime Logs",

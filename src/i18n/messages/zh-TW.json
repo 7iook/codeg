@@ -4075,6 +4075,26 @@
     "saveFailed": "儲存提問設定失敗",
     "loadFailed": "載入失敗：{detail}"
   },
+  "NotificationSoundSettings": {
+    "title": "提示音",
+    "description": "智慧體事件觸發時播放一段簡短的提示音。這裡的事件與訊息通道推送的完全一致，但設定只對本裝置生效。",
+    "enable": "啟用提示音",
+    "enableHint": "預設關閉。提示音只在目前瀏覽器或應用程式的工作區視窗中播放。",
+    "volume": "音量",
+    "preview": "試聽",
+    "previewEvent": "試聽「{event}」提示音",
+    "onlyWhenUnfocused": "僅在視窗未聚焦時播放",
+    "onlyWhenUnfocusedHint": "正在檢視 Codeg 時保持靜音。",
+    "eventsTitle": "事件",
+    "eventsHint": "為每個事件選擇一種音效，選擇「靜音」則不播放。同一事件在數秒內重複觸發時只播放一次。",
+    "toneNone": "靜音",
+    "toneChime": "叮咚",
+    "toneDing": "清鈴",
+    "toneBlip": "短音",
+    "tonePop": "輕點",
+    "toneAlert": "警示",
+    "toneDescend": "下行音"
+  },
   "LogsSettings": {
     "loading": "載入中…",
     "sectionTitle": "執行日誌",

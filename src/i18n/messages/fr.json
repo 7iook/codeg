@@ -4075,6 +4075,26 @@
     "saveFailed": "Échec de l'enregistrement des paramètres de question",
     "loadFailed": "Échec du chargement : {detail}"
   },
+  "NotificationSoundSettings": {
+    "title": "Sons de notification",
+    "description": "Joue un son bref lorsqu’un événement d’agent se produit. Ce sont les mêmes événements que ceux envoyés aux canaux de discussion ; ce réglage ne s’applique qu’à cet appareil.",
+    "enable": "Activer les sons de notification",
+    "enableHint": "Désactivé par défaut. Les sons ne sont joués que dans la fenêtre de l’espace de travail de ce navigateur ou de cette application.",
+    "volume": "Volume",
+    "preview": "Écouter",
+    "previewEvent": "Écouter le son de {event}",
+    "onlyWhenUnfocused": "Uniquement lorsque la fenêtre n’est pas au premier plan",
+    "onlyWhenUnfocusedHint": "Reste silencieux tant que Codeg est affiché.",
+    "eventsTitle": "Événements",
+    "eventsHint": "Choisissez un son par événement, ou « Silencieux » pour l’ignorer. Si le même événement se répète en quelques secondes, il ne sonne qu’une fois.",
+    "toneNone": "Silencieux",
+    "toneChime": "Carillon",
+    "toneDing": "Clochette",
+    "toneBlip": "Bip",
+    "tonePop": "Pop",
+    "toneAlert": "Alerte",
+    "toneDescend": "Descendant"
+  },
   "LogsSettings": {
     "loading": "Chargement…",
     "sectionTitle": "Journaux d'exécution",

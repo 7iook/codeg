@@ -4075,6 +4075,26 @@
     "saveFailed": "質問設定の保存に失敗しました",
     "loadFailed": "読み込みに失敗しました：{detail}"
   },
+  "NotificationSoundSettings": {
+    "title": "通知音",
+    "description": "エージェントのイベント発生時に短い通知音を鳴らします。対象はチャットチャンネルに送られるものと同じイベントで、この設定はこの端末にのみ適用されます。",
+    "enable": "通知音を有効にする",
+    "enableHint": "既定ではオフです。通知音はこのブラウザまたはアプリのワークスペースウィンドウでのみ再生されます。",
+    "volume": "音量",
+    "preview": "試聴",
+    "previewEvent": "「{event}」の通知音を試聴",
+    "onlyWhenUnfocused": "ウィンドウが非アクティブなときのみ再生",
+    "onlyWhenUnfocusedHint": "Codeg を表示している間は鳴らしません。",
+    "eventsTitle": "イベント",
+    "eventsHint": "イベントごとに音を選びます。「なし」を選ぶと鳴りません。同じイベントが数秒以内に繰り返された場合は 1 回だけ再生されます。",
+    "toneNone": "なし",
+    "toneChime": "チャイム",
+    "toneDing": "ベル",
+    "toneBlip": "ブリップ",
+    "tonePop": "ポップ",
+    "toneAlert": "アラート",
+    "toneDescend": "下降音"
+  },
   "LogsSettings": {
     "loading": "読み込み中…",
     "sectionTitle": "実行ログ",

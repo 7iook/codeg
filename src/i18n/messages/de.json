@@ -4075,6 +4075,26 @@
     "saveFailed": "Frageeinstellungen konnten nicht gespeichert werden",
     "loadFailed": "Laden fehlgeschlagen: {detail}"
   },
+  "NotificationSoundSettings": {
+    "title": "Benachrichtigungstöne",
+    "description": "Spielt einen kurzen Ton ab, wenn ein Agent-Ereignis eintritt. Es sind dieselben Ereignisse, die an die Chat-Kanäle gesendet werden; diese Einstellung gilt nur für dieses Gerät.",
+    "enable": "Benachrichtigungstöne aktivieren",
+    "enableHint": "Standardmäßig aus. Töne werden nur im Arbeitsbereich-Fenster dieses Browsers oder dieser App abgespielt.",
+    "volume": "Lautstärke",
+    "preview": "Anhören",
+    "previewEvent": "Ton für {event} anhören",
+    "onlyWhenUnfocused": "Nur wenn das Fenster nicht im Fokus ist",
+    "onlyWhenUnfocusedHint": "Bleibt stumm, solange du Codeg ansiehst.",
+    "eventsTitle": "Ereignisse",
+    "eventsHint": "Wähle pro Ereignis einen Ton oder „Stumm“, um es zu überspringen. Wiederholt sich dasselbe Ereignis innerhalb weniger Sekunden, erklingt es nur einmal.",
+    "toneNone": "Stumm",
+    "toneChime": "Glockenspiel",
+    "toneDing": "Klingel",
+    "toneBlip": "Blip",
+    "tonePop": "Pop",
+    "toneAlert": "Alarm",
+    "toneDescend": "Absteigend"
+  },
   "LogsSettings": {
     "loading": "Wird geladen…",
     "sectionTitle": "Laufzeitprotokolle",

@@ -4075,6 +4075,26 @@
     "saveFailed": "保存提问设置失败",
     "loadFailed": "加载失败：{detail}"
   },
+  "NotificationSoundSettings": {
+    "title": "提示音",
+    "description": "智能体事件触发时播放一段简短的提示音。这里的事件与消息渠道推送的完全一致，但设置只对本设备生效。",
+    "enable": "启用提示音",
+    "enableHint": "默认关闭。提示音只在当前浏览器或应用的工作区窗口中播放。",
+    "volume": "音量",
+    "preview": "试听",
+    "previewEvent": "试听「{event}」提示音",
+    "onlyWhenUnfocused": "仅在窗口未聚焦时播放",
+    "onlyWhenUnfocusedHint": "正在查看 Codeg 时保持静音。",
+    "eventsTitle": "事件",
+    "eventsHint": "为每个事件选择一种音效，选择「静音」则不播放。同一事件在数秒内重复触发时只播放一次。",
+    "toneNone": "静音",
+    "toneChime": "叮咚",
+    "toneDing": "清铃",
+    "toneBlip": "短音",
+    "tonePop": "轻点",
+    "toneAlert": "警示",
+    "toneDescend": "下行音"
+  },
   "LogsSettings": {
     "loading": "加载中…",
     "sectionTitle": "运行日志",

@@ -4075,6 +4075,26 @@
     "saveFailed": "Falha ao salvar as configurações de pergunta",
     "loadFailed": "Falha ao carregar: {detail}"
   },
+  "NotificationSoundSettings": {
+    "title": "Sons de notificação",
+    "description": "Reproduz um som curto quando ocorre um evento do agente. São os mesmos eventos enviados aos canais de chat; esta configuração vale apenas para este dispositivo.",
+    "enable": "Ativar sons de notificação",
+    "enableHint": "Desativado por padrão. Os sons tocam apenas na janela do espaço de trabalho deste navegador ou aplicativo.",
+    "volume": "Volume",
+    "preview": "Ouvir",
+    "previewEvent": "Ouvir o som de {event}",
+    "onlyWhenUnfocused": "Somente quando a janela não estiver em foco",
+    "onlyWhenUnfocusedHint": "Fica em silêncio enquanto você está olhando para o Codeg.",
+    "eventsTitle": "Eventos",
+    "eventsHint": "Escolha um som para cada evento ou «Silencioso» para ignorá-lo. Se o mesmo evento se repetir em poucos segundos, ele toca apenas uma vez.",
+    "toneNone": "Silencioso",
+    "toneChime": "Carrilhão",
+    "toneDing": "Sino",
+    "toneBlip": "Bipe",
+    "tonePop": "Pop",
+    "toneAlert": "Alerta",
+    "toneDescend": "Descendente"
+  },
   "LogsSettings": {
     "loading": "Carregando…",
     "sectionTitle": "Registros de execução",
