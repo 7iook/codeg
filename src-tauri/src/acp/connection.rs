@@ -2311,18 +2311,18 @@ fn build_grok_set_model_params(
 /// the steered work (claude-agent-acp 0.65.0 / #958 — see
 /// [`synthesize_native_steering`] and `registry::steering_prompt_required_min_version`),
 /// but the caller still handles every outcome in case the proof was wrong.
-/// [merge-v0.23.4] NOT dead by intent, but currently unreachable: this is the
-/// only producer of [`SteerOutcome::PromptRequired`], and its sole caller (the
-/// upstream inline `Steer` arm) was superseded by the off-loop
-/// [`spawn_steering_request`] / [`send_steering_via`] path, which classifies via
-/// [`classify_steer_outcome`] and never yields `PromptRequired`. The consumer
-/// in `manager.rs` (`PromptRequired => AcpError::NoActiveTurn`) is therefore
-/// unreachable too. Kept rather than deleted because the `idleBehavior =
-/// "promptRequired"` opt-in below is a real wire contract that the off-loop path
-/// does NOT yet send — deleting this would silently drop that contract instead
-/// of surfacing the gap. Resolve by either teaching `build_steering_request` the
-/// `_meta.steering.idleBehavior` opt-in and mapping the outcome in
-/// `classify_steer_outcome`, or by removing the variant and its consumer.
+/// [merge-v0.23.4] Superseded, kept only as the reference shape of the upstream
+/// INLINE steering path. Production goes through the off-loop
+/// [`spawn_steering_request`] → [`send_steering_via`] chain instead, so a hung
+/// `_session/steering` cannot block Cancel / Disconnect.
+///
+/// The gap this used to document is CLOSED: the `idleBehavior =
+/// "promptRequired"` opt-in and its `promptRequired` answer now live on the
+/// production path ([`build_steering_request`] / [`classify_steer_outcome`]), so
+/// [`SteerOutcome::PromptRequired`] and its `manager.rs` consumer
+/// (`→ AcpError::NoActiveTurn`) are reachable again. Nothing here is load-bearing
+/// anymore; it can be deleted whenever the inline shape stops being a useful
+/// reference for comparing against upstream.
 #[allow(dead_code)]
 async fn send_steer_request(
     cx: &ConnectionTo<Agent>,
@@ -5207,6 +5207,15 @@ fn classify_steer_outcome(raw: &serde_json::Value) -> SteerOutcome {
     match raw.get("outcome").and_then(|v| v.as_str()) {
         Some("injected") => SteerOutcome::Injected,
         Some("startedNewTurn") => SteerOutcome::StartedNewTurn,
+        // The answer to the `idleBehavior = "promptRequired"` opt-in
+        // `build_steering_request` sends: the turn settled first and the adapter
+        // left the content UNCONSUMED. Distinct from `Failed` (also
+        // not-consumed, but because the agent refused): `PromptRequired` means
+        // the host should resubmit the same content through `session/prompt`,
+        // which is exactly what the manager does (→ `AcpError::NoActiveTurn`,
+        // driving the frontend's existing turn-end fallback). Both report
+        // `is_delivered() == false`, so neither can double-execute.
+        Some("promptRequired") => SteerOutcome::PromptRequired,
         Some("failed") => SteerOutcome::Failed,
         _ => SteerOutcome::Unknown,
     }
@@ -5291,6 +5300,20 @@ fn build_steering_request(
     let params = serde_json::json!({
         "sessionId": session_id,
         "prompt": map_prompt_blocks(blocks),
+        // Opt into the turn-end-race contract (claude-agent-acp 0.64.0 #919).
+        // Without it an adapter whose turn settled first answers
+        // `startedNewTurn`: the content is consumed and already executing in a
+        // turn whose end codeg cannot observe. With it, such an adapter answers
+        // `promptRequired` and leaves the content UNCONSUMED, so the host
+        // resubmits it as an ordinary `session/prompt` and the work stays
+        // inside an observable turn.
+        //
+        // Safe against adapters that do not know the flag: `_meta` is the ACP
+        // extension channel and an unrecognized key is ignored, so those keep
+        // answering `startedNewTurn` — which `classify_steer_outcome` still maps
+        // to a delivered outcome. The flag can only narrow the race, never
+        // introduce a new failure.
+        "_meta": { "steering": { "idleBehavior": "promptRequired" } },
     });
     UntypedMessage::new(STEERING_METHOD, params)
         .map_err(|e| sacp::util::internal_error(format!("Failed to build steering request: {e}")))
@@ -12164,13 +12187,70 @@ mod tests {
             prompt[0]["text"], "please stop",
             "the user's actual text must reach the agent, not a placeholder"
         );
-        // Exactly these two keys: an extra key would mean we invented a wire
+        // Exactly these three keys: an extra key would mean we invented a wire
         // field the agent never parses (e.g. a fake idempotency key, whose
-        // absence is precisely why `SteerOutcome::Unknown` exists).
+        // absence is precisely why `SteerOutcome::Unknown` exists). `_meta` is
+        // the ACP-sanctioned extension channel, not an invention — see the
+        // opt-in assertion below.
         let obj = params.as_object().expect("params is an object");
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, vec!["prompt", "sessionId"]);
+        assert_eq!(keys, vec!["_meta", "prompt", "sessionId"]);
+    }
+
+    /// The turn-end-race opt-in must be ON every steering request.
+    ///
+    /// Without it an adapter whose turn settled first answers `startedNewTurn`:
+    /// the content is consumed and runs in a turn codeg cannot observe the end
+    /// of. With it the adapter answers `promptRequired` and leaves the content
+    /// unconsumed, so the host resubmits it as an ordinary prompt and the work
+    /// stays inside an observable turn.
+    ///
+    /// Pinned as a wire assertion because the flag is invisible in behavior
+    /// until that exact race happens — a refactor could drop it and every test
+    /// that only checks outcomes would stay green.
+    #[tokio::test]
+    async fn steer_wire_opts_into_the_prompt_required_idle_contract() {
+        let peer = FakeSteerPeer::answering("injected");
+        send_steering_via(
+            &peer,
+            &SessionId::new("sess-1"),
+            steer_text_blocks("use the staging db"),
+        )
+        .await
+        .unwrap();
+
+        let params = peer.only_request().params().clone();
+        assert_eq!(
+            params["_meta"]["steering"]["idleBehavior"], "promptRequired",
+            "dropping this opt-in silently reintroduces the detached-turn race"
+        );
+    }
+
+    /// `promptRequired` is the answer the opt-in above asks for, and it must
+    /// classify as its own outcome — NOT as `Unknown`.
+    ///
+    /// The distinction is load-bearing: `PromptRequired` means the content was
+    /// NOT consumed, so the manager can safely resubmit it through
+    /// `session/prompt` (→ `AcpError::NoActiveTurn`, which drives the
+    /// frontend's existing turn-end fallback). Falling through to `Unknown`
+    /// would forbid that resubmit and silently drop the user's message.
+    #[tokio::test]
+    async fn steer_prompt_required_is_its_own_outcome_not_unknown() {
+        let peer = FakeSteerPeer::answering("promptRequired");
+        let outcome = send_steering_via(
+            &peer,
+            &SessionId::new("sess-1"),
+            steer_text_blocks("make it cyberpunk"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, SteerOutcome::PromptRequired);
+        assert!(
+            !outcome.is_delivered(),
+            "the content was not consumed, so the host still owns it"
+        );
     }
 
     /// Multi-block passthrough: nothing may be dropped or reordered on the way
