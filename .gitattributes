@@ -1,0 +1,54 @@
+# Line endings: LF everywhere, in the index AND in the working tree.
+#
+# Why this file exists
+# --------------------
+# Every text blob in this repo is already stored LF (verified: `git ls-files
+# --eol` reported 1553 i/lf and 0 i/crlf). What was NOT pinned is CHECKOUT:
+# with the common Windows setting `core.autocrlf=true`, git rewrites those LF
+# files to CRLF on disk, and then `pnpm eslint .` reports `Delete ␍` on
+# essentially every line of ~1450 files — prettier defaults to `endOfLine: lf`.
+#
+# The practical cost was not cosmetic: a whole-repo lint run drowned in
+# hundreds of newline errors, so it could not be used to find real problems,
+# and a file edited by a tool that writes CRLF looked identical to one that was
+# fine. `.gitattributes` beats `core.autocrlf`, so pinning it here fixes the
+# checkout for every clone without asking anyone to reconfigure their git.
+#
+# `text=auto eol=lf` — let git detect text vs binary (so it never mangles a
+# .png or a .exe), and for anything it calls text, use LF on both sides.
+* text=auto eol=lf
+
+# Windows-only scripts that Windows tooling may require CRLF for. Batch files
+# genuinely misbehave with LF line endings in some shells (a trailing LF in a
+# `goto` label or a multi-line `if` block can be misparsed), and PowerShell is
+# fine either way but ships CRLF by convention on Windows.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# NSIS installer scripts are consumed by makensis on Windows.
+*.nsh  text eol=crlf
+*.nsi  text eol=crlf
+
+# Binary: never touch. Listed explicitly rather than relying on detection —
+# a mis-detected binary is silently corrupted, and these are the extensions
+# this repo actually carries (icons, fonts, sidecar binaries, snapshots).
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.otf  binary
+*.exe  binary
+*.dll  binary
+*.so   binary
+*.dylib binary
+*.zip  binary
+*.gz   binary
+*.msi  binary
+*.pdf  binary
+*.heapsnapshot binary
