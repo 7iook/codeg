@@ -8249,21 +8249,32 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
 /// # This key name now also governs staleness, not just delivery
 ///
 /// Read the tiering above with this in mind: the returned key is no longer only
-/// "where the model id is delivered". It is also the key that
-/// [`crate::acp::manager::spawn_env_and_fingerprint`] implicitly excludes from a
-/// delegation child's config fingerprint, because that function fingerprints the
-/// PRE-merge map and the merge writes the model under exactly this key. So a
-/// wrong key name has a second consequence that did not exist before:
+/// "where the model id is delivered". It also decides WHICH key the merge writes
+/// into, and the merge is the boundary
+/// [`crate::acp::manager::spawn_env_and_fingerprint`] fingerprints on the far
+/// side of — it hashes the PRE-merge map, so nothing is excluded by name and a
+/// user-configured value under this same key is still hashed (that is exactly
+/// why a user changing it still marks the session stale). So a wrong key name
+/// has a second consequence that did not exist before:
 ///
 /// * BEFORE: a wrong key meant the per-call model was silently inert — bad, but
 ///   confined to delivery, and honestly disclosed by the tiering above.
-/// * NOW: a wrong key additionally means the merge writes a key the user never
-///   configured, while the fingerprint excludes a DIFFERENT key than the one
-///   that actually carries the model. The staleness verdict for that live
-///   session then tracks something other than what the child really launched
-///   with — and nothing goes red. Every test stays green, because our tests can
-///   only prove that the MECHANISM is consistent, never that the key name
+/// * NOW: a wrong key additionally means the merge writes into a key that is not
+///   the one the target CLI reads. The child launches on its configured default
+///   while the stored fingerprint — correctly derived from the pre-merge map —
+///   describes a config the child is not actually running under in the way the
+///   delivery contract claims. The staleness verdict stays internally
+///   consistent and nothing goes red. Every test stays green, because our tests
+///   can only prove that the MECHANISM is consistent, never that the key name
 ///   matches the target CLI's real launch contract.
+///
+/// ⚠️ Do NOT "fix" a wrong key by adding it to
+/// [`is_volatile_fingerprint_key`]. Name-based exemption was measured and
+/// rejected: it makes the reported symptom disappear while silently disabling
+/// staleness detection for genuine user config changes under that key — the
+/// worse of the two bugs. The pre-merge fingerprint exists precisely so that no
+/// name-based exemption is needed. See the deliberate-break note on
+/// `is_volatile_fingerprint_key`.
 ///
 /// That failure is invisible by construction: it is a divergence between this
 /// repo's belief and an external CLI's behaviour, and both sides of it are
