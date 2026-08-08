@@ -328,6 +328,15 @@ struct RunningTask {
     /// `Hint` is promoted at send-Ok (task 4.4). Drained by `complete_call`
     /// into the terminal report / completed cache.
     applied_persona_intent: Option<crate::acp::delegation::persona::AppliedPersona>,
+    /// The per-call model id this delegation was launched with, recorded on the
+    /// SPAWN-Ok side so a spawn failure never reports a model as requested of a
+    /// child that never started (same timing rule as
+    /// `applied_persona_intent`). Read by the running snapshot AND drained into
+    /// the terminal report / completed cache — it is a launch fact, true for
+    /// the task's whole life, so both paths carry it.
+    ///
+    /// REQUESTED, not confirmed: see `DelegationSuccess::requested_model`.
+    requested_model: Option<String>,
 }
 
 /// The set of delegations a parent-turn cancel on one connection would
@@ -447,6 +456,12 @@ struct CompletedTask {
     /// value; drained into the terminal `DelegationTaskReport` on the
     /// completed-cache read path (`get_task_status`).
     applied_persona: Option<crate::acp::delegation::persona::AppliedPersona>,
+    /// The per-call model id the delegation was launched with. Snapshot of the
+    /// terminal `RunningTask::requested_model`; drained into the terminal
+    /// `DelegationTaskReport` on the completed-cache read path
+    /// (`get_task_status`) so a poll after the task went terminal still shows
+    /// which model was requested.
+    requested_model: Option<String>,
 }
 
 /// Who dispatched a turn (Requirement 8.2 origin): the MCP companion tool
@@ -1510,6 +1525,7 @@ fn build_completed(
     duration_ms: u64,
     outcome: &DelegationOutcome,
     applied_persona: Option<crate::acp::delegation::persona::AppliedPersona>,
+    requested_model: Option<String>,
 ) -> CompletedTask {
     let (status, text, error_code, message) = terminal_fields(outcome);
     CompletedTask {
@@ -1522,6 +1538,7 @@ fn build_completed(
         message,
         duration_ms,
         applied_persona,
+        requested_model,
     }
 }
 
@@ -1617,6 +1634,7 @@ fn drain_and_record_canceled(
                 duration_ms,
                 &outcome,
                 task.applied_persona_intent.clone(),
+                task.requested_model.clone(),
             ),
         );
         // Cancel tears the child process down — clear the session's connection
@@ -1653,6 +1671,7 @@ fn report_from_outcome(
     outcome: &DelegationOutcome,
     duration_ms: Option<u64>,
     applied_persona: Option<crate::acp::delegation::persona::AppliedPersona>,
+    requested_model: Option<String>,
 ) -> DelegationTaskReport {
     let (status, text, error_code, message) = terminal_fields(outcome);
     let child_conversation_id = match outcome {
@@ -1672,6 +1691,7 @@ fn report_from_outcome(
         message,
         duration_ms,
         applied_persona,
+        requested_model,
     }
 }
 
@@ -1687,7 +1707,14 @@ fn continuation_err_report(
     agent_type: Option<AgentType>,
 ) -> DelegationTaskReport {
     let outcome = DelegationOutcome::from_err(err, child_conversation_id);
-    report_from_outcome(Some(task_id.to_string()), agent_type, &outcome, None, None)
+    report_from_outcome(
+        Some(task_id.to_string()),
+        agent_type,
+        &outcome,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build a `Failed`/`Canceled` report for a setup error (no task id — setup
@@ -1698,7 +1725,7 @@ fn report_err(
     child_conversation_id: Option<i32>,
 ) -> DelegationTaskReport {
     let outcome = DelegationOutcome::from_err(err, child_conversation_id);
-    report_from_outcome(None, Some(agent_type), &outcome, None, None)
+    report_from_outcome(None, Some(agent_type), &outcome, None, None, None)
 }
 
 /// The `Running` ack returned by `start_delegation` for a backgrounded task.
@@ -1710,11 +1737,17 @@ fn report_err(
 /// to succeed and are then promoted onto the RunningTask (`applied_persona_intent`)
 /// so the terminal report picks them up. Legacy calls with no persona keep
 /// passing `None`.
+///
+/// `requested_model` is the per-call model id `spawn` was just handed. Unlike
+/// the persona it has no Hint/Native split — there is one value and it is known
+/// the moment spawn returns Ok, so it rides the ack directly, which is what
+/// lets the card show it while the child is still running.
 fn running_ack(
     call_id: String,
     child_conversation_id: i32,
     agent_type: AgentType,
     applied_persona: Option<crate::acp::delegation::persona::AppliedPersona>,
+    requested_model: Option<String>,
 ) -> DelegationTaskReport {
     // Embed the literal task_id in the message so it survives clients that only
     // surface the MCP `content` text (not `structuredContent`) — without it the
@@ -1734,6 +1767,7 @@ fn running_ack(
         message: Some(message),
         duration_ms: None,
         applied_persona,
+        requested_model,
     }
 }
 
@@ -1774,6 +1808,11 @@ fn running_report(task_id: &str, task: &RunningTask) -> DelegationTaskReport {
         message: Some("Running.".to_string()),
         duration_ms: None,
         applied_persona: None,
+        // A launch fact, known since spawn-Ok and still true mid-run — so the
+        // running snapshot carries it rather than blanking a value the task
+        // already holds (unlike the persona, whose Hint leg genuinely is not
+        // settled yet at this point).
+        requested_model: task.requested_model.clone(),
     }
 }
 
@@ -1831,6 +1870,9 @@ fn completed_report(task_id: &str, c: &CompletedTask) -> DelegationTaskReport {
         // committed for this delegation on the completed-cache read path, so a
         // `get_delegation_status` after the task went terminal still carries it.
         applied_persona: c.applied_persona.clone(),
+        // Same read path, same reason: a poll after the task went terminal must
+        // still show which model was requested at launch.
+        requested_model: c.requested_model.clone(),
     }
 }
 
@@ -1857,6 +1899,7 @@ fn last_known_report_locked(
             message: None,
             duration_ms: None,
             applied_persona: None,
+            requested_model: None,
         }
     };
     report.message = Some(
@@ -1885,6 +1928,7 @@ fn unknown_report(task_id: &str) -> DelegationTaskReport {
         ),
         duration_ms: None,
         applied_persona: None,
+        requested_model: None,
     }
 }
 
@@ -1904,6 +1948,9 @@ fn db_report(task_id: &str, rec: &ChildStatusRecord) -> DelegationTaskReport {
         )),
         duration_ms: None,
         applied_persona: None,
+        // The DB record carries status only; the launch-time model was never
+        // persisted, so there is nothing truthful to report here.
+        requested_model: None,
     }
 }
 
@@ -2024,6 +2071,7 @@ fn report_to_outcome(report: &DelegationTaskReport) -> DelegationOutcome {
             duration_ms: report.duration_ms.unwrap_or(0),
             token_usage: None,
             applied_persona: report.applied_persona.clone(),
+            requested_model: report.requested_model.clone(),
         }),
         // Running never reaches here (the shim loops until terminal); the other
         // states all project onto Err.
@@ -2285,6 +2333,17 @@ pub struct DelegationBroker {
     /// Woken after every terminal `record_completed` so a `get_delegation_status`
     /// long-poll wakes the instant its task finishes instead of busy-polling.
     result_notify: Arc<Notify>,
+    /// Every [`DelegationRequest`] handed to [`Self::start_delegation`], in call
+    /// order, recorded before any setup runs.
+    ///
+    /// Exists so a test can assert what the *listener* built, for fields the
+    /// broker does not yet forward to `spawn`. `DelegationRequest.model` is one:
+    /// it is parsed off the wire and carried, but no launch path reads it yet,
+    /// so `MockSpawner::spawn_args` — the seam `subagent_type` is observed
+    /// through — cannot see it. Without this, a construction site that dropped
+    /// the field (`model: None`) would leave every test green.
+    #[cfg(any(test, feature = "test-utils"))]
+    received_requests: Arc<Mutex<Vec<DelegationRequest>>>,
 }
 
 impl DelegationBroker {
@@ -2340,6 +2399,8 @@ impl DelegationBroker {
             pre_canceled_handles: Arc::new(PreCanceledHandles::default()),
             config: Arc::new(Mutex::new(DelegationConfig::default())),
             result_notify: Arc::new(Notify::new()),
+            #[cfg(any(test, feature = "test-utils"))]
+            received_requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -3157,6 +3218,11 @@ impl DelegationBroker {
         )
     )]
     pub async fn start_delegation(&self, mut req: DelegationRequest) -> DelegationTaskReport {
+        // Record the inbound request verbatim for tests observing fields the
+        // broker does not forward to `spawn` (see `received_requests`). First
+        // statement, so even a request rejected during setup is visible.
+        #[cfg(any(test, feature = "test-utils"))]
+        self.received_requests.lock().await.push(req.clone());
         // Register this setup as the VERY FIRST thing — before the pre-cancel
         // check's `.await` and the (possibly multi-second) claim poll — so a
         // parent cancel landing ANYWHERE from here to park reaches it, not just
@@ -3457,6 +3523,29 @@ impl DelegationBroker {
         // `launch_option_pending` is consumed at the `spawner.spawn(...)` call
         // below (stage 5 closed the wiring — see [stage-5 T5.3]).
 
+        // --- Per-call launch knobs ---------------------------------------------
+        // The persona (above) and the model (`req.model`, normalized by
+        // `listener::normalize_requested_model`) are INDEPENDENT launch
+        // dimensions, so both can apply to one delegation — "run as persona X on
+        // model Y". They travel to the spawner as one Vec; the spawner merges
+        // each into the child's runtime env under its own key before
+        // `spawn_agent` consumes the env by value.
+        let mut launch_options: Vec<crate::acp::delegation::persona::LaunchOption> = Vec::new();
+        if let Some(launch_option) = launch_option_pending {
+            launch_options.push(launch_option);
+        }
+        if let Some(model) = req.model.as_deref() {
+            tracing::info!(
+                target: "delegation::model",
+                agent_type = ?req.agent_type,
+                model = %model,
+                "per-call model forwarded to spawn"
+            );
+            launch_options.push(crate::acp::delegation::persona::LaunchOption::Model(
+                model.to_string(),
+            ));
+        }
+
         // Checkpoint #1 (opportunistic): if a parent cancel already landed
         // during the claim/depth phase, bail before spawning a child the parent
         // has abandoned. No child exists yet, so there's nothing to tear down.
@@ -3480,12 +3569,14 @@ impl DelegationBroker {
                 // [stage-5 T5.3] Closes P0-1: the Native persona's
                 // `LaunchOption` (a Kiro `--agent` nomination) now reaches the
                 // spawner, which merges it into the child's runtime env as
-                // `KIRO_AGENT=<name>`. `None` for every non-persona / Hint /
+                // `KIRO_AGENT=<name>`. Absent for every non-persona / Hint /
                 // Ignored case (Hint prepends to the task text instead; Ignored
-                // and unsupported carry no launch option). R3-A2 timing is
-                // unchanged: `applied_persona: Native` is still only committed
-                // on the spawn-Ok side below.
-                launch_option_pending,
+                // and unsupported carry no launch option). A per-call `model`
+                // rides the same slice under its own variant, so a call may
+                // carry persona + model, either alone, or neither (empty vec).
+                // R3-A2 timing is unchanged: `applied_persona: Native` is still
+                // only committed on the spawn-Ok side below.
+                launch_options,
             )
             .await
         {
@@ -3746,6 +3837,7 @@ impl DelegationBroker {
                         setup_duration_ms,
                         outcome,
                         applied_persona_intent.clone(),
+                        req.model.clone(),
                     ),
                 );
                 // Settle the session created above: cancel-coded outcomes drop
@@ -3817,6 +3909,7 @@ impl DelegationBroker {
                             origin: TurnOrigin::ParentAgent,
                             registered_epoch,
                             applied_persona_intent: applied_persona_intent.clone(),
+                            requested_model: req.model.clone(),
                         },
                     );
                     inner.deregister_inflight(inflight_id);
@@ -3859,6 +3952,7 @@ impl DelegationBroker {
                     &outcome,
                     Some(setup_duration_ms),
                     applied_persona_intent.clone(),
+                    req.model.clone(),
                 );
             }
             // A parent cancel reached this delegation mid-setup — after the
@@ -3902,6 +3996,7 @@ impl DelegationBroker {
                     &canceled_outcome(child_conversation_id, "parent canceled"),
                     Some(setup_duration_ms),
                     applied_persona_intent.clone(),
+                    req.model.clone(),
                 );
             }
             // Registered in `running` — fall through to the second pre-cancel
@@ -3935,6 +4030,7 @@ impl DelegationBroker {
                                 duration_ms,
                                 &outcome,
                                 applied_persona_intent.clone(),
+                                req.model.clone(),
                             ),
                         );
                         let evicted = inner.settle_session(&call_id, TaskStatus::Canceled, None);
@@ -3981,6 +4077,7 @@ impl DelegationBroker {
                         &canceled_outcome(child_conversation_id, "canceled before await"),
                         Some(duration_ms),
                         applied_persona_intent.clone(),
+                        req.model.clone(),
                     );
                 }
             }
@@ -3993,6 +4090,7 @@ impl DelegationBroker {
             child_conversation_id,
             req.agent_type,
             applied_persona_intent,
+            req.model.clone(),
         )
     }
 
@@ -4042,6 +4140,7 @@ impl DelegationBroker {
                             duration_ms,
                             &outcome,
                             task.applied_persona_intent.clone(),
+                            task.requested_model.clone(),
                         ),
                     );
                     // Keep the child process for continue_with_session unless
@@ -5057,6 +5156,7 @@ impl DelegationBroker {
                     &canceled_outcome(task.child_conversation_id, "canceled by request"),
                     Some(duration_ms),
                     task.applied_persona_intent.clone(),
+                    task.requested_model.clone(),
                 )
             }
             None => self.status_from_db(parent_conversation_id, task_id).await,
@@ -5153,6 +5253,8 @@ impl DelegationBroker {
                     message: Some("Continuation already dispatching.".to_string()),
                     duration_ms: None,
                     applied_persona: None,
+                    // A continuation renegotiates neither persona nor model.
+                    requested_model: None,
                 };
             }
             let Some(s) = inner.sessions.get_mut(task_id) else {
@@ -5439,6 +5541,8 @@ impl DelegationBroker {
                 // Continuation carries no NEW persona nomination; the terminal
                 // report of the continued turn does not attribute persona.
                 None,
+                // Nor a new model nomination.
+                None,
             );
         }
 
@@ -5495,6 +5599,7 @@ impl DelegationBroker {
                         started_at.elapsed().as_millis() as u64,
                         &canceled_outcome(plan.child_conversation_id, "parent canceled"),
                         None,
+                        None,
                     ),
                 );
                 let evicted = inner.settle_session(task_id, TaskStatus::Canceled, None);
@@ -5547,12 +5652,15 @@ impl DelegationBroker {
                         registered_epoch,
                         // Continuation turns don't renegotiate persona.
                         applied_persona_intent: None,
+                        // ...nor the model.
+                        requested_model: None,
                     },
                 );
                 let mut ack = running_ack(
                     task_id.to_string(),
                     plan.child_conversation_id,
                     plan.agent_type,
+                    None,
                     None,
                 );
                 ack.message = Some(format!(
@@ -5577,6 +5685,7 @@ impl DelegationBroker {
                 &canceled_outcome(plan.child_conversation_id, "parent canceled"),
                 None,
                 // Continuation carries no NEW persona nomination.
+                None,
                 None,
             );
         };
@@ -5746,6 +5855,7 @@ impl DelegationBroker {
                     Some(task_id.to_string()),
                     Some(s_agent),
                     &canceled_outcome(s_child_conv, "session released"),
+                    None,
                     None,
                     None,
                 )
@@ -6124,6 +6234,14 @@ impl DelegationBroker {
         self.pending.inner.lock().await.early_completes.len()
     }
 
+    /// Every [`DelegationRequest`] `start_delegation` received, in call order.
+    /// Lets a test assert on a field the broker carries but does not yet
+    /// forward to `spawn` — see the `received_requests` field.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn received_requests(&self) -> Vec<DelegationRequest> {
+        self.received_requests.lock().await.clone()
+    }
+
     /// First reserved (mid-setup) `call_id`, if any — lets a test resolve a
     /// delegation via `complete_call` while it's pinned in the reserve→park
     /// window (its entry isn't parked yet, so `peek_first_pending_call_id`
@@ -6328,6 +6446,7 @@ mod tests {
             external_handle: None,
 
             subagent_type: None,
+            model: None,
         }
     }
 
@@ -6441,6 +6560,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -6670,6 +6790,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -6737,6 +6858,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -6950,6 +7072,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -7109,7 +7232,7 @@ mod tests {
             working_dir: Option<String>,
             preferred_mode_id: Option<String>,
             preferred_config_values: BTreeMap<String, String>,
-            launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
+            launch_options: Vec<crate::acp::delegation::persona::LaunchOption>,
         ) -> Result<String, SpawnerError> {
             self.inner
                 .spawn(
@@ -7118,7 +7241,7 @@ mod tests {
                     working_dir,
                     preferred_mode_id,
                     preferred_config_values,
-                    launch_option,
+                    launch_options,
                 )
                 .await
         }
@@ -7244,6 +7367,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -7361,6 +7485,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -7933,7 +8058,7 @@ mod tests {
                 w: Option<String>,
                 m: Option<String>,
                 c: BTreeMap<String, String>,
-                l: Option<crate::acp::delegation::persona::LaunchOption>,
+                l: Vec<crate::acp::delegation::persona::LaunchOption>,
             ) -> Result<String, SpawnerError> {
                 self.inner.spawn(p, a, w, m, c, l).await
             }
@@ -8583,6 +8708,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -8687,6 +8813,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -8730,6 +8857,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -8785,6 +8913,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -8823,6 +8952,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -9041,6 +9171,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -9131,6 +9262,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -10296,6 +10428,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -10348,6 +10481,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -10383,6 +10517,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -10775,6 +10910,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -11449,6 +11585,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -11508,6 +11645,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -11575,6 +11713,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -11653,6 +11792,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -11767,6 +11907,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -11998,6 +12139,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12094,6 +12236,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12273,6 +12416,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12329,6 +12473,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12496,6 +12641,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12545,6 +12691,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12683,6 +12830,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12756,6 +12904,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12833,6 +12982,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -12876,6 +13026,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -13269,6 +13420,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -13318,6 +13470,7 @@ mod tests {
                     token_usage: None,
 
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -13851,7 +14004,7 @@ mod tests {
     /// can still call get_delegation_status / cancel_delegation.
     #[test]
     fn running_ack_message_embeds_task_id() {
-        let report = running_ack("task-xyz".into(), 42, AgentType::Codex, None);
+        let report = running_ack("task-xyz".into(), 42, AgentType::Codex, None, None);
         assert_eq!(report.task_id.as_deref(), Some("task-xyz"));
         assert!(
             report.message.as_deref().unwrap().contains("task-xyz"),
@@ -13891,6 +14044,7 @@ mod tests {
             message: None,
             duration_ms: 0,
             applied_persona: None,
+            requested_model: None,
         }
     }
 
@@ -14061,6 +14215,7 @@ mod tests {
             requested_working_dir: None,
             external_handle: None,
             subagent_type: subagent_type.map(str::to_string),
+            model: None,
         }
     }
 
@@ -14093,6 +14248,7 @@ mod tests {
                     duration_ms: 5,
                     token_usage: None,
                     applied_persona: None,
+                    requested_model: None,
                 }),
             )
             .await;
@@ -14166,10 +14322,10 @@ mod tests {
         let args = mock.spawn_args.lock().await;
         assert_eq!(args.len(), 1, "exactly one spawn for the delegation");
         assert_eq!(
-            args[0].launch_option,
-            Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(
+            args[0].launch_options,
+            vec![crate::acp::delegation::persona::LaunchOption::KiroPersona(
                 "plan-reality-recon".into()
-            )),
+            )],
             "the Kiro persona LaunchOption must reach spawn (P0-1 closure)"
         );
     }
@@ -14209,10 +14365,10 @@ mod tests {
         // preamble prepended). `persona_request` fixes the task to "do x".
         let args = mock.spawn_args.lock().await;
         assert_eq!(
-            args[0].launch_option,
-            Some(crate::acp::delegation::persona::LaunchOption::KiroPersona(
+            args[0].launch_options,
+            vec![crate::acp::delegation::persona::LaunchOption::KiroPersona(
                 "plan-reality-recon".into()
-            )),
+            )],
             "Native path forwards a LaunchOption"
         );
         let sent = mock.first_prompt_tasks.lock().await;

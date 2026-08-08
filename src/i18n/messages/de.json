@@ -2889,6 +2889,8 @@
         "personaBestEffort": "bestmöglich",
         "personaIgnoredUnsupported": "ignoriert — CLI nicht unterstützt",
         "personaRequested": "angefordert: {name}",
+        "modelRequested": "· angefordertes Modell: {model}",
+        "modelRequestedTooltip": "Beim Start angefordertes Modell: {model}. codeg hat diese ID an den Start des Sub-Agenten übergeben, kann aber nicht bestätigen, dass der Endpoint sie verwendet hat — ein Relay antwortet möglicherweise mit seinem eigenen Standardmodell.",
         "openDetail": "Konversation anzeigen",
         "detailTitle": "Unteragent-Konversation",
         "detailDescription": "Schreibgeschützte Ansicht der delegierten Unteragent-Konversation.",

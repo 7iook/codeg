@@ -96,6 +96,75 @@ pub struct DelegationRequest {
     /// not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
+    /// Optional per-call model id nominated by the LLM's `delegate_to_agent`
+    /// call. `None` = inherit whatever the user configured for that agent
+    /// (the settings panel's global knob), which is the only mechanism that
+    /// existed before this field.
+    ///
+    /// # Applied at launch, per call
+    ///
+    /// The broker turns this into [`super::persona::LaunchOption::Model`],
+    /// `manager::merge_launch_options_into_runtime_env` writes it into THAT
+    /// spawn's `runtime_env` under the key
+    /// `commands::acp::per_call_model_env_key(agent_type)`, and
+    /// `spawn_agent` consumes that map by value -- so the child really does
+    /// start on the nominated model, overriding the agent's configured
+    /// default for this delegation alone. Two CLI families take it from the
+    /// env map and translate it to argv instead (`kiro` -> `--model` via
+    /// `connection::kiro_launch_args`, `cursor` -> a root-level `--model`).
+    ///
+    /// What survives verbatim is the id itself; what is normalized is only
+    /// its framing (trim / blank / control characters -- see below).
+    ///
+    /// # Applies to this call's launch only — not to later turns
+    ///
+    /// The nomination is a launch-time input, so it binds the process this call
+    /// starts and nothing after it. A later turn that reuses the still-live
+    /// connection (`send_followup_prompt`) spawns no process at all, so it keeps
+    /// running on whatever this launch resolved — the id stays in force because
+    /// it is still the same process. A later turn that has to revive a dead
+    /// child (`spawn_for_resume`) DOES start a fresh process, and deliberately
+    /// does not re-apply this id: it falls back to the agent's configured
+    /// default model. That asymmetry is load-bearing and is documented on
+    /// [`super::spawner::ConnectionSpawner::spawn_for_resume`] — unlike the
+    /// persona, whose default is conservative, a resumed turn can silently run
+    /// on a cheaper or costlier model than the turn before it, and the card
+    /// still shows the model that was REQUESTED.
+    ///
+    /// # What this does NOT promise
+    ///
+    /// Delivery, not adoption. codeg guarantees the id reaches the child's
+    /// launch; it never verifies the endpoint honours it, and a relay may
+    /// silently answer with its own default model instead of erroring.
+    ///
+    /// Whether the target CLI acts on the key at all varies by agent, and the
+    /// evidence differs in kind (codeg-translated argv / vendor-documented env
+    /// var / disproven / none found). That tiering is deliberately NOT restated
+    /// here: see [`crate::commands::acp::per_call_model_env_key`], which is the
+    /// single place it is stated. An earlier revision of this comment did
+    /// summarise it and had already drifted out of date against that function
+    /// within one working session -- which is the reason for the pointer.
+    ///
+    /// Deliberately NOT validated against any list of known model names: the
+    /// id is served by the *user's own* endpoint, which may be a relay in
+    /// front of any vendor, so an id this build has never heard of is a
+    /// legitimate value. The listener only normalizes it — trim, blank ⇒
+    /// `None` — and rejects ids containing control characters as paste
+    /// contamination (see [`super::listener::normalize_requested_model`] for
+    /// why that is a hygiene rule and not a transport limit).
+    ///
+    /// # Not the same axis as `subagent_type`
+    ///
+    /// `subagent_type` picks a *persona* inside the target CLI (its system
+    /// prompt / tools / permissions); `model` picks the *LLM* that persona
+    /// runs on. They are independent: a call may set either, both, or
+    /// neither. Note the two can collide on one CLI family — a Kiro persona
+    /// definition can itself pin a model, and for `claude_code` / `codex`
+    /// personas the frontmatter `model` field is dropped on the Hint leg
+    /// anyway (see `subagent_type` above), which is part of why a per-call
+    /// `model` is useful there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +190,28 @@ pub struct DelegationSuccess {
     /// (R3 F2 rejects a symmetric `AppliedPersona::Failed` variant).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_persona: Option<super::persona::AppliedPersona>,
+    /// The per-call model id this delegation was LAUNCHED WITH — [`DelegationRequest::model`]
+    /// echoed back so the UI can show which model the sub-agent was started on.
+    ///
+    /// # Requested, never confirmed — the whole point of the name
+    ///
+    /// This is the id codeg DELIVERED to the child's launch, never evidence the
+    /// endpoint honoured it: a relay may silently answer with its own default
+    /// model instead of erroring (see [`DelegationRequest::model`]'s "What this
+    /// does NOT promise"). Rendering it as the model *in use* would assert
+    /// something this build never verified, so every consumer must frame it as
+    /// requested. That is why the field is not named `applied_model` — unlike
+    /// [`Self::applied_persona`], where the broker itself performs the
+    /// translation and so genuinely knows the effect, nothing here observes
+    /// the far side.
+    ///
+    /// # Timing invariant (same rule as `applied_persona`)
+    ///
+    /// Only populated once `spawn` returned Ok. A failed spawn delivered the id
+    /// nowhere, so its report leaves this `None` rather than claiming a model
+    /// was requested of a child that never started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
 }
 
 /// Broker-internal failure modes. Serialized via the wrapping
@@ -142,9 +233,28 @@ pub enum DelegationError {
     /// it — name grammar failed, the persona file was missing, malformed,
     /// or oversize, or a path-safety check tripped. Detail carries the
     /// user-visible reason (see [`super::persona::PersonaError::Display`]).
-    /// Wire code is `"invalid_persona"`.
+    /// Wire code is [`INVALID_PERSONA_WIRE_CODE`].
     #[error("invalid persona: {0}")]
     InvalidPersona(String),
+    /// The LLM nominated a per-call `model` carrying a control character
+    /// (newline, tab, NUL, ...). Detail carries the user-visible reason. Wire
+    /// code is [`INVALID_MODEL_WIRE_CODE`].
+    ///
+    /// Rejected as input hygiene, NOT because of a transport limit: control
+    /// characters other than NUL do survive a process env-var value intact
+    /// (verified by controlled experiment — see
+    /// [`super::listener::normalize_requested_model`]). Such an id is almost
+    /// always paste contamination, and failing loudly at the argument boundary
+    /// beats an opaque error from the user's endpoint — or a silent fall back
+    /// to its default model reported as a success on the requested one. NUL is
+    /// the one value that genuinely cannot be represented at all.
+    ///
+    /// This is the ONLY model input class that fails: an unrecognized-but-
+    /// well-formed id is passed through verbatim on purpose (the user's own
+    /// endpoint decides what it serves), and a blank id degrades to "inherit
+    /// the configured default".
+    #[error("invalid model: {0}")]
+    InvalidModel(String),
     #[error("subagent runtime error: {0}")]
     SubagentRuntimeError(String),
     /// Child agent ended its turn via `refusal`. Often a backend / gateway
@@ -195,6 +305,23 @@ pub enum DelegationError {
     #[error("the broker is rebuilding its session index after startup; retry shortly")]
     Rebuilding,
 }
+
+/// Wire-stable `DelegationOutcome::Err.code` for [`DelegationError::InvalidPersona`].
+///
+/// Single source of truth: every producer of this code — [`DelegationOutcome::from_err`],
+/// the persona providers' `PersonaEffect::Failed { wire_code, .. }`, and any listener
+/// fast-path that reports the failure before a typed error exists — MUST reference this
+/// constant rather than re-spelling the literal. The string ships to LLM context and to
+/// the frontend, so a drifted second spelling is a silent contract break that no compiler
+/// error catches.
+pub const INVALID_PERSONA_WIRE_CODE: &str = "invalid_persona";
+
+/// Wire-stable `DelegationOutcome::Err.code` for [`DelegationError::InvalidModel`].
+///
+/// Same single-source rule as [`INVALID_PERSONA_WIRE_CODE`]: the listener's
+/// pre-typed rejection path and [`DelegationOutcome::from_err`] must both read
+/// this constant, so renaming or extending the code is a one-line change.
+pub const INVALID_MODEL_WIRE_CODE: &str = "invalid_model";
 
 /// Historical alias accepted on the facade (R2-B4): upstream PR #375 named the
 /// released state `session_closed`; this build reports `session_released`.
@@ -294,6 +421,19 @@ pub struct DelegationTaskReport {
     /// `None` on failure / cancel / setup-failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_persona: Option<super::persona::AppliedPersona>,
+    /// The per-call model id the delegation was launched with, mirrored from
+    /// [`DelegationSuccess::requested_model`] onto the status / terminal report
+    /// so `get_delegation_status` polling carries it too — without this mirror
+    /// the field would silently vanish on the polling path.
+    ///
+    /// Same invariants as there: REQUESTED not confirmed (a relay may answer
+    /// with its own default model), and only populated once the spawn returned
+    /// Ok. Unlike `applied_persona`, this is also carried on the still-running
+    /// snapshot: the value is a launch fact that stays true for the task's
+    /// whole life, and it is already on the `RunningTask`, so blanking it mid-run
+    /// would drop information the broker holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
 }
 
 impl DelegationTaskReport {
@@ -318,7 +458,8 @@ impl DelegationOutcome {
             DelegationError::InvalidAgentType => "invalid_agent_type",
             DelegationError::InvalidWorkingDir(_) => "invalid_working_dir",
             DelegationError::SpawnFailed(_) => "spawn_failed",
-            DelegationError::InvalidPersona(_) => "invalid_persona",
+            DelegationError::InvalidPersona(_) => INVALID_PERSONA_WIRE_CODE,
+            DelegationError::InvalidModel(_) => INVALID_MODEL_WIRE_CODE,
             DelegationError::SubagentRuntimeError(_) => "subagent_error",
             DelegationError::ChildRefusal => "child_refusal",
             DelegationError::ChildMaxTokens => "child_max_tokens",
@@ -379,6 +520,33 @@ mod tests {
         }
     }
 
+    /// The two persona/model wire codes have exactly ONE source: the
+    /// constants. `from_err` must project onto them, and their literal
+    /// values are frozen — they ship to LLM context and to the frontend,
+    /// so renaming one silently breaks consumers that pattern-match.
+    #[test]
+    fn persona_and_model_wire_codes_come_from_the_constants() {
+        assert_eq!(INVALID_PERSONA_WIRE_CODE, "invalid_persona");
+        assert_eq!(INVALID_MODEL_WIRE_CODE, "invalid_model");
+
+        let cases: Vec<(DelegationError, &str)> = vec![
+            (
+                DelegationError::InvalidPersona("bad name".into()),
+                INVALID_PERSONA_WIRE_CODE,
+            ),
+            (
+                DelegationError::InvalidModel("control char".into()),
+                INVALID_MODEL_WIRE_CODE,
+            ),
+        ];
+        for (err, want) in cases {
+            match DelegationOutcome::from_err(err, None) {
+                DelegationOutcome::Err { code, .. } => assert_eq!(code, want),
+                other => panic!("expected Err outcome, got {other:?}"),
+            }
+        }
+    }
+
     /// R2-B4: the facade accepts upstream PR #375's `session_closed` as a
     /// historical alias for `session_released`; every other code is passed
     /// through canonical unchanged.
@@ -412,6 +580,7 @@ mod tests {
             message: None,
             duration_ms: None,
             applied_persona: None,
+            requested_model: None,
         };
         let filled = report.with_task_id("t-1");
         assert_eq!(filled.task_id.as_deref(), Some("t-1"));

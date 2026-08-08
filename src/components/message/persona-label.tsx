@@ -15,7 +15,11 @@
 
 import { useTranslations } from "next-intl"
 
-import { truncatePersonaName, type AppliedPersona } from "@/lib/delegation-card"
+import {
+  truncateModelId,
+  truncatePersonaName,
+  type AppliedPersona,
+} from "@/lib/delegation-card"
 import { cn } from "@/lib/utils"
 
 /**
@@ -92,5 +96,54 @@ export function RequestedPersonaNote({
         name: `@${truncatePersonaName(requestedPersona)}`,
       })}
     </div>
+  )
+}
+
+/**
+ * The per-call model a delegated sub-agent was LAUNCHED WITH, or null when none
+ * was nominated.
+ *
+ * # Why this says "requested" and not "running on"
+ *
+ * codeg's committed responsibility boundary is DELIVERY: it guarantees the model
+ * id reached the child's launch (env var, or `--model` argv for Kiro / Cursor),
+ * and it never verifies the endpoint honoured it. A relay can silently answer
+ * with its own default model instead of erroring. Labelling this as the model in
+ * USE would therefore assert something the build never checked — the specific
+ * failure this component exists to avoid. Hence the `t("modelRequested")`
+ * framing and the tooltip spelling the caveat out in full.
+ *
+ * This is the same requested-vs-applied split `RequestedPersonaNote` draws, for
+ * the same reason — but note the difference in WHEN each shows: the persona note
+ * is failure-only (a nominated persona that did not take effect), whereas this
+ * renders on every card that carried a model, because the value being present at
+ * all already means the spawn succeeded. What it never claims is adoption.
+ *
+ * Renders nothing for a null model — a sub-agent on the user's configured
+ * default gets no chip, not an "unknown" or "default" placeholder.
+ */
+export function RequestedModelLabel({
+  model,
+  className,
+}: {
+  model: string | null
+  className?: string
+}) {
+  const t = useTranslations("Folder.chat.delegation")
+  if (!model) return null
+
+  // Full id stays reachable via the native tooltip and selectable for copy even
+  // when the visible text is truncated (mirrors PersonaLabel's affordance).
+  return (
+    <span
+      data-testid="delegation-requested-model"
+      title={t("modelRequestedTooltip", { model })}
+      className={cn(
+        "min-w-0 truncate font-mono text-muted-foreground",
+        className
+      )}
+    >
+      {t("modelRequested", { model: truncateModelId(model) })}
+    </span>
   )
 }

@@ -335,6 +335,10 @@ async fn forward_turn_complete_to_broker(
             duration_ms: 0,
             token_usage: None,
             applied_persona: None,
+            // Both attribution fields are owned by the broker's stored
+            // `RunningTask`, which `complete_call` drains into the terminal
+            // report — the lifecycle has no view of the launch knobs.
+            requested_model: None,
         }),
         "cancelled" => DelegationOutcome::from_err(
             DelegationError::Canceled {
@@ -2715,6 +2719,7 @@ mod tests {
             external_handle: None,
 
             subagent_type: None,
+            model: None,
         }
     }
 

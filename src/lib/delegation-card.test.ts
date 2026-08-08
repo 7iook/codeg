@@ -90,6 +90,7 @@ describe("codex live-wire result envelope", () => {
       kind: "ack",
       childConversationId: 2781,
       appliedPersona: null,
+      requestedModel: null,
     })
   })
 
@@ -113,6 +114,7 @@ describe("codex live-wire result envelope", () => {
       isError: true,
       childConversationId: null,
       appliedPersona: null,
+      requestedModel: null,
     })
   })
 
@@ -131,6 +133,7 @@ describe("codex live-wire result envelope", () => {
       isError: false,
       childConversationId: null,
       appliedPersona: null,
+      requestedModel: null,
     })
     expect(parseDelegateTaskId(childOutput, null)).toBeNull()
   })
@@ -245,6 +248,7 @@ describe("applied_persona on the parsed tool output", () => {
       kind: "ack",
       childConversationId: 51,
       appliedPersona: { kind: "native", name: "plan-reality-recon" },
+      requestedModel: null,
     })
   })
 
@@ -309,6 +313,7 @@ describe("applied_persona on the parsed tool output", () => {
       kind: "ack",
       childConversationId: null,
       appliedPersona: null,
+      requestedModel: null,
     })
   })
 })
@@ -375,5 +380,85 @@ describe("truncatePersonaName (32 grapheme clusters)", () => {
 
   it("honors an explicit lower limit", () => {
     expect(truncatePersonaName("abcdef", 3)).toBe("abc…")
+  })
+})
+
+describe("requested_model on the parsed tool output", () => {
+  function outputWith(report: Record<string, unknown>): string {
+    return JSON.stringify({
+      content: [{ type: "text", text: "Delegation successful." }],
+      structuredContent: report,
+    })
+  }
+
+  it("reads the model off a running ack", () => {
+    const parsed = parseToolOutput(
+      outputWith({
+        status: "running",
+        child_conversation_id: 7,
+        requested_model: "claude-sonnet-5",
+      })
+    )
+    expect(parsed).toMatchObject({
+      kind: "ack",
+      requestedModel: "claude-sonnet-5",
+    })
+  })
+
+  it("reads the model off a terminal report", () => {
+    const parsed = parseToolOutput(
+      outputWith({
+        status: "completed",
+        text: "done",
+        requested_model: "gemini-3-pro",
+      })
+    )
+    expect(parsed).toMatchObject({
+      kind: "outcome",
+      requestedModel: "gemini-3-pro",
+    })
+  })
+
+  it("keeps the model on a failure report", () => {
+    const parsed = parseToolOutput(
+      outputWith({
+        status: "failed",
+        error_code: "child_refusal",
+        message: "nope",
+        requested_model: "claude-sonnet-5",
+      })
+    )
+    expect(parsed).toMatchObject({
+      kind: "outcome",
+      isError: true,
+      requestedModel: "claude-sonnet-5",
+    })
+  })
+
+  it("degrades a legacy payload with no field to null", () => {
+    const parsed = parseToolOutput(
+      outputWith({ status: "completed", text: "x" })
+    )
+    expect(parsed).toMatchObject({ kind: "outcome", requestedModel: null })
+  })
+
+  it("drops a non-string or blank model rather than rendering it", () => {
+    for (const bad of [42, {}, [], true, "", "   "]) {
+      const parsed = parseToolOutput(
+        outputWith({ status: "completed", text: "x", requested_model: bad })
+      )
+      expect(parsed).toMatchObject({ kind: "outcome", requestedModel: null })
+    }
+  })
+
+  it("trims surrounding whitespace off an otherwise valid id", () => {
+    const parsed = parseToolOutput(
+      outputWith({
+        status: "completed",
+        text: "x",
+        requested_model: "  claude-sonnet-5  ",
+      })
+    )
+    expect(parsed).toMatchObject({ requestedModel: "claude-sonnet-5" })
   })
 })

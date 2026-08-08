@@ -1365,6 +1365,7 @@ pub async fn spawn_agent_connection(
     preferred_mode_id: Option<String>,
     preferred_config_values: BTreeMap<String, String>,
     delegation_injection: Option<DelegationInjection>,
+    config_fingerprint_override: Option<String>,
 ) -> Result<tokio::sync::oneshot::Receiver<()>, AcpError> {
     // Create the authoritative session state up front. Subsequent emit_with_state
     // calls write through this state and increment its seq counter so the first
@@ -1470,7 +1471,18 @@ pub async fn spawn_agent_connection(
     // Derived from the same `runtime_env` we hand the agent (minus per-launch
     // volatile keys) plus the agent's native config file content, so a later
     // settings save can be compared against it to detect a stale running session.
-    let config_fingerprint = crate::commands::acp::fingerprint_config(agent_type, &runtime_env);
+    //
+    // `config_fingerprint_override` is `Some` only for a delegation child, whose
+    // `runtime_env` additionally carries per-CALL launch knobs (persona / model)
+    // that `build_session_runtime_env` — and therefore the canonical recompute in
+    // `compute_session_config_fingerprint` — never reproduces. Hashing this map
+    // for such a child would yield a value the recompute can never equal, so
+    // every settings save would mark that live session "needs restart". The
+    // caller (`manager::spawn_env_and_fingerprint`) therefore hands down a
+    // fingerprint taken from the PRE-merge map; see that function for why the
+    // exemption cannot be done by key name here.
+    let config_fingerprint = config_fingerprint_override
+        .unwrap_or_else(|| crate::commands::acp::fingerprint_config(agent_type, &runtime_env));
 
     // Insert the entry BEFORE spawning the background task so that a
     // fast-failing `run_connection` can never remove it before it was

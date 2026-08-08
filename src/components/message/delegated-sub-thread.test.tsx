@@ -662,3 +662,114 @@ describe("DelegatedSubThread persona label", () => {
     expect(screen.queryByTestId("delegation-persona-label")).toBeNull()
   })
 })
+
+describe("DelegatedSubThread per-call model", () => {
+  /** A broker ack/report as the parent tool output, MCP-envelope shaped. */
+  function outputWith(report: Record<string, unknown>): string {
+    return JSON.stringify({
+      content: [{ type: "text", text: "Delegation successful." }],
+      structuredContent: report,
+    })
+  }
+
+  /**
+   * Backend commits `requested_model` at spawn-Ok, i.e. it rides the running
+   * ack — so the label must appear while the child is still running, not only
+   * once it reaches a terminal state (same property as the native persona).
+   */
+  it("shows the requested model while the child is still running", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({ agent_type: "kiro", task: "review" })}
+        output={outputWith({
+          status: "running",
+          child_conversation_id: 99,
+          requested_model: "claude-sonnet-5",
+        })}
+        state="output-available"
+      />
+    )
+    expect(screen.getByTestId("delegation-requested-model")).toHaveTextContent(
+      "model requested: claude-sonnet-5"
+    )
+  })
+
+  it("shows the requested model on a completed card", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({ agent_type: "kiro", task: "review" })}
+        output={outputWith({
+          status: "completed",
+          text: "done",
+          requested_model: "gemini-3-pro",
+        })}
+        state="output-available"
+      />
+    )
+    expect(screen.getByTestId("delegation-requested-model")).toHaveTextContent(
+      "model requested: gemini-3-pro"
+    )
+  })
+
+  /** Absence: a card with no per-call model shows no chip at all. */
+  it("shows no model label when none was nominated", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({ agent_type: "kiro", task: "review" })}
+        output={outputWith({ status: "completed", text: "done" })}
+        state="output-available"
+      />
+    )
+    expect(screen.queryByTestId("delegation-requested-model")).toBeNull()
+  })
+
+  /**
+   * The anti-fallback guard, mirroring the persona's Requirement 5.5 test: a
+   * model named in `raw_input` but absent from the broker payload must NOT be
+   * displayed. The request is not evidence the id ever reached a spawn — only
+   * the broker's echo is. If someone later "helpfully" falls back to
+   * `raw_input.model`, this reddens.
+   */
+  it("never falls back to the raw_input model when the broker reported none", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({
+          agent_type: "kiro",
+          task: "review",
+          model: "claude-sonnet-5",
+        })}
+        output={outputWith({ status: "completed", text: "done" })}
+        state="output-available"
+      />
+    )
+    expect(screen.queryByTestId("delegation-requested-model")).toBeNull()
+    expect(screen.queryByText(/claude-sonnet-5/)).toBeNull()
+  })
+
+  /** Persona and model are independent dimensions; a card may carry both. */
+  it("shows the persona and the model together", () => {
+    renderWithIntl(
+      <DelegatedSubThread
+        parentToolUseId="pt-1"
+        input={JSON.stringify({ agent_type: "kiro", task: "review" })}
+        output={outputWith({
+          status: "completed",
+          text: "done",
+          applied_persona: { kind: "native", name: "plan-reality-recon" },
+          requested_model: "claude-sonnet-5",
+        })}
+        state="output-available"
+      />
+    )
+    expect(screen.getByTestId("delegation-persona-label")).toHaveTextContent(
+      "· @plan-reality-recon"
+    )
+    expect(screen.getByTestId("delegation-requested-model")).toHaveTextContent(
+      "model requested: claude-sonnet-5"
+    )
+  })
+})

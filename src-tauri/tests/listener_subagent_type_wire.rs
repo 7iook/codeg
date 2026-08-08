@@ -10,9 +10,9 @@
 //! P0-2 only verified this at the type layer. These tests drive a REAL
 //! length-prefixed `BrokerMessage::Call` frame through `serve_one` — the exact
 //! path the `codeg-mcp` companion uses — and observe the parse's effect on the
-//! far side of the broker, via `MockSpawner::spawn_args[..].launch_option`.
+//! far side of the broker, via `MockSpawner::spawn_args[..].launch_options`.
 //!
-//! Observing through `launch_option` (rather than a getter on the parsed
+//! Observing through `launch_options` (rather than a getter on the parsed
 //! request) is deliberate: it proves the whole wire → parse → broker → spawn
 //! chain, so a parse that silently dropped the field would show up as a missing
 //! Kiro persona nomination — the user-visible failure.
@@ -135,8 +135,10 @@ impl codeg_lib::acp::chat_authoring::ChatAuthoringAccess for NoAuthoring {
 
 /// Send one `BrokerMessage::Call` whose `arguments` JSON is exactly `input`
 /// through a real framed socket, and return what the broker forwarded to
-/// `spawn`. `None` = no spawn happened at all.
-async fn launch_option_for_wire_input(input: serde_json::Value) -> Option<Option<LaunchOption>> {
+/// `spawn`. `None` = no spawn happened at all; `Some(vec![])` = a spawn with no
+/// launch knobs. These inputs never set `model`, so the only variant that can
+/// appear in the vec is a persona nomination.
+async fn launch_options_for_wire_input(input: serde_json::Value) -> Option<Vec<LaunchOption>> {
     let mock = Arc::new(MockSpawner::new());
     mock.queue_spawn(Ok("child-conn".into())).await;
     mock.queue_send(Ok(42)).await;
@@ -189,7 +191,7 @@ async fn launch_option_for_wire_input(input: serde_json::Value) -> Option<Option
     server_task.await.expect("join").expect("serve_one");
 
     let args = mock.spawn_args.lock().await;
-    args.first().map(|a| a.launch_option.clone())
+    args.first().map(|a| a.launch_options.clone())
 }
 
 /// Build the `arguments` JSON a `delegate_to_agent` call carries, optionally
@@ -213,11 +215,11 @@ fn call_input(subagent_type: Option<serde_json::Value>) -> serde_json::Value {
 #[tokio::test]
 async fn wire_subagent_type_reaches_spawn_as_launch_option() {
     let observed =
-        launch_option_for_wire_input(call_input(Some(serde_json::json!("plan-reality-recon"))))
+        launch_options_for_wire_input(call_input(Some(serde_json::json!("plan-reality-recon"))))
             .await;
     assert_eq!(
         observed,
-        Some(Some(LaunchOption::KiroPersona("plan-reality-recon".into()))),
+        Some(vec![LaunchOption::KiroPersona("plan-reality-recon".into())]),
         "a wire-level subagent_type must reach spawn as a Kiro persona nomination"
     );
 }
@@ -228,10 +230,10 @@ async fn wire_subagent_type_reaches_spawn_as_launch_option() {
 #[tokio::test]
 async fn wire_subagent_type_is_trimmed() {
     let observed =
-        launch_option_for_wire_input(call_input(Some(serde_json::json!("  recon-agent  ")))).await;
+        launch_options_for_wire_input(call_input(Some(serde_json::json!("  recon-agent  ")))).await;
     assert_eq!(
         observed,
-        Some(Some(LaunchOption::KiroPersona("recon-agent".into()))),
+        Some(vec![LaunchOption::KiroPersona("recon-agent".into())]),
         "whitespace around a persona name must be trimmed, not passed through"
     );
 }
@@ -242,10 +244,10 @@ async fn wire_subagent_type_is_trimmed() {
 /// would lose its whole tool call instead of just running without a persona.
 #[tokio::test]
 async fn wire_blank_subagent_type_degrades_to_no_persona() {
-    let observed = launch_option_for_wire_input(call_input(Some(serde_json::json!("   ")))).await;
+    let observed = launch_options_for_wire_input(call_input(Some(serde_json::json!("   ")))).await;
     assert_eq!(
         observed,
-        Some(None),
+        Some(vec![]),
         "a whitespace-only subagent_type must spawn with NO persona, not fail"
     );
 }
@@ -254,10 +256,10 @@ async fn wire_blank_subagent_type_degrades_to_no_persona() {
 /// doesn't want a persona) ⇒ no nomination, spawn proceeds normally.
 #[tokio::test]
 async fn wire_omitted_subagent_type_yields_no_persona() {
-    let observed = launch_option_for_wire_input(call_input(None)).await;
+    let observed = launch_options_for_wire_input(call_input(None)).await;
     assert_eq!(
         observed,
-        Some(None),
+        Some(vec![]),
         "an omitted subagent_type must spawn with no persona"
     );
 }
@@ -275,10 +277,10 @@ async fn wire_non_string_subagent_type_degrades_to_no_persona() {
         serde_json::json!(true),
         serde_json::json!(["plan-reality-recon"]),
     ] {
-        let observed = launch_option_for_wire_input(call_input(Some(bad.clone()))).await;
+        let observed = launch_options_for_wire_input(call_input(Some(bad.clone()))).await;
         assert_eq!(
             observed,
-            Some(None),
+            Some(vec![]),
             "non-string subagent_type {bad} must degrade to no persona without panicking"
         );
     }

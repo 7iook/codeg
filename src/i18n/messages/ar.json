@@ -2889,6 +2889,8 @@
         "personaBestEffort": "أفضل جهد",
         "personaIgnoredUnsupported": "تم تجاهله — CLI غير مدعوم",
         "personaRequested": "المطلوب: {name}",
+        "modelRequested": "· النموذج المطلوب: {model}",
+        "modelRequestedTooltip": "النموذج المطلوب عند التشغيل: {model}. قام codeg بتمرير هذا المعرف إلى تشغيل الوكيل الفرعي، لكنه لا يمكنه تأكيد استخدام نقطة النهاية له — قد يرد المُرحّل بنموذجه الافتراضي.",
         "openDetail": "عرض المحادثة",
         "detailTitle": "محادثة الوكيل الفرعي",
         "detailDescription": "عرض للقراءة فقط لمحادثة الوكيل الفرعي المُفوَّض.",

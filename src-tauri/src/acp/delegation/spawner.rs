@@ -81,15 +81,27 @@ pub trait ConnectionSpawner: Send + Sync {
     /// Returns the new connection id (codeg-internal UUID, not the ACP
     /// session id assigned by the agent).
     ///
-    /// `launch_option` carries a per-call CLI launch knob resolved from the
-    /// LLM's persona nomination (`subagent_type`). Today the only variant is
-    /// [`crate::acp::delegation::persona::LaunchOption::KiroPersona`], which
-    /// the production impl turns into a `KIRO_AGENT=<name>` runtime-env entry
-    /// (→ `--agent <name>` argv). `None` = no persona nominated / the target
-    /// CLI resolved to a first-turn Hint or Ignored effect instead — neither
-    /// of which reaches the spawner. `spawn_for_resume` deliberately takes NO
-    /// `launch_option`: a resume replays an existing session and must not
-    /// re-nominate a persona (R7.4).
+    /// `launch_options` carries the per-call CLI launch knobs resolved from the
+    /// LLM's `delegate_to_agent` arguments. Each element is one INDEPENDENT
+    /// dimension, so a single call may carry several — "run as persona X on
+    /// model Y" is legitimate, which is why this is a slice and not a single
+    /// `Option`. Today two variants exist:
+    ///
+    /// * [`crate::acp::delegation::persona::LaunchOption::KiroPersona`] — from
+    ///   `subagent_type`; the production impl turns it into a
+    ///   `KIRO_AGENT=<name>` runtime-env entry (→ `--agent <name>` argv).
+    /// * [`crate::acp::delegation::persona::LaunchOption::Model`] — from
+    ///   `model`; merged under the agent's model key (`KIRO_MODEL` →
+    ///   `--model <id>` argv for Kiro, `ANTHROPIC_MODEL` for Claude Code, ...).
+    ///   See `commands::acp::per_call_model_env_key` for the per-agent tiering
+    ///   of what evidence exists that the value takes effect (it is inert for
+    ///   Codex).
+    ///
+    /// An EMPTY slice = nothing nominated / the target CLI resolved the persona
+    /// to a first-turn Hint or Ignored effect instead (neither reaches the
+    /// spawner). `spawn_for_resume` deliberately takes NO launch options: a
+    /// resume replays an existing session and must not re-nominate a persona
+    /// (R7.4) or re-pick a model.
     async fn spawn(
         &self,
         parent_connection_id: &str,
@@ -97,7 +109,7 @@ pub trait ConnectionSpawner: Send + Sync {
         working_dir: Option<String>,
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
-        launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
+        launch_options: Vec<crate::acp::delegation::persona::LaunchOption>,
     ) -> Result<String, SpawnerError>;
 
     /// Send the delegation task as the child's first prompt. The
@@ -134,6 +146,53 @@ pub trait ConnectionSpawner: Send + Sync {
     /// session) is reused instead of double-spawned.
     ///
     /// Returns the connection id to use for the next prompt.
+    ///
+    /// # Takes no launch knobs — deliberately (R7.4), and the asymmetry is real
+    ///
+    /// This signature has no `launch_options` parameter, so a continued or
+    /// revived delegation does not re-nominate the persona or the model the
+    /// first turn was started with. The production impl threads an EMPTY slice
+    /// (see `manager::ConnectionManagerSpawner::spawn_for_resume`). That was
+    /// decided for the persona as R7.4 and the reasoning carries over unchanged
+    /// to the model: a resume replays an EXISTING session, and the knobs are
+    /// launch-time inputs of the session that already exists.
+    ///
+    /// The distinction that makes the argument hold is that the two continuation
+    /// paths are not the same mechanism:
+    ///
+    /// * [`ConnectionSpawner::send_followup_prompt`] reuses a LIVE connection
+    ///   and spawns no process at all. A launch-time knob is not "declined"
+    ///   there, it is physically inapplicable — the process was launched one or
+    ///   more turns ago and its argv cannot be rewritten. Whatever persona and
+    ///   model that launch resolved are still in force, because it is still the
+    ///   same process.
+    /// * `spawn_for_resume` DOES start a fresh process, so it is the only path
+    ///   where re-applying a knob would even be possible. Declining to is a
+    ///   choice, not a constraint.
+    ///
+    /// Before changing that choice, note that the two knobs do NOT carry the
+    /// same user-visible stakes, even though they ride the same mechanism:
+    ///
+    /// * Falling back to the DEFAULT PERSONA is conservative in the direction
+    ///   that matters — a generic prompt and typically fewer permissions than a
+    ///   specialised persona. The continued turn can be less capable than the
+    ///   first; it does not gain authority it was never granted.
+    /// * Falling back to the DEFAULT MODEL is not conservative in any
+    ///   direction. A continued turn can silently run on a different model than
+    ///   the turn before it — possibly far cheaper (quality regression
+    ///   mid-conversation, with no event marking where it changed) or far more
+    ///   expensive (unbudgeted spend on a turn the user never re-authorised).
+    ///   The failure is invisible either way: the delegation card shows the
+    ///   model that was REQUESTED, not the one the resumed process actually
+    ///   launched on.
+    ///
+    /// So "resume is conservative because it drops the knobs" is only true of
+    /// the persona. For the model, dropping the knob is a silent substitution,
+    /// and the reason to keep doing it is the invariant (a resume replays the
+    /// session it is resuming), not harmlessness. Adding knobs here would break
+    /// that invariant and needs a fresh argument first — see
+    /// `docs/specs/delegate-persona-passthrough/design.md` (R7.4). If that
+    /// argument is ever made, the model case needs the louder half of it.
     async fn spawn_for_resume(
         &self,
         parent_connection_id: &str,
@@ -246,12 +305,14 @@ pub mod mock {
         pub working_dir: Option<String>,
         pub preferred_mode_id: Option<String>,
         pub preferred_config_values: BTreeMap<String, String>,
-        /// The per-call launch option the broker forwarded — the whole point
+        /// The per-call launch knobs the broker forwarded — the whole point
         /// of the stage-5 wiring. A Kiro persona nomination lands here as
-        /// `Some(LaunchOption::KiroPersona(name))`; every other case is
-        /// `None`. Broker tests assert on this to prove the resolved persona
-        /// actually reaches `spawn` (not just the observable `applied_persona`).
-        pub launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
+        /// `LaunchOption::KiroPersona(name)`; a per-call model as
+        /// `LaunchOption::Model(id)`; both together when the call set both.
+        /// An EMPTY vec = neither. Broker tests assert on this to prove the
+        /// resolved persona / model actually reach `spawn` (not just the
+        /// observable `applied_persona`).
+        pub launch_options: Vec<crate::acp::delegation::persona::LaunchOption>,
     }
 
     /// Recorded `spawn_for_resume` call. Same shape as [`SpawnCallArgs`] plus
@@ -343,7 +404,7 @@ pub mod mock {
             working_dir: Option<String>,
             preferred_mode_id: Option<String>,
             preferred_config_values: BTreeMap<String, String>,
-            launch_option: Option<crate::acp::delegation::persona::LaunchOption>,
+            launch_options: Vec<crate::acp::delegation::persona::LaunchOption>,
         ) -> Result<String, SpawnerError> {
             self.spawn_args.lock().await.push(SpawnCallArgs {
                 parent_connection_id: parent_connection_id.to_string(),
@@ -351,7 +412,7 @@ pub mod mock {
                 working_dir,
                 preferred_mode_id,
                 preferred_config_values,
-                launch_option,
+                launch_options,
             });
             // Honor a test-installed gate: block here (after recording the call,
             // before returning the child id) so a test can pin `handle_request`
@@ -493,7 +554,7 @@ pub mod mock {
                     Some("/tmp".into()),
                     None,
                     BTreeMap::new(),
-                    None,
+                    Vec::new(),
                 )
                 .await
                 .unwrap();
@@ -505,7 +566,7 @@ pub mod mock {
                     None,
                     None,
                     BTreeMap::new(),
-                    None,
+                    Vec::new(),
                 )
                 .await
                 .unwrap_err();
@@ -522,7 +583,7 @@ pub mod mock {
                     None,
                     None,
                     BTreeMap::new(),
-                    None,
+                    Vec::new(),
                 )
                 .await
                 .unwrap_err();
@@ -544,7 +605,7 @@ pub mod mock {
                 Some("/work".into()),
                 Some("auto".into()),
                 cfg.clone(),
-                None,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -553,7 +614,7 @@ pub mod mock {
             assert_eq!(args[0].agent_type, AgentType::ClaudeCode);
             assert_eq!(args[0].preferred_mode_id.as_deref(), Some("auto"));
             assert_eq!(args[0].preferred_config_values, cfg);
-            assert_eq!(args[0].launch_option, None);
+            assert!(args[0].launch_options.is_empty());
         }
 
         /// `spawn_for_resume` must record the resume credential it was handed

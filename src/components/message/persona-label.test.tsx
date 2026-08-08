@@ -2,7 +2,11 @@ import { render, screen } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { describe, expect, it } from "vitest"
 
-import { PersonaLabel, RequestedPersonaNote } from "./persona-label"
+import {
+  PersonaLabel,
+  RequestedModelLabel,
+  RequestedPersonaNote,
+} from "./persona-label"
 import type { AppliedPersona } from "@/lib/delegation-card"
 import enMessages from "@/i18n/messages/en.json"
 
@@ -95,5 +99,56 @@ describe("RequestedPersonaNote", () => {
     const el = screen.getByTestId("delegation-requested-persona")
     expect(el.textContent).toContain("🤖".repeat(32) + "…")
     expect(el).toHaveAttribute("title", `@${long}`)
+  })
+})
+
+describe("RequestedModelLabel", () => {
+  function renderModel(model: string | null) {
+    return render(
+      <NextIntlClientProvider locale="en" messages={enMessages}>
+        <RequestedModelLabel model={model} />
+      </NextIntlClientProvider>
+    )
+  }
+
+  /**
+   * The load-bearing assertion of this whole feature: the label must present the
+   * id as REQUESTED. codeg only guarantees the id was delivered to the child's
+   * launch — a relay may silently answer with its own default model — so any
+   * wording implying confirmed use would assert something never verified.
+   */
+  it("frames the model as requested, never as confirmed in use", () => {
+    renderModel("claude-sonnet-5")
+    const el = screen.getByTestId("delegation-requested-model")
+    expect(el).toHaveTextContent("model requested: claude-sonnet-5")
+    // Guard against a future reword that would overclaim.
+    expect(el.textContent).not.toMatch(/running on|using|in use|active/i)
+  })
+
+  /** The caveat must be reachable, not just implied by one word. */
+  it("spells out the delivery-not-adoption caveat in the tooltip", () => {
+    renderModel("claude-sonnet-5")
+    const title =
+      screen.getByTestId("delegation-requested-model").getAttribute("title") ??
+      ""
+    expect(title).toContain("claude-sonnet-5")
+    expect(title).toMatch(/cannot confirm/i)
+  })
+
+  /** Absence renders nothing — no "default"/"unknown" placeholder. */
+  it("renders nothing when no per-call model was nominated", () => {
+    renderModel(null)
+    expect(screen.queryByTestId("delegation-requested-model")).toBeNull()
+  })
+
+  /** A pathological id must not stretch the row; the full value stays in the
+   *  tooltip so nothing is actually lost. */
+  it("truncates a very long id while keeping the full value in the tooltip", () => {
+    const long = "vendor/" + "x".repeat(80)
+    renderModel(long)
+    const el = screen.getByTestId("delegation-requested-model")
+    expect(el.textContent).toContain("…")
+    expect(el.textContent!.length).toBeLessThan(long.length)
+    expect(el.getAttribute("title")).toContain(long)
   })
 })

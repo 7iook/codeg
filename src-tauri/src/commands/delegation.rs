@@ -271,6 +271,7 @@ fn unknown_target_report() -> DelegationTaskReport {
         ),
         duration_ms: None,
         applied_persona: None,
+        requested_model: None,
     }
 }
 
@@ -295,6 +296,7 @@ fn not_a_subsession_report(child_conversation_id: i32) -> DelegationTaskReport {
             message: Some(message),
             duration_ms: None,
             applied_persona: None,
+            requested_model: None,
         },
         DelegationOutcome::Ok(_) => unreachable!("from_err never yields Ok"),
     }
@@ -898,6 +900,7 @@ mod tests {
                 requested_working_dir: None,
                 external_handle: None,
                 subagent_type: None,
+                model: None,
             })
             .await;
         let task_id = ack.task_id.expect("a running task carries an id");
@@ -971,6 +974,7 @@ mod tests {
                 requested_working_dir: None,
                 external_handle: None,
                 subagent_type: None,
+                model: None,
             })
             .await;
         let task_id = ack.task_id.expect("a running task carries an id");

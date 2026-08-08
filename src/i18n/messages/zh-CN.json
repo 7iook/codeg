@@ -2889,6 +2889,8 @@
         "personaBestEffort": "尽力而为",
         "personaIgnoredUnsupported": "已忽略 — CLI 不支持",
         "personaRequested": "请求的人格：{name}",
+        "modelRequested": "· 请求模型：{model}",
+        "modelRequestedTooltip": "启动时请求的模型：{model}。codeg 已将该模型 ID 传递给子智能体，但无法确认服务端是否真的使用了它 — 中转站可能使用自己的默认模型应答。",
         "openDetail": "查看会话",
         "detailTitle": "子智能体会话",
         "detailDescription": "只读查看委托给子智能体的会话内容。",

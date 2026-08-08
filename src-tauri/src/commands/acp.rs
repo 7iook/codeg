@@ -8144,6 +8144,170 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
     }
 }
 
+/// Runtime-env key a PER-CALL model id (`delegate_to_agent`'s `model`
+/// argument) must be written to so it actually reaches the child CLI.
+///
+/// # Why this is not just `agent_env_keys(..).2`
+///
+/// The generic triple's model slot is a *provider-cascade* key, and for two
+/// agent types it is not the key that reaches the CLI at launch:
+///
+/// * **Kiro** has NO arm in [`agent_env_keys`] at all — it falls into the
+///   `_ =>` catch-all and would get `OPENAI_MODEL`, which kiro-cli never
+///   reads. Its real launch knob is `KIRO_MODEL`, which
+///   `connection::kiro_launch_args` translates into `--model <id>` argv
+///   (`connection.rs:231`). Reusing the triple here would silently produce a
+///   delegation that ignores the requested model — the exact failure this
+///   function exists to prevent.
+/// * **Claude Code** is deliberately EXCLUDED from the triple's model write in
+///   [`build_runtime_env_from_setting`] (`if agent_type != ClaudeCode`),
+///   because the panel/provider path routes Claude through the eight-key
+///   [`CLAUDE_MODEL_KEY_MAP`]. That exclusion is about the provider cascade,
+///   not about a per-call override: a per-call model means "run THIS
+///   delegation on THIS model", so it takes the main key `ANTHROPIC_MODEL`
+///   only, and MUST NOT touch the three alias slots
+///   (`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL`) — writing those would
+///   redefine what "sonnet" means for the whole child session, which is a
+///   different and much broader semantic.
+///
+/// # Verification status per agent (honest, anchored)
+///
+/// Four tiers, strongest first. The distinction that matters: codeg can always
+/// prove it INJECTED the value; only the first tier is proof under codeg's own
+/// control, and only tier 3 is proof it does not work.
+///
+/// TIER 1 — takes effect by codeg's OWN argv translation (in-repo, testable
+/// here, cannot regress without a test failing):
+/// * `Kiro` — `KIRO_MODEL` → `--model <id>` argv, verbatim, no allowlist
+///   (`connection::kiro_launch_args`, `connection.rs:229-234`).
+/// * `Cursor` — the CLI reads no model env var, but codeg translates
+///   `CURSOR_MODEL` into a root-level `--model <id>` argv element before the
+///   `acp` subcommand (`connection.rs:1099-1107`).
+///
+/// TIER 2 — the target CLI documents the key as a model selector (external
+/// evidence; codeg injects and the vendor's contract says it is read. Weaker
+/// than tier 1: it can regress silently if the vendor changes it):
+/// * `Grok` — `GROK_DEFAULT_MODEL`, verified against the 0.2.94 binary and
+///   documented at the [`agent_env_keys`] arm; xAI's settings reference lists
+///   it as "session default model (same idea as `-m` / `--model`)".
+/// * `KimiCode` — `KIMI_MODEL_NAME`; the `KIMI_MODEL_*` family is the only
+///   non-interactive path and wins over `~/.kimi-code/config.toml` (see the
+///   [`agent_env_keys`] arm).
+/// * `ClaudeCode` — `ANTHROPIC_MODEL` is a documented Claude Code env var and
+///   selects the model (vendor docs: `code.claude.com/docs/en/env-vars` +
+///   `support.claude.com` "Claude Code model configuration", which gives
+///   `export ANTHROPIC_MODEL=…` as THE way to set a default model).
+/// * `Gemini` — `GEMINI_MODEL` is documented as precedence level 2 in the
+///   gemini-cli model-selection order, directly under the `--model` flag
+///   (`docs/cli/model-routing.md` § "Model selection precedence").
+///
+/// TIER 3 — DISPROVEN: the key is written but the CLI does NOT read it:
+/// * `Codex` (`OPENAI_MODEL`). Codex's model comes from `config.toml`'s root
+///   `model` (or `--model` / `-c model=…`), NOT from the environment: its
+///   published list of "stable public environment variables that Codex reads
+///   directly" (`developers.openai.com/codex/environment-variables`) has no
+///   model variable at all, and its documented precedence chain
+///   (`codex/config-basic` § "Configuration precedence") is CLI flags →
+///   project config → profile → user config → system config → built-in
+///   defaults, with no env layer for `model`. Nothing in codeg translates
+///   `OPENAI_MODEL` into codex argv either — the only two `--model` argv
+///   translations in this crate are Kiro's and Cursor's (`connection.rs:232`
+///   and `connection.rs:1106`; a repo-wide `git grep '"--model"'` finds no
+///   third). So a per-call model for Codex is INERT: it reaches the child's
+///   environment and is then ignored.
+///
+///   Do NOT "fix" this by writing codex's `config.toml` from the delegation
+///   path. That file is global, shared, user-authored (and comment-preserving
+///   on the panel path — see `acp_update_agent_config_core`), so a per-call
+///   override would leak out of its call and mutate the user's default. The
+///   correct fix, if this is ever wanted, is per-spawn argv (`--model <id>` /
+///   `-c model=…`) at the Codex launch site, which is a behaviour change and
+///   out of this doc's scope. `OPENAI_MODEL` remains the right key for the
+///   PROVIDER cascade ([`parse_provider_model`]) — that path writes the root
+///   `model` in `config.toml` separately via [`provider_codex_model_action`],
+///   which is what actually takes effect there.
+///
+/// TIER 4 — NO EVIDENCE EITHER WAY: the remaining types (`OpenCode`, `Cline`,
+/// `OpenClaw`, `CodeBuddy`, `Pi`, `Hermes`, and any [`AgentType::Custom`]) fall
+/// into the `_ =>` catch-all and get `OPENAI_MODEL` because that is the
+/// least-surprising default for an OpenAI-compatible CLI. Neither this repo nor
+/// a vendor doc consulted here shows their CLIs read it, and none was found
+/// showing they don't; a per-call model may simply be inert for them too.
+///
+/// `Custom(&'static str)` is structurally unknowable, not merely unresearched:
+/// the CLI is registered by the user at runtime, so codeg cannot know its
+/// launch contract. The promise for custom agents is exactly per-spawn env
+/// injection — `OPENAI_MODEL` is set in that child's environment and consuming
+/// it is the custom CLI's responsibility.
+///
+/// The value is written even where it is inert rather than dropped, because
+/// dropping it would discard the LLM's explicit request invisibly. What callers
+/// must NOT do is describe this as uniform support: see
+/// [`crate::acp::delegation::types::DelegateToAgentParams`]'s "Delivery, not
+/// adoption" note, which is the user-facing half of this contract.
+///
+/// # This key name now also governs staleness, not just delivery
+///
+/// Read the tiering above with this in mind: the returned key is no longer only
+/// "where the model id is delivered". It also decides WHICH key the merge writes
+/// into, and the merge is the boundary
+/// [`crate::acp::manager::spawn_env_and_fingerprint`] fingerprints on the far
+/// side of — it hashes the PRE-merge map, so nothing is excluded by name and a
+/// user-configured value under this same key is still hashed (that is exactly
+/// why a user changing it still marks the session stale). So a wrong key name
+/// has a second consequence that did not exist before:
+///
+/// * BEFORE: a wrong key meant the per-call model was silently inert — bad, but
+///   confined to delivery, and honestly disclosed by the tiering above.
+/// * NOW: a wrong key additionally means the merge writes into a key that is not
+///   the one the target CLI reads. The child launches on its configured default
+///   while the stored fingerprint — correctly derived from the pre-merge map —
+///   describes a config the child is not actually running under in the way the
+///   delivery contract claims. The staleness verdict stays internally
+///   consistent and nothing goes red. Every test stays green, because our tests
+///   can only prove that the MECHANISM is consistent, never that the key name
+///   matches the target CLI's real launch contract.
+///
+/// ⚠️ Do NOT "fix" a wrong key by adding it to
+/// [`is_volatile_fingerprint_key`]. Name-based exemption was measured and
+/// rejected: it makes the reported symptom disappear while silently disabling
+/// staleness detection for genuine user config changes under that key — the
+/// worse of the two bugs. The pre-merge fingerprint exists precisely so that no
+/// name-based exemption is needed. See the deliberate-break note on
+/// `is_volatile_fingerprint_key`.
+///
+/// That failure is invisible by construction: it is a divergence between this
+/// repo's belief and an external CLI's behaviour, and both sides of it are
+/// outside any assertion we can write.
+///
+/// # How to shrink this risk — not by adding tests on our side
+///
+/// The TIER 4 `_ =>` family is where this bites, and the useful next step is to
+/// ESTABLISH THE REAL KEY for one of those CLIs: launch it and observe which env
+/// var (or argv) actually selects the model — a real capture, a vendor doc one
+/// can cite by section, or a reproducible experiment. `Hermes` and `CodeBuddy`
+/// are the cheapest to check.
+///
+/// Adding more tests in this repo cannot raise confidence here, and it is worth
+/// being explicit about why: what is unverified is an EXTERNAL launch contract.
+/// A test we write exercises our own code, so a hand-built fixture asserting
+/// "the model lands under `OPENAI_MODEL`" would pass whether or not the CLI
+/// reads that key — it restates the assumption instead of testing it. The
+/// existing tests in `tests/delegation_fingerprint_stability.rs` deliberately
+/// use `Kiro` / `OpenClaw` and pin only the mechanism; they do not, and cannot,
+/// cover this premise.
+pub(crate) fn per_call_model_env_key(agent_type: AgentType) -> &'static str {
+    match agent_type {
+        // codeg-side launch knob → `--model <id>` argv. NOT in agent_env_keys.
+        AgentType::Kiro => crate::acp::connection::KIRO_MODEL_ENV,
+        // Main key only — never the haiku/sonnet/opus alias slots.
+        AgentType::ClaudeCode => "ANTHROPIC_MODEL",
+        // Everything else: the generic triple's model slot is also the launch
+        // key (Gemini / KimiCode / Grok / Cursor / the OPENAI_MODEL fallback).
+        other => agent_env_keys(other).2,
+    }
+}
+
 /// Serialize a BTreeMap into env_json for database storage.
 /// Returns `None` when the map is empty.
 fn serialize_env_map(env: &BTreeMap<String, String>) -> Result<Option<String>, AcpError> {
@@ -8717,6 +8881,21 @@ pub(crate) async fn build_session_runtime_env(
 /// session-id-derived value would flip the fingerprint the moment a real
 /// session id is assigned and make every session look "stale". Currently only
 /// OpenClaw's reset flag (set iff `session_id` is None at spawn).
+///
+/// # This is NOT the lever for per-call launch knobs
+///
+/// The keys here are per-launch *by name*: `OPENCLAW_RESET_SESSION` is never
+/// something the user configures, so excluding it loses no staleness signal.
+/// Delegation's per-call knobs are different in kind — they land on keys the
+/// settings panel ALSO writes (`KIRO_AGENT`, `KIRO_MODEL`, `ANTHROPIC_MODEL`,
+/// `OPENAI_MODEL`, …). Adding those here would stop a user's genuine model or
+/// persona change from marking running sessions stale, silently disabling a
+/// working feature — a worse bug than the one it would fix, and one
+/// `tests/delegation_fingerprint_stability.rs` deliberately fails on (verified
+/// by temporarily adding `KIRO_MODEL` / `KIRO_AGENT` here: the two
+/// `a_user_configured_*_still_flips_the_fingerprint` tests went red).
+/// Per-call knobs are excluded POSITIONALLY instead, by
+/// `manager::spawn_env_and_fingerprint` hashing the pre-merge map.
 fn is_volatile_fingerprint_key(key: &str) -> bool {
     key == "OPENCLAW_RESET_SESSION"
 }
@@ -8729,10 +8908,7 @@ fn is_volatile_fingerprint_key(key: &str) -> bool {
 /// the wire (only the resulting `stale` bool reaches the frontend) — so a
 /// non-cryptographic hash would do; SHA-256 keeps it deterministic and matches
 /// the rest of the codebase.
-pub(crate) fn fingerprint_config(
-    agent_type: AgentType,
-    runtime_env: &BTreeMap<String, String>,
-) -> String {
+pub fn fingerprint_config(agent_type: AgentType, runtime_env: &BTreeMap<String, String>) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     // BTreeMap iterates in sorted key order → deterministic across calls.

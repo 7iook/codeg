@@ -256,6 +256,7 @@ async fn end_to_end_named_pipe_happy_path() {
                 token_usage: None,
 
                 applied_persona: None,
+                requested_model: None,
             }),
         )
         .await;
@@ -346,6 +347,7 @@ async fn end_to_end_named_pipe_back_to_back_requests() {
                             token_usage: None,
 
                             applied_persona: None,
+                            requested_model: None,
                         }),
                     )
                     .await;
@@ -467,7 +469,7 @@ async fn spawn_stage8_listener(
 /// argv. So a fresh temp env is unnecessary — the name never hits disk.
 ///
 /// Positive assertion: the wire carries the persona all the way to
-/// `SpawnCallArgs.launch_option` AND lands in the terminal status report.
+/// `SpawnCallArgs.launch_options` AND lands in the terminal status report.
 ///
 /// Reverse assertion: `applied_persona.kind` is precisely `"native"` (never
 /// silently downgraded to `"hint"` or `"ignored_unsupported_cli"` for Kiro).
@@ -501,17 +503,17 @@ async fn stage8_wire_kiro_native_persona_reaches_spawn_and_status() {
         .expect("running ack carries a task_id")
         .to_string();
 
-    // 2. The broker resolved persona → launch_option; assert BEFORE completing
+    // 2. The broker resolved persona → launch options; assert BEFORE completing
     //    so a later change that only wires the terminal-report field can't
     //    make this test go green while spawn silently loses the nomination.
     {
         let args = mock.spawn_args.lock().await;
         assert_eq!(args.len(), 1, "exactly one spawn for a single delegation");
         assert_eq!(
-            args[0].launch_option,
-            Some(LaunchOption::KiroPersona("plan-reality-recon".into())),
+            args[0].launch_options,
+            vec![LaunchOption::KiroPersona("plan-reality-recon".into())],
             "wire subagent_type must reach spawn as KiroPersona; got {:?}",
-            args[0].launch_option
+            args[0].launch_options
         );
     }
 
@@ -531,6 +533,7 @@ async fn stage8_wire_kiro_native_persona_reaches_spawn_and_status() {
                 applied_persona: Some(AppliedPersona::Native {
                     name: "plan-reality-recon".into(),
                 }),
+                requested_model: None,
             }),
         )
         .await;
@@ -569,7 +572,7 @@ async fn stage8_wire_kiro_native_persona_reaches_spawn_and_status() {
 /// with the persona name + `ignored` — the three tokens the broker's
 /// `append_unsupported_note` guarantees.
 ///
-/// Reverse assertion: `spawn_args[0].launch_option` is `None`. If the broker
+/// Reverse assertion: `spawn_args[0].launch_options` is EMPTY. If the broker
 /// ever forwarded the nomination to `spawn` for an unsupported CLI (e.g. a
 /// naive future refactor that skipped the `supports_persona()` gate), this
 /// assertion would fail even if `applied_persona` still looked right.
@@ -611,10 +614,10 @@ async fn stage8_wire_unsupported_cli_silently_downgrades_with_note() {
     {
         let args = mock.spawn_args.lock().await;
         assert_eq!(args.len(), 1);
-        assert_eq!(
-            args[0].launch_option, None,
+        assert!(
+            args[0].launch_options.is_empty(),
             "unsupported CLI must NEVER forward a launch option; got {:?}",
-            args[0].launch_option
+            args[0].launch_options
         );
     }
 
@@ -631,6 +634,7 @@ async fn stage8_wire_unsupported_cli_silently_downgrades_with_note() {
                 duration_ms: 33,
                 token_usage: None,
                 applied_persona: None, // broker overrides from stored intent
+                requested_model: None, // ditto
             }),
         )
         .await;
