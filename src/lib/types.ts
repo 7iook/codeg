@@ -932,6 +932,13 @@ export const HERMES_PROVIDERS: HermesProviderOption[] = [
     needsBaseUrl: false,
     kind: "apiKey",
   },
+  // New in Hermes 0.20.0.
+  {
+    id: "ai-gateway",
+    label: "Vercel AI Gateway",
+    needsBaseUrl: false,
+    kind: "apiKey",
+  },
   // OAuth / external providers — credentials set via the terminal `--setup` flow.
   {
     id: "nous",
@@ -981,6 +988,15 @@ export const HERMES_PROVIDERS: HermesProviderOption[] = [
     label: "AWS Bedrock",
     needsBaseUrl: false,
     kind: "aws",
+  },
+  // Google Vertex AI (Hermes 0.20.0) — service-account JSON / application-
+  // default credentials, configured via the terminal `--setup` flow like the
+  // other no-key providers, hence `oauth` (no API-key or base-URL field).
+  {
+    id: "vertex",
+    label: "Google Vertex AI",
+    needsBaseUrl: false,
+    kind: "oauth",
   },
 ]
 

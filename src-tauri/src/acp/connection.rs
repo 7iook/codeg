@@ -1064,16 +1064,15 @@ async fn build_agent(
             } else if let Some((sys_path, sys_args)) = system_cmd.and_then(|(c, a)| {
                 crate::commands::acp::resolve_command_on_path(c).map(|path| (path, a))
             }) {
-                // Fallback: the agent's own CLI is already on PATH (e.g.
-                // `hermes acp`), installed via its official installer rather
+                // Fallback: the agent's own CLI is already on PATH, installed
+                // via pipx / `uv tool install` / an official installer rather
                 // than provisioned through uvx.
                 tracing::warn!(
                     "[ACP][{}] uvx unavailable; falling back to system command {:?}",
                     meta.name, sys_path
                 );
                 // `system_cmd` is a complete launch recipe for the PATH binary;
-                // the uvx entry-script `args` don't necessarily apply to it
-                // (for Hermes both are empty / `["acp"]`, so this is exact).
+                // the uvx entry-script `args` don't necessarily apply to it.
                 parts.push(sys_path.to_string_lossy().to_string());
                 for a in sys_args {
                     parts.push((*a).into());

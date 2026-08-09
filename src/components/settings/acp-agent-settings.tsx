@@ -3519,10 +3519,11 @@ export function buildAcpAdapterCheck(
 }
 
 // `uvReady` reports whether the uv runtime (uvx) is installed — only meaningful
-// for uvx agents (Hermes). Derived from the uv preflight check by the caller.
-// uvx agents need uv installed before their package can be prepared, so when
-// uv isn't ready every managed install/upgrade action is surfaced disabled and
-// the user is pointed at the separate "Install uv" preflight action.
+// for uvx agents (custom Python-package agents; built-in Hermes moved to the
+// npm bridge). Derived from the uv preflight check by the caller. uvx agents
+// need uv installed before their package can be prepared, so when uv isn't
+// ready every managed install/upgrade action is surfaced disabled and the
+// user is pointed at the separate "Install uv" preflight action.
 export function buildVersionCheck(
   agent: AcpAgentInfo,
   uvReady: boolean = true
@@ -3555,11 +3556,11 @@ export function buildVersionCheck(
   const uninstallAction: RunningActionKind =
     agent.distribution_type === "binary" ? "uninstall_binary" : "uninstall_npx"
 
-  // uvx agents (Hermes) need the uv runtime before any managed install/upgrade
-  // can run. Surface a single blocked state pointing at the separate "Install
+  // uvx agents need the uv runtime before any managed install/upgrade can
+  // run. Surface a single blocked state pointing at the separate "Install
   // uv" preflight action below, with the agent-install action shown disabled.
   // This covers both the fresh case (available=false) and the rare system-CLI
-  // case (available=true via a global `hermes`, but uvx still missing).
+  // case (available=true via the agent's own PATH CLI, but uvx still missing).
   // Uninstall stays available even without uv — it only clears the prepared
   // marker — so a prepared package can still be removed when uv is gone.
   if (agent.distribution_type === "uvx" && !uvReady) {
@@ -4073,10 +4074,11 @@ export function AcpAgentSettings() {
         }
 
         // Re-sync `available` from the authoritative backend status. It is
-        // recomputed live (e.g. `uvx_agent_launchable` for Hermes), so an
-        // install that provisions the runtime flips it true here — otherwise
-        // the version-status panel would stay stuck on the unavailable /
-        // "runtime not ready" branch with the freshly installed version shown.
+        // recomputed live (e.g. `uvx_agent_launchable` for custom uvx
+        // agents), so an install that provisions the runtime flips it true
+        // here — otherwise the version-status panel would stay stuck on the
+        // unavailable / "runtime not ready" branch with the freshly installed
+        // version shown.
         if (statusState.status === "fulfilled") {
           setAgents((prev) => {
             let changed = false

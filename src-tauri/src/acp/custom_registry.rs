@@ -515,7 +515,7 @@ pub fn build_meta(def: &CustomAgentDef) -> Result<AcpAgentMeta, CustomAgentError
                 // The user's own install of the CLI (pipx, `uv tool install`,
                 // …) is a legitimate launcher for a custom agent — same
                 // recipe as the uvx entry script, used when the uv runner is
-                // absent (mirrors the Hermes system fallback).
+                // absent.
                 system_cmd: Some((cmd, args)),
             }
         }
