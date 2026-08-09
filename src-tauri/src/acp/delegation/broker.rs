@@ -206,6 +206,51 @@ impl ChildStatusLookup for NoopChildStatusLookup {
     }
 }
 
+/// Resolves a parent CONVERSATION id to the id of an active parent ACP
+/// connection currently bound to it, if any.
+///
+/// Exists so `continue_delegation` can, in the user-side entry only,
+/// translate the synthetic [`crate::commands::delegation::USER_ENTRY_CONNECTION_ID`]
+/// sentinel into a REAL parent ACP connection id BEFORE handing it to
+/// [`ConnectionSpawner::spawn_for_resume`] — the spawner's manager-side body
+/// (`ConnectionManagerSpawner::spawn_child_inner`) looks the parent up in its
+/// connections map to inherit `emitter` / `owner_window_label` /
+/// `working_dir`, and the sentinel is never in that map.
+///
+/// The `manager` layer is deliberately NOT changed to know about the
+/// sentinel (RCA decision A1): sentinel-aware fallback ("nearest window",
+/// "broadcast emitter") makes the child emit events UI panels never see,
+/// and hides which window the continuation actually belongs to. Instead
+/// the translation happens at the boundary between the broker and the
+/// spawner, where the parent conversation id is known.
+///
+/// A `None` return is authoritative in this build: the parent ACP session
+/// is not currently alive, so the child cannot inherit its emitter. The
+/// user-side continuation must then answer with
+/// [`crate::acp::delegation::types::DelegationError::ParentContextUnavailable`]
+/// rather than fall back to a broadcast or to `USER_ENTRY_CONNECTION_ID`
+/// (the reason we are in this branch at all).
+#[async_trait]
+pub trait ParentConnectionLookup: Send + Sync {
+    async fn find_by_parent_conversation_id(&self, parent_conversation_id: i32) -> Option<String>;
+}
+
+/// Default lookup — always `None` (no live parent connection). Used by
+/// `DelegationBroker::new` / `with_writers` (tests that don't exercise the
+/// user-side entry); production replaces it via
+/// [`DelegationBroker::with_parent_connection_lookup`], which wires the
+/// [`crate::acp::manager::ConnectionManager::find_connection_by_conversation_id`]
+/// method through a thin adapter.
+#[derive(Default, Clone)]
+pub struct NoopParentConnectionLookup;
+
+#[async_trait]
+impl ParentConnectionLookup for NoopParentConnectionLookup {
+    async fn find_by_parent_conversation_id(&self, _parent_conversation_id: i32) -> Option<String> {
+        None
+    }
+}
+
 /// User-facing continuability verdict for one child session (design §D4 five
 /// tiers). Serialized snake_case onto the user-side query wire. The design
 /// table's `Closed` label predates the R2-B4 release rename — the wire and
@@ -2343,6 +2388,14 @@ pub struct DelegationBroker {
     /// no-op ("no hint"); production wires `ConnectionManagerLiveReplyLookup` via
     /// `with_live_reply_lookup`.
     live_reply_lookup: Arc<dyn ChildLiveReplyLookup>,
+    /// Resolves a parent conversation id to a currently-live parent ACP
+    /// connection id, used only by the user-side continuation entry to
+    /// translate the synthetic [`crate::commands::delegation::USER_ENTRY_CONNECTION_ID`]
+    /// sentinel into a real connection id BEFORE `spawn_for_resume`.
+    /// Defaults to a no-op ("no live parent"); production wires an adapter
+    /// over [`crate::acp::manager::ConnectionManager::find_connection_by_conversation_id`]
+    /// via [`DelegationBroker::with_parent_connection_lookup`].
+    parent_connection_lookup: Arc<dyn ParentConnectionLookup>,
     pending: Arc<PendingCalls>,
     tool_calls: Arc<ToolCallTracker>,
     pre_canceled_handles: Arc<PreCanceledHandles>,
@@ -2411,6 +2464,7 @@ impl DelegationBroker {
             event_emitter,
             status_lookup: Arc::new(NoopChildStatusLookup),
             live_reply_lookup: Arc::new(NoopChildLiveReplyLookup),
+            parent_connection_lookup: Arc::new(NoopParentConnectionLookup),
             pending: Arc::new(PendingCalls::default()),
             tool_calls: Arc::new(ToolCallTracker::default()),
             pre_canceled_handles: Arc::new(PreCanceledHandles::default()),
@@ -2439,6 +2493,26 @@ impl DelegationBroker {
         live_reply_lookup: Arc<dyn ChildLiveReplyLookup>,
     ) -> Self {
         self.live_reply_lookup = live_reply_lookup;
+        self
+    }
+
+    /// Replace the parent-connection lookup used by the user-side
+    /// continuation entry to translate the synthetic
+    /// [`crate::commands::delegation::USER_ENTRY_CONNECTION_ID`] sentinel
+    /// into a live parent ACP connection id before `spawn_for_resume`.
+    /// Builder-style, layered onto `with_writers` by the production wiring.
+    /// A missing lookup (default `NoopParentConnectionLookup`) makes every
+    /// user-side resume-spawn answer with
+    /// [`crate::acp::delegation::types::DelegationError::ParentContextUnavailable`],
+    /// which is safe (never touches the resume credential) but obviously
+    /// wrong for production — the manager-backed wiring in
+    /// `build_delegation_stack` is what makes UI continuations reach a live
+    /// parent connection at all.
+    pub fn with_parent_connection_lookup(
+        mut self,
+        parent_connection_lookup: Arc<dyn ParentConnectionLookup>,
+    ) -> Self {
+        self.parent_connection_lookup = parent_connection_lookup;
         self
     }
 
@@ -5490,10 +5564,59 @@ impl DelegationBroker {
                     .get(&plan.agent_type)
                     .map(|d: &AgentDelegationDefaults| (d.mode_id.clone(), d.config_values.clone()))
                     .unwrap_or((None, BTreeMap::new()));
+                // User-side entry: the caller passes the synthetic
+                // `USER_ENTRY_CONNECTION_ID` sentinel (there is no ACP client
+                // driving this turn — the human clicked "continue" in the UI
+                // panel). The sentinel is fine for the ownership check (D5
+                // runs on `parent_conversation_id` at S1 above), but the
+                // spawner-side body inherits `emitter` / `owner_window_label`
+                // / `parent_working_dir` from the parent CONNECTIONS map, and
+                // the sentinel is never in that map.
+                //
+                // Translate the sentinel to a real parent ACP connection id
+                // here (the boundary between broker and spawner), so
+                // `manager::spawn_child_inner` stays sentinel-unaware — a
+                // manager-side fallback would emit events UI panels never
+                // see (RCA decision A1: fix at the earlier composition
+                // layer, not by making the spawner guess a broadcast
+                // target). No lookup or no hit = parent conversation has no
+                // live ACP session; refuse with a distinct wire code
+                // (`parent_context_unavailable`) so the UI can suggest
+                // reopening the parent conversation, rather than leaking a
+                // generic `resume_unavailable`.
+                let spawn_parent_conn = if parent_connection_id
+                    == crate::commands::delegation::USER_ENTRY_CONNECTION_ID
+                {
+                    match self
+                        .parent_connection_lookup
+                        .find_by_parent_conversation_id(plan.parent_conversation_id)
+                        .await
+                    {
+                        Some(real) => real,
+                        None => {
+                            self.abort_continuation(
+                                task_id,
+                                continuation_id,
+                                plan.inflight_id,
+                                plan.prior_status,
+                                plan.prior_conn.clone(),
+                            )
+                            .await;
+                            return continuation_err_report(
+                                task_id,
+                                DelegationError::ParentContextUnavailable,
+                                Some(plan.child_conversation_id),
+                                Some(plan.agent_type),
+                            );
+                        }
+                    }
+                } else {
+                    parent_connection_id.to_string()
+                };
                 match self
                     .spawner
                     .spawn_for_resume(
-                        parent_connection_id,
+                        &spawn_parent_conn,
                         plan.agent_type,
                         working_dir.clone(),
                         Some(session_id),
@@ -6293,6 +6416,31 @@ impl ConversationDepthLookup for DbDepthLookup {
             .await
             .map_err(|e| DelegationError::SubagentRuntimeError(format!("db: {e}")))?;
         Ok(row.and_then(|r| r.parent_id))
+    }
+}
+
+/// [`ParentConnectionLookup`] backed by the live [`ConnectionManager`]. Reads
+/// the manager's connection map for the connection currently bound to the
+/// given parent conversation id (via
+/// [`ConnectionManager::find_connection_by_conversation_id`]).
+///
+/// A `None` return is authoritative for the user-side continuation entry:
+/// the parent ACP session is not currently alive (parent conversation
+/// closed / desktop process restarted / never opened this session). The
+/// broker then answers with `ParentContextUnavailable` rather than falling
+/// through to `spawn_for_resume` with the sentinel — see the S2 branch of
+/// [`DelegationBroker::continue_delegation`].
+#[derive(Clone)]
+pub struct ConnectionManagerParentConnectionLookup {
+    pub manager: Arc<crate::acp::manager::ConnectionManager>,
+}
+
+#[async_trait]
+impl ParentConnectionLookup for ConnectionManagerParentConnectionLookup {
+    async fn find_by_parent_conversation_id(&self, parent_conversation_id: i32) -> Option<String> {
+        self.manager
+            .find_connection_by_conversation_id(parent_conversation_id)
+            .await
     }
 }
 
@@ -8258,6 +8406,197 @@ mod tests {
         let s = inner.sessions.get(&task_id).expect("session");
         assert_eq!(s.status, TaskStatus::Completed);
         assert!(!s.released);
+    }
+
+    /// UI continuation, sentinel-translation path (RCA A1): the user-side
+    /// entry carries [`crate::commands::delegation::USER_ENTRY_CONNECTION_ID`],
+    /// which is only an ownership label — the spawner-side body needs a real
+    /// parent ACP connection id to inherit `emitter` / `owner_window` /
+    /// `parent_working_dir` from. When the parent conversation IS bound to a
+    /// live connection, [`DelegationBroker::continue_delegation`] MUST
+    /// translate the sentinel to that real id and hand it to
+    /// `spawn_for_resume`, so the resume actually reaches a live agent
+    /// process and the child's future events flow through the parent's
+    /// emitter. Before the fix this path answered
+    /// `resume_unavailable("parent connection user-entry not found")`.
+    #[tokio::test]
+    async fn user_entry_continue_translates_sentinel_when_parent_alive() {
+        use crate::commands::delegation::USER_ENTRY_CONNECTION_ID;
+
+        /// Live-parent lookup: parent conv 1 → real ACP connection id.
+        struct LiveParent;
+        #[async_trait]
+        impl ParentConnectionLookup for LiveParent {
+            async fn find_by_parent_conversation_id(&self, id: i32) -> Option<String> {
+                if id == 1 {
+                    Some("real-parent-conn".into())
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup())
+                .with_status_lookup(Arc::new(StaticStatusLookup(continue_status_record(42))))
+                .with_parent_connection_lookup(
+                    Arc::new(LiveParent) as Arc<dyn ParentConnectionLookup>
+                );
+        enable_delegation(&broker).await;
+        let task_id = settle_one(&broker, &mock, "c-dead", 42, "pt-user-1").await;
+        mock.mark_dead("c-dead").await;
+
+        // Queue a successful resume spawn + a followup so S4 can dispatch.
+        mock.queue_spawn(Ok("c-revived-user".into())).await;
+        mock.queue_followup(Ok(())).await;
+
+        let cont = broker
+            .continue_delegation(
+                USER_ENTRY_CONNECTION_ID,
+                Some(1),
+                &task_id,
+                "hello from UI".into(),
+                "op-user-alive",
+                TurnOrigin::User,
+            )
+            .await;
+
+        assert_eq!(
+            cont.status,
+            TaskStatus::Running,
+            "UI continue on a live parent must dispatch a running turn, not surface \
+             resume_unavailable (RCA rca-ui-continue-resume). error_code={:?} \
+             message={:?}",
+            cont.error_code,
+            cont.message,
+        );
+        assert_eq!(cont.error_code, None);
+        let resumes = mock.resume_args.lock().await;
+        assert_eq!(resumes.len(), 1, "exactly one resume spawn dispatched");
+        assert_eq!(
+            resumes[0].parent_connection_id, "real-parent-conn",
+            "the sentinel must have been translated to a real ACP connection \
+             id before spawn_for_resume — this is the whole point of the fix"
+        );
+        assert_ne!(
+            resumes[0].parent_connection_id, USER_ENTRY_CONNECTION_ID,
+            "spawn_for_resume must NEVER see the sentinel"
+        );
+        drop(resumes);
+        let followups = mock.followups.lock().await;
+        assert_eq!(followups.len(), 1);
+        assert_eq!(followups[0].conn_id, "c-revived-user");
+    }
+
+    /// UI continuation, parent-dead path: the child is dead AND the parent
+    /// conversation has no live ACP connection either. The user-side entry
+    /// MUST answer with the distinct wire code `parent_context_unavailable`
+    /// (not the older `resume_unavailable`), so the UI can tell the user to
+    /// reopen the parent conversation. No `spawn_for_resume` side effect.
+    #[tokio::test]
+    async fn user_entry_continue_reports_parent_context_unavailable_when_parent_dead() {
+        use crate::commands::delegation::USER_ENTRY_CONNECTION_ID;
+
+        let mock = Arc::new(MockSpawner::new());
+        // Default NoopParentConnectionLookup already returns None for every id.
+        let broker = continue_broker(mock.clone(), 42);
+        enable_delegation(&broker).await;
+        let task_id = settle_one(&broker, &mock, "c-dead", 42, "pt-user-2").await;
+        mock.mark_dead("c-dead").await;
+
+        let cont = broker
+            .continue_delegation(
+                USER_ENTRY_CONNECTION_ID,
+                Some(1),
+                &task_id,
+                "hello from UI".into(),
+                "op-user-dead",
+                TurnOrigin::User,
+            )
+            .await;
+
+        assert_eq!(
+            cont.error_code.as_deref(),
+            Some("parent_context_unavailable"),
+            "a UI continue with no live parent ACP connection must report the \
+             distinct wire code, not `resume_unavailable`"
+        );
+        assert_eq!(cont.status, TaskStatus::Failed);
+        assert!(
+            mock.resume_args.lock().await.is_empty(),
+            "no resume spawn attempted — the credential is untouched"
+        );
+        assert!(mock.followups.lock().await.is_empty());
+        // The session keeps its settled state so a retry (after reopening
+        // the parent conversation) can still succeed.
+        let inner = broker.pending.inner.lock().await;
+        let s = inner.sessions.get(&task_id).expect("session");
+        assert_eq!(s.status, TaskStatus::Completed);
+        assert!(!s.released);
+    }
+
+    /// Regression: the MCP-side (`bin/codeg_mcp.rs` companion listener)
+    /// path carries a REAL parent ACP connection id, never the user-entry
+    /// sentinel — so the parent-connection-lookup translation must NOT
+    /// interfere. This test proves it: a normal LLM continuation with
+    /// `parent_connection_id="parent-conn"` (NOT the sentinel) MUST pass
+    /// that id straight through to `spawn_for_resume` even if the
+    /// parent-connection lookup is wired up, and never consult the lookup.
+    #[tokio::test]
+    async fn non_user_entry_continue_bypasses_parent_connection_lookup() {
+        /// Poisoned lookup: firing it means the broker went through the
+        /// user-entry branch when it shouldn't have.
+        struct PoisonedLookup {
+            called: Arc<tokio::sync::Mutex<bool>>,
+        }
+        #[async_trait]
+        impl ParentConnectionLookup for PoisonedLookup {
+            async fn find_by_parent_conversation_id(&self, _id: i32) -> Option<String> {
+                *self.called.lock().await = true;
+                Some("this-should-never-be-used".into())
+            }
+        }
+
+        let called = Arc::new(tokio::sync::Mutex::new(false));
+        let mock = Arc::new(MockSpawner::new());
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup())
+                .with_status_lookup(Arc::new(StaticStatusLookup(continue_status_record(42))))
+                .with_parent_connection_lookup(Arc::new(PoisonedLookup {
+                    called: called.clone(),
+                })
+                    as Arc<dyn ParentConnectionLookup>);
+        enable_delegation(&broker).await;
+        let task_id = settle_one(&broker, &mock, "c-dead", 42, "pt-mcp-1").await;
+        mock.mark_dead("c-dead").await;
+
+        mock.queue_spawn(Ok("c-revived-mcp".into())).await;
+        mock.queue_followup(Ok(())).await;
+
+        let cont = broker
+            .continue_delegation(
+                "parent-conn", // ← MCP path: real parent ACP connection id
+                Some(1),
+                &task_id,
+                "next".into(),
+                "op-mcp",
+                TurnOrigin::ParentAgent,
+            )
+            .await;
+
+        assert_eq!(cont.status, TaskStatus::Running);
+        assert!(
+            !*called.lock().await,
+            "MCP path must NOT touch the parent-connection lookup — it \
+             already has a real ACP connection id"
+        );
+        let resumes = mock.resume_args.lock().await;
+        assert_eq!(resumes.len(), 1);
+        assert_eq!(
+            resumes[0].parent_connection_id, "parent-conn",
+            "the caller's real ACP connection id must pass through unchanged"
+        );
     }
 
     /// Requirement 7.6: the DB row's agent_type must match the resume target —
