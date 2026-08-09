@@ -4464,6 +4464,8 @@
     "settingsAutoProcessHint": "待办任务自动开始处理，受并发上限约束。",
     "settingsMergeStrategy": "默认合并策略",
     "settingsMergeStrategyHint": "合并任务时，这些修改在分支历史里如何记录。",
+    "settingsAutoMerge": "自动合并",
+    "settingsAutoMergeHint": "任务进入待验收且有可合并改动时自动落地，与点击「合并」相同：提交信息由 agent 自动生成，是否删除 worktree 沿用下方默认。预检未通过或合并失败的任务会留下等你处理。",
     "settingsDeleteWorktree": "合并后删除 worktree",
     "settingsDeleteWorktreeHint": "合并对话框里默认勾选，仍可临时改。",
     "settingsPreflight": "预检命令",

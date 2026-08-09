@@ -4464,6 +4464,8 @@
     "settingsAutoProcessHint": "待辦任務自動開始處理，受並行上限約束。",
     "settingsMergeStrategy": "預設合併策略",
     "settingsMergeStrategyHint": "合併任務時，這些修改在分支歷史裡如何記錄。",
+    "settingsAutoMerge": "自動合併",
+    "settingsAutoMergeHint": "任務進入待驗收且有可合併改動時自動落地，與點擊「合併」相同：提交訊息由 agent 自動產生，是否刪除 worktree 沿用下方預設。預檢未通過或合併失敗的任務會留下等你處理。",
     "settingsDeleteWorktree": "合併後刪除 worktree",
     "settingsDeleteWorktreeHint": "合併對話框裡預設勾選，仍可臨時更改。",
     "settingsPreflight": "預檢命令",

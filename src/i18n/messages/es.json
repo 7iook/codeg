@@ -4464,6 +4464,8 @@
     "settingsAutoProcessHint": "Las tareas pendientes se inician solas, hasta el límite de concurrencia.",
     "settingsMergeStrategy": "Estrategia de fusión por defecto",
     "settingsMergeStrategyHint": "Cómo se registran los cambios de la tarea en el historial de la rama al fusionar.",
+    "settingsAutoMerge": "Fusionar automáticamente",
+    "settingsAutoMergeHint": "Una tarea que llega a revisión con cambios que integrar se fusiona como si pulsaras Fusionar: el agente escribe el mensaje de commit y el worktree sigue el valor por defecto de abajo. Si la verificación falla o una fusión falló, la tarea queda esperándote.",
     "settingsDeleteWorktree": "Eliminar el worktree tras fusionar",
     "settingsDeleteWorktreeHint": "Marca la opción por defecto en el diálogo de fusión; aún puedes cambiarla allí.",
     "settingsPreflight": "Comando de verificación",

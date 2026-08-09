@@ -1498,6 +1498,9 @@ impl TaskEngine {
             self.settle_merge_generation(t, stop_reason, summary.as_deref())
                 .await;
             self.pump_folder(t.folder_id).await;
+            // The folder's one merge slot just freed — the next reviewed task
+            // in the auto-merge train (if any) can land now.
+            self.spawn_auto_merge_sweep(t.folder_id);
             return;
         }
 
@@ -1545,7 +1548,7 @@ impl TaskEngine {
                     .await
                     .unwrap_or(false);
                     if settled {
-                        self.spawn_preflight(task_id, run_seq);
+                        self.spawn_post_review(task_id, run_seq);
                     }
                     settled
                 }
@@ -1666,13 +1669,19 @@ impl TaskEngine {
 
     // ── preflight (acceptance red/green light) ──────────────────────────────
 
-    /// Run the folder's configured preflight command against the task worktree
-    /// after a settle into review. Fire-and-forget: the result is written CAS
-    /// (review + run_seq), so a task that moved on ignores a slow finish.
-    fn spawn_preflight(self: &Arc<Self>, task_id: i32, run_seq: i32) {
+    /// After a settle into review: run the folder's preflight command (if one
+    /// is configured), then give auto-merge its chance. One spawned task, in
+    /// that order — the sweep requires a green light whenever a preflight is
+    /// configured, so the light must be on the row before the sweep reads it.
+    /// Fire-and-forget: the light is written CAS (review + run_seq), so a task
+    /// that moved on ignores a slow finish, and the sweep re-checks status.
+    fn spawn_post_review(self: &Arc<Self>, task_id: i32, run_seq: i32) {
         let engine = self.clone();
         tokio::spawn(async move {
             engine.run_preflight(task_id, run_seq).await;
+            if let Ok(task) = work_task_service::get_model(&engine.db.conn, task_id).await {
+                engine.auto_merge_sweep(task.folder_id).await;
+            }
         });
     }
 
@@ -1980,12 +1989,15 @@ impl TaskEngine {
     /// conflicts in the same turn. Validation runs before the review→merging
     /// CAS, so a refused merge leaves the task untouched; after dispatch the
     /// settle comes from git truth (`settle_merge_generation` / recovery),
-    /// never from the agent's word.
+    /// never from the agent's word. `auto` marks a dispatch the engine's
+    /// auto-merge sweep issued rather than a click — same pipeline (including
+    /// the folder's per-stage prompts), different actor on the timeline.
     pub async fn merge_task(
         self: &Arc<Self>,
         task_id: i32,
         message: Option<String>,
         delete_worktree: bool,
+        auto: bool,
     ) -> Result<(), String> {
         let task = work_task_service::get_model(&self.db.conn, task_id)
             .await
@@ -2051,7 +2063,19 @@ impl TaskEngine {
         };
         // Keep recovery away from the dispatch window (begin → live conn).
         self.merging.lock().await.insert(task_id);
-        let result = match work_task_service::begin_merge(&self.db.conn, task_id, &state).await {
+        // `task.run_seq` was read before the folder lock; the CAS binds the
+        // dispatch to that exact generation, so waiting out the lock behind an
+        // attempt that failed (and bannered the row) misses instead of
+        // redispatching — the auto path's no-retry latch depends on this.
+        let result = match work_task_service::begin_merge(
+            &self.db.conn,
+            task_id,
+            &state,
+            task.run_seq,
+            auto,
+        )
+        .await
+        {
             Err(e) => Err(e.to_string()),
             Ok(None) => Err("task left review before the merge began".to_string()),
             Ok(Some(_run_seq)) => {
@@ -2242,6 +2266,116 @@ impl TaskEngine {
             .clone()
             .ok_or_else(|| "task has no recorded work branch".to_string())?;
         Ok((root, wt, base_branch, work_branch))
+    }
+
+    // ── auto-merge (unattended landing) ─────────────────────────────────────
+
+    /// Fire-and-forget [`Self::auto_merge_sweep`] — a dispatch holds the
+    /// folder's git lock for the whole launch, which must not stall the
+    /// engine's event loop.
+    fn spawn_auto_merge_sweep(self: &Arc<Self>, folder_id: i32) {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            engine.auto_merge_sweep(folder_id).await;
+        });
+    }
+
+    /// Sweep one folder — or, with `None`, every folder that currently holds a
+    /// reviewed task. `None` serves the reconcile tick and a change of the
+    /// global settings row, which can switch auto-merge on for any folder that
+    /// follows it. Each folder's sweep runs spawned, so one folder's dispatch
+    /// cannot delay another's.
+    pub async fn sweep_auto_merge_backlog(self: &Arc<Self>, folder_id: Option<i32>) {
+        match folder_id {
+            Some(folder_id) => self.spawn_auto_merge_sweep(folder_id),
+            None => {
+                let review = work_task_service::list_by_status(
+                    &self.db.conn,
+                    &[WorkTaskStatus::Review],
+                )
+                .await
+                .unwrap_or_default();
+                let mut swept: HashSet<i32> = HashSet::new();
+                for task in review {
+                    if swept.insert(task.folder_id) {
+                        self.spawn_auto_merge_sweep(task.folder_id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// When the folder's settings ask for it, dispatch the same merge the
+    /// button would — agent-written commit message, worktree per the folder's
+    /// default — for the oldest reviewed task that is actually mergeable. One
+    /// dispatch per sweep: merges are serial per folder anyway, and every
+    /// settle re-sweeps, so a column of reviewed tasks drains one landing at a
+    /// time (the merge train).
+    ///
+    /// Concurrent sweeps, clicks and settles are all safe: `merge_task`
+    /// serializes dispatches on the folder git lock and CAS-guards
+    /// review→merging, so the worst case is a benign "someone got there first"
+    /// refusal, which the sweep swallows. A dispatch refused for a real reason
+    /// (wrong base branch, staged changes, …) leaves that reason on the row as
+    /// the card's error banner — and a row with an error is no longer
+    /// eligible, so a hopeless dispatch is attempted once, not looped.
+    async fn auto_merge_sweep(self: &Arc<Self>, folder_id: i32) {
+        let settings = work_task_service::settings_get_effective(&self.db.conn, folder_id)
+            .await
+            .unwrap_or_default();
+        if !settings.auto_merge {
+            return;
+        }
+        // Fast path only — merge_task re-checks under the folder lock.
+        let merging = work_task_service::list_by_status(&self.db.conn, &[WorkTaskStatus::Merging])
+            .await
+            .unwrap_or_default();
+        if merging.iter().any(|t| t.folder_id == folder_id) {
+            return;
+        }
+        let mut candidates: Vec<_> =
+            work_task_service::list_by_status(&self.db.conn, &[WorkTaskStatus::Review])
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| t.folder_id == folder_id && auto_merge_candidate(t, &settings))
+                .collect();
+        candidates.sort_by_key(|t| (t.settled_at, t.id));
+        for task in candidates {
+            // A gone worktree cannot serve a merge generation; that task's
+            // acceptance is the "complete" button — a user decision.
+            if self.live_worktree(&task).await.is_none() {
+                continue;
+            }
+            match self
+                .merge_task(task.id, None, settings.delete_worktree_default, true)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) if is_benign_merge_race(&e) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "[work_task] auto-merge of task {} refused: {e}",
+                        task.id
+                    );
+                    if work_task_service::set_review_error(
+                        &self.db.conn,
+                        task.id,
+                        task.run_seq,
+                        &format!("auto-merge failed: {e}"),
+                    )
+                    .await
+                    .unwrap_or(false)
+                    {
+                        self.emit_upsert(task.id);
+                    }
+                }
+            }
+            // One dispatch (or one refusal) per sweep. Cascading on after a
+            // refusal would stamp one environmental problem onto every card
+            // in the column.
+            return;
+        }
     }
 
     // ── merging crash recovery (git truth) ──────────────────────────────────
@@ -2462,7 +2596,7 @@ impl TaskEngine {
             let changed = match conv_status {
                 Some(ConversationStatus::PendingReview) | Some(ConversationStatus::Completed) => {
                     let stats = self.snapshot_diff_stats(task.id).await;
-                    work_task_service::settle_review(
+                    let settled = work_task_service::settle_review(
                         &self.db.conn,
                         task.id,
                         task.run_seq,
@@ -2470,7 +2604,14 @@ impl TaskEngine {
                         stats,
                     )
                     .await
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                    if settled {
+                        // The dropped TurnComplete owed review its preflight
+                        // and its auto-merge chance — same hook as the live
+                        // settle path.
+                        self.spawn_post_review(task.id, task.run_seq);
+                    }
+                    settled
                 }
                 Some(ConversationStatus::Cancelled) => {
                     work_task_service::cancel(&self.db.conn, task.id, None)
@@ -2534,6 +2675,9 @@ impl TaskEngine {
             tokio::spawn(async move {
                 engine.recover_merging(task.id).await;
                 engine.pump_folder(task.folder_id).await;
+                // Recovery freed the folder's merge slot (landed or bounced) —
+                // resume the auto-merge train where the crash cut it.
+                engine.auto_merge_sweep(task.folder_id).await;
             });
         }
 
@@ -2545,6 +2689,12 @@ impl TaskEngine {
         {
             self.pump_folder(folder_id).await;
         }
+
+        // Review backlog for auto-merge folders: a dispatch lost between the
+        // settle and the merge (crash window), and tasks already sitting in
+        // review when the setting was switched on. The sweep re-checks the
+        // setting per folder, so this is a cheap scan for folders without it.
+        self.sweep_auto_merge_backlog(None).await;
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
@@ -2700,6 +2850,69 @@ async fn converge_worktree_removal(
     if folder_gone {
         emit_folder_deleted(emitter, wt_id);
     }
+}
+
+/// Row-level auto-merge eligibility: everything the sweep can decide without
+/// touching git. Mirrors what the board offers — a task whose merge button the
+/// user would not see (nothing to land) or would not press yet (red or pending
+/// preflight, an error banner from an earlier attempt) is not auto-merged.
+///
+/// - `files_changed == 0` is the "complete" button's territory: dispatching a
+///   merge generation there would land nothing and bounce. `None` (stats
+///   unreadable) merges, exactly like the UI defaults to the merge button.
+/// - With a preflight configured, only a green light qualifies; `None` means
+///   the light is not written yet (the post-preflight hook re-sweeps) and a
+///   red light waits for the user. Without one, there is no gate.
+/// - `last_error` present = an earlier merge failed or was refused; retrying
+///   unattended would loop, so the row waits for the user (any claim or a
+///   fresh dispatch clears it).
+fn auto_merge_candidate(
+    task: &crate::db::entities::work_task::Model,
+    settings: &WorkTaskFolderSettings,
+) -> bool {
+    if task.status != WorkTaskStatus::Review {
+        return false;
+    }
+    if task.last_error.is_some() {
+        return false;
+    }
+    if task.files_changed == Some(0) {
+        return false;
+    }
+    if preflight_configured(settings) {
+        let passed = task
+            .preflight
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<WorkTaskPreflight>(s).ok())
+            .is_some_and(|p| p.status == "passed");
+        if !passed {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the folder's settings would make `run_preflight` attempt a command
+/// at all — the sweep's gate must not wait for a light that will never be
+/// written.
+fn preflight_configured(settings: &WorkTaskFolderSettings) -> bool {
+    settings
+        .preflight_command
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|c| !c.is_empty())
+        || settings.preflight_command_id.is_some()
+}
+
+/// Merge-dispatch refusals that mean "someone else is (or just was) handling
+/// this" rather than "this merge cannot work": the losing side of a race with
+/// a click, another sweep or a user action. Matched on `merge_task`'s own
+/// wording (same file, a screen up) — these are skipped silently, because the
+/// next settle re-sweeps, while every other refusal banners the row.
+fn is_benign_merge_race(error: &str) -> bool {
+    error.contains("not in review")
+        || error.contains("left review")
+        || error.contains("already merging")
 }
 
 /// Pick the launch mode for a pump-driven launch from the task's history: a
@@ -3437,6 +3650,78 @@ mod tests {
         }];
         assert_eq!(prompt_head(&blocks), "Fix the login flow and add tests.");
         assert_eq!(prompt_head(&[]), "");
+    }
+
+    /// The sweep's row-level gate: exactly the tasks whose merge button the
+    /// board would show — and whose light is green — land unattended.
+    #[test]
+    fn auto_merge_candidate_mirrors_the_board() {
+        let settings = WorkTaskFolderSettings::default();
+        let mut task = task_row();
+        task.status = WorkTaskStatus::Review;
+        assert!(auto_merge_candidate(&task, &settings));
+
+        // Unknown stats merge (the UI defaults to the merge button there); an
+        // empty change set is the complete button's territory.
+        task.files_changed = Some(3);
+        assert!(auto_merge_candidate(&task, &settings));
+        task.files_changed = Some(0);
+        assert!(!auto_merge_candidate(&task, &settings));
+        task.files_changed = None;
+
+        // An earlier failed or refused merge waits for the user.
+        task.last_error = Some("merge dispatch failed: conflict".into());
+        assert!(!auto_merge_candidate(&task, &settings));
+        task.last_error = None;
+
+        // Only review is mergeable.
+        task.status = WorkTaskStatus::Running;
+        assert!(!auto_merge_candidate(&task, &settings));
+        task.status = WorkTaskStatus::Review;
+
+        // A configured preflight gates on a green light — absent, running and
+        // red all wait. A blank custom command is no gate; a legacy id-only
+        // reference is one.
+        let gated = WorkTaskFolderSettings {
+            preflight_command: Some("pnpm test".into()),
+            ..Default::default()
+        };
+        assert!(!auto_merge_candidate(&task, &gated));
+        for status in ["running", "failed"] {
+            task.preflight =
+                Some(format!(r#"{{"status":"{status}","command":"pnpm test"}}"#));
+            assert!(!auto_merge_candidate(&task, &gated), "{status} light");
+        }
+        task.preflight = Some(r#"{"status":"passed","command":"pnpm test"}"#.into());
+        assert!(auto_merge_candidate(&task, &gated));
+        assert!(!preflight_configured(&WorkTaskFolderSettings {
+            preflight_command: Some("  ".into()),
+            ..Default::default()
+        }));
+        assert!(preflight_configured(&WorkTaskFolderSettings {
+            preflight_command_id: Some(4),
+            ..Default::default()
+        }));
+    }
+
+    /// The refusal wordings that mean "lost a race" are skipped silently by
+    /// the sweep; the strings live in `merge_task`, and this pin keeps the
+    /// match and the wording from drifting apart.
+    #[test]
+    fn benign_merge_races_are_recognized() {
+        assert!(is_benign_merge_race("task is not in review"));
+        assert!(is_benign_merge_race(
+            "task left review before the merge began"
+        ));
+        assert!(is_benign_merge_race(
+            "another task of this project is already merging — wait for it"
+        ));
+        assert!(!is_benign_merge_race(
+            "project folder is on 'feature', expected 'main' — switch back to merge"
+        ));
+        assert!(!is_benign_merge_race(
+            "the task worktree no longer exists on disk"
+        ));
     }
 
     /// Minimal task row for prompt composition (nothing here touches the DB).

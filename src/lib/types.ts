@@ -1450,6 +1450,10 @@ export interface WorkTaskFolderSettings {
   /** 0 = unlimited. */
   max_concurrent: number
   merge_strategy: "squash" | "merge"
+  /** Land reviewed tasks automatically: when a task settles into review and is
+   *  actually mergeable, the engine dispatches the same merge the button would
+   *  (agent-written commit message, worktree per `delete_worktree_default`). */
+  auto_merge: boolean
   delete_worktree_default: boolean
   /** folder_command id run in the worktree when a task settles into review
    *  (the acceptance red/green light); null = no preflight. */

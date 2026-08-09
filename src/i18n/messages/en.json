@@ -4464,6 +4464,8 @@
     "settingsAutoProcessHint": "To-dos start on their own, up to the concurrency limit.",
     "settingsMergeStrategy": "Default merge strategy",
     "settingsMergeStrategyHint": "How the task's changes are recorded in the branch history when merged.",
+    "settingsAutoMerge": "Merge automatically",
+    "settingsAutoMergeHint": "A task that reaches review with something to land merges as if you clicked Merge: the agent writes the commit message, and the worktree follows the default below. A red preflight or a failed merge leaves the task waiting for you.",
     "settingsDeleteWorktree": "Delete the worktree after merging",
     "settingsDeleteWorktreeHint": "Pre-selects the option in the merge dialog; you can still change it there.",
     "settingsPreflight": "Preflight command",

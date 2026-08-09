@@ -4464,6 +4464,8 @@
     "settingsAutoProcessHint": "Offene Aufgaben starten von selbst, bis zum Parallelitätslimit.",
     "settingsMergeStrategy": "Standard-Merge-Strategie",
     "settingsMergeStrategyHint": "Wie die Änderungen der Aufgabe beim Mergen im Branch-Verlauf festgehalten werden.",
+    "settingsAutoMerge": "Automatisch mergen",
+    "settingsAutoMergeHint": "Eine Aufgabe, die mit landbaren Änderungen das Review erreicht, wird gemergt, als hättest du auf Mergen geklickt: Der Agent schreibt die Commit-Nachricht, der Worktree folgt der Voreinstellung unten. Bei rotem Preflight oder einem fehlgeschlagenen Merge wartet die Aufgabe auf dich.",
     "settingsDeleteWorktree": "Worktree nach dem Mergen löschen",
     "settingsDeleteWorktreeHint": "Aktiviert die Option im Merge-Dialog vor; dort lässt sie sich weiterhin ändern.",
     "settingsPreflight": "Preflight-Befehl",

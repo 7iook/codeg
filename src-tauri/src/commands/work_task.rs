@@ -42,6 +42,17 @@ fn nudge_schedule() {
     }
 }
 
+/// Best-effort auto-merge nudge after a settings change: switching auto-merge
+/// on should drain the review backlog now, not at the next reconcile tick.
+/// Scope 0 is the global row, which any folder without its own row follows —
+/// that one sweeps every folder holding reviewed tasks.
+fn nudge_auto_merge(folder_id: i32) {
+    if let Some(engine) = crate::work_task::engine() {
+        let scope = (folder_id != 0).then_some(folder_id);
+        tokio::spawn(async move { engine.sweep_auto_merge_backlog(scope).await });
+    }
+}
+
 // ── shared business logic (both modes) ──────────────────────────────────────
 
 pub async fn work_task_list_core(
@@ -355,7 +366,7 @@ pub async fn work_task_merge_core(
     delete_worktree: bool,
 ) -> Result<(), DbError> {
     engine()?
-        .merge_task(id, message, delete_worktree)
+        .merge_task(id, message, delete_worktree, false)
         .await
         .map_err(DbError::Validation)
 }
@@ -479,6 +490,7 @@ pub async fn work_task_settings_set_core(
         WorkTaskChange::Settings { folder_id },
     );
     nudge_pump(folder_id);
+    nudge_auto_merge(folder_id);
     Ok(())
 }
 
@@ -496,6 +508,9 @@ pub async fn work_task_settings_delete_core(
         WorkTaskChange::Settings { folder_id },
     );
     nudge_pump(folder_id);
+    // Reverting to the global row can also switch auto-merge ON for this
+    // folder (the global row may carry it) — same drain-now semantics.
+    nudge_auto_merge(folder_id);
     Ok(())
 }
 

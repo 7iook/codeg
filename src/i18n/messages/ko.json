@@ -4464,6 +4464,8 @@
     "settingsAutoProcessHint": "할 일 작업이 동시 실행 한도 내에서 자동으로 시작됩니다.",
     "settingsMergeStrategy": "기본 병합 전략",
     "settingsMergeStrategyHint": "병합할 때 작업의 변경 사항을 브랜치 히스토리에 어떻게 기록할지 정합니다.",
+    "settingsAutoMerge": "자동 병합",
+    "settingsAutoMergeHint": "검토 대기에 도달하고 병합할 변경이 있는 작업은 병합 버튼을 누른 것과 똑같이 자동으로 병합됩니다. 커밋 메시지는 에이전트가 작성하고 worktree 처리는 아래 기본값을 따릅니다. 사전 점검이 실패했거나 병합에 실패한 작업은 남아서 기다립니다.",
     "settingsDeleteWorktree": "머지 후 worktree 삭제",
     "settingsDeleteWorktreeHint": "머지 대화상자에서 기본으로 선택됩니다. 거기서 바꿀 수도 있습니다.",
     "settingsPreflight": "사전 점검 명령",

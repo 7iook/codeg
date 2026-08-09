@@ -1391,17 +1391,26 @@ pub async fn flip_awaiting(
 }
 
 /// review → merging, persisting the merge intent in the same transaction (the
-/// crash-recovery anchor). Also records a `merge_attempt` event.
+/// crash-recovery anchor). Also records a `merge_attempt` event. The CAS takes
+/// `expect_run_seq` — the generation the caller read and validated — so a
+/// dispatch that waited out the folder lock behind another attempt cannot land
+/// on a row that has since moved on. `auto` marks a merge the engine
+/// dispatched on its own (the folder's auto-merge setting): same transition,
+/// timeline records who pulled the trigger, and the CAS additionally refuses
+/// rows carrying `last_error` — a failed merge waits for a human instead of
+/// being retried unattended.
 pub async fn begin_merge(
     conn: &DatabaseConnection,
     id: i32,
     state: &WorkTaskMergeState,
+    expect_run_seq: i32,
+    auto: bool,
 ) -> Result<Option<i32>, DbError> {
     let state_json = serde_json::to_string(state)
         .map_err(|e| DbError::Validation(format!("merge state not serializable: {e}")))?;
     let now = Utc::now();
     let txn = conn.begin().await?;
-    let res = work_task::Entity::update_many()
+    let mut update = work_task::Entity::update_many()
         .col_expr(
             work_task::Column::Status,
             Expr::value(status_str(WorkTaskStatus::Merging)),
@@ -1419,9 +1428,19 @@ pub async fn begin_merge(
         .col_expr(work_task::Column::UpdatedAt, Expr::value(now))
         .filter(work_task::Column::Id.eq(id))
         .filter(work_task::Column::Status.eq(WorkTaskStatus::Review))
-        .filter(work_task::Column::DeletedAt.is_null())
-        .exec(&txn)
-        .await?;
+        // Bind the dispatch to the exact review generation the caller
+        // validated: a merge_task that sat out the folder lock while the row
+        // moved on (another dispatch bounced, a requeue) must miss, not merge
+        // a generation nobody looked at.
+        .filter(work_task::Column::RunSeq.eq(expect_run_seq))
+        .filter(work_task::Column::DeletedAt.is_null());
+    if auto {
+        // last_error is the "waits for a human" latch of the no-auto-retry
+        // invariant: an unattended dispatch never clears it — only a user's
+        // does (the manual path right below this filter).
+        update = update.filter(work_task::Column::LastError.is_null());
+    }
+    let res = update.exec(&txn).await?;
     if res.rows_affected != 1 {
         txn.rollback().await?;
         return Ok(None);
@@ -1431,24 +1450,28 @@ pub async fn begin_merge(
         .await?
         .map(|m| m.run_seq)
         .ok_or_else(|| DbError::NotFound(format!("work task {id}")))?;
+    let actor = if auto { "auto" } else { "user" };
     record_event(
         &txn,
         id,
         "merge_attempt",
-        "user",
+        actor,
         Some(serde_json::json!({
             "strategy": state.strategy,
             "pre_merge_head": state.pre_merge_head,
+            "auto": auto,
         })),
     )
     .await?;
     status_changed_event(
         &txn,
         id,
-        "user",
+        actor,
         Some(WorkTaskStatus::Review),
         WorkTaskStatus::Merging,
-        None,
+        // The timeline's merging header shows this line, so an unattended
+        // merge says who started it.
+        auto.then(|| serde_json::json!({ "reason": "started by auto-merge" })),
     )
     .await?;
     txn.commit().await?;
@@ -1542,6 +1565,33 @@ pub async fn complete_without_merge(
     .await?;
     txn.commit().await?;
     Ok(true)
+}
+
+/// Leave an error banner on a task still in review — an auto-merge dispatch
+/// that was refused before the review→merging CAS (wrong base branch, staged
+/// changes, …) has no status transition to carry its reason, and the manual
+/// path's toast has no one to pop for. Guarded on review + run_seq; a present
+/// `last_error` also excludes the row from later auto-merge attempts, so the
+/// banner doubles as the retry stop.
+pub async fn set_review_error(
+    conn: &DatabaseConnection,
+    id: i32,
+    run_seq: i32,
+    error: &str,
+) -> Result<bool, DbError> {
+    let res = work_task::Entity::update_many()
+        .col_expr(
+            work_task::Column::LastError,
+            Expr::value(Some(error.to_string())),
+        )
+        .col_expr(work_task::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(work_task::Column::Id.eq(id))
+        .filter(work_task::Column::Status.eq(WorkTaskStatus::Review))
+        .filter(work_task::Column::RunSeq.eq(run_seq))
+        .filter(work_task::Column::DeletedAt.is_null())
+        .exec(conn)
+        .await?;
+    Ok(res.rows_affected == 1)
 }
 
 /// merging → review after a conflict / preflight failure / crash cleanup.
@@ -2569,13 +2619,19 @@ mod tests {
         };
         // The merge is a fresh agent generation: begin bumps run_seq and
         // clears the run-scoped fields.
-        let merge_seq = begin_merge(&db.conn, t.id, &state).await.unwrap().unwrap();
+        let merge_seq = begin_merge(&db.conn, t.id, &state, seq, false)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(merge_seq, seq + 1);
         let row = get_model(&db.conn, t.id).await.unwrap();
         assert!(row.connection_id.is_none());
         assert!(row.verdict.is_none());
         // Double begin loses (already merging) — merge idempotency.
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap().is_none());
+        assert!(begin_merge(&db.conn, t.id, &state, seq, false)
+            .await
+            .unwrap()
+            .is_none());
         // Cancel is refused while merging.
         assert!(!cancel(&db.conn, t.id, None).await.unwrap());
 
@@ -2616,7 +2672,10 @@ mod tests {
             delete_worktree: false,
             auto_message: false,
         };
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap().is_some());
+        assert!(begin_merge(&db.conn, t.id, &state, seq, false)
+            .await
+            .unwrap()
+            .is_some());
         assert!(merge_back_to_review(
             &db.conn,
             t.id,
@@ -2632,6 +2691,150 @@ mod tests {
         assert!(events.iter().any(|e| e.kind == "merge_conflict"));
     }
 
+    /// The auto-merge bookkeeping: a refused dispatch leaves its banner on the
+    /// review row (generation-guarded, and the stop that keeps auto-merge from
+    /// retrying a hopeless dispatch forever), and a dispatched auto merge
+    /// records "auto" as the actor who pulled the trigger.
+    #[tokio::test]
+    async fn auto_merge_marks_actor_and_banners_refused_dispatches() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-auto").await;
+        let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
+
+        // Not in review yet — nothing to banner.
+        assert!(!set_review_error(&db.conn, t.id, 0, "early").await.unwrap());
+
+        let seq = to_review(&db, t.id).await;
+        // Stale generation writes nothing; the current one lands on the row.
+        assert!(!set_review_error(&db.conn, t.id, seq + 1, "stale").await.unwrap());
+        assert!(set_review_error(&db.conn, t.id, seq, "wrong branch").await.unwrap());
+        assert_eq!(
+            get(&db.conn, t.id).await.unwrap().last_error.as_deref(),
+            Some("wrong branch")
+        );
+
+        let state = WorkTaskMergeState {
+            pre_merge_head: "abc".into(),
+            message: String::new(),
+            strategy: "squash".into(),
+            delete_worktree: true,
+            auto_message: true,
+        };
+        // An unattended dispatch never clears a banner — the failed row waits
+        // for a human (the no-auto-retry latch) …
+        assert!(begin_merge(&db.conn, t.id, &state, seq, true)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            get(&db.conn, t.id).await.unwrap().last_error.as_deref(),
+            Some("wrong branch")
+        );
+        // … while a user dispatch is exactly that human: retry allowed, and
+        // the fresh merge starts with a fresh slate.
+        assert!(begin_merge(&db.conn, t.id, &state, seq, false)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(get(&db.conn, t.id).await.unwrap().last_error.is_none());
+
+        // Back in clean review for the unattended path proper.
+        assert!(merge_back_to_review(&db.conn, t.id, None, None).await.unwrap());
+        assert!(begin_merge(&db.conn, t.id, &state, seq + 1, true)
+            .await
+            .unwrap()
+            .is_some());
+        // The timeline knows the engine, not the user, started this one.
+        let events = list_events(&db.conn, t.id, 100).await.unwrap();
+        let auto_attempt = events
+            .iter()
+            .find(|e| e.kind == "merge_attempt" && e.actor == "auto")
+            .expect("auto merge attempt event");
+        assert_eq!(
+            auto_attempt
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("auto"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(events.iter().any(|e| {
+            e.kind == "status_changed"
+                && e.payload.as_ref().and_then(|p| p.get("to")).and_then(|v| v.as_str())
+                    == Some("merging")
+                && e.payload
+                    .as_ref()
+                    .and_then(|p| p.get("reason"))
+                    .and_then(|v| v.as_str())
+                    == Some("started by auto-merge")
+        }));
+        // A banner cannot land on a row that already left review.
+        assert!(!set_review_error(&db.conn, t.id, seq, "late").await.unwrap());
+    }
+
+    /// The lock-wait race of the no-auto-retry invariant: two unattended
+    /// sweeps pick the same review generation, the first dispatch fails after
+    /// bumping it, and the second — queued on the folder lock with the
+    /// pre-failure snapshot — must not redispatch. Its stale generation
+    /// misses the CAS, and even a fresh re-listing is stopped by the banner;
+    /// only a user dispatch reopens the row.
+    #[tokio::test]
+    async fn auto_merge_never_retries_a_failed_generation() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/wt-auto-retry").await;
+        let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
+        let seq = to_review(&db, t.id).await;
+        let state = WorkTaskMergeState {
+            pre_merge_head: "abc".into(),
+            message: String::new(),
+            strategy: "squash".into(),
+            delete_worktree: true,
+            auto_message: true,
+        };
+
+        // Sweep A dispatches generation `seq` and its launch fails: back to
+        // review with the banner on, generation now `seq + 1`.
+        assert!(begin_merge(&db.conn, t.id, &state, seq, true)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(
+            merge_back_to_review(&db.conn, t.id, Some("launch failed".into()), None)
+                .await
+                .unwrap()
+        );
+
+        // Sweep B, dispatched against the pre-failure snapshot: stale
+        // generation, CAS miss.
+        assert!(begin_merge(&db.conn, t.id, &state, seq, true)
+            .await
+            .unwrap()
+            .is_none());
+        // A later sweep re-lists and sees the current generation — the banner
+        // still blocks any unattended dispatch.
+        assert!(begin_merge(&db.conn, t.id, &state, seq + 1, true)
+            .await
+            .unwrap()
+            .is_none());
+        let row = get_model(&db.conn, t.id).await.unwrap();
+        assert_eq!(row.status, WorkTaskStatus::Review);
+        assert_eq!(row.last_error.as_deref(), Some("launch failed"));
+        // Exactly one merge attempt made the timeline.
+        let events = list_events(&db.conn, t.id, 100).await.unwrap();
+        assert_eq!(
+            events.iter().filter(|e| e.kind == "merge_attempt").count(),
+            1
+        );
+
+        // The human path stays open: a user dispatch on the current
+        // generation retries and clears the banner.
+        assert!(begin_merge(&db.conn, t.id, &state, seq + 1, false)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(get(&db.conn, t.id).await.unwrap().last_error.is_none());
+    }
+
     /// A task that changed nothing finishes without a merge commit — from
     /// review only, and once.
     #[tokio::test]
@@ -2645,7 +2848,7 @@ mod tests {
             .await
             .unwrap());
 
-        to_review(&db, t.id).await;
+        let seq = to_review(&db, t.id).await;
         // A refused merge leaves its banner on the review row; finishing the
         // task on purpose must not carry that error into Done.
         let state = WorkTaskMergeState {
@@ -2655,7 +2858,10 @@ mod tests {
             delete_worktree: false,
             auto_message: false,
         };
-        assert!(begin_merge(&db.conn, t.id, &state).await.unwrap().is_some());
+        assert!(begin_merge(&db.conn, t.id, &state, seq, false)
+            .await
+            .unwrap()
+            .is_some());
         assert!(merge_back_to_review(&db.conn, t.id, Some("nope".into()), None)
             .await
             .unwrap());
@@ -2738,6 +2944,8 @@ mod tests {
                 delete_worktree: false,
                 auto_message: false,
             },
+            seq,
+            false,
         )
         .await
         .unwrap();

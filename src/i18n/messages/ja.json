@@ -4464,6 +4464,8 @@
     "settingsAutoProcessHint": "ToDo タスクを自動的に開始します（同時実行数の上限まで）。",
     "settingsMergeStrategy": "既定のマージ戦略",
     "settingsMergeStrategyHint": "マージ時にタスクの変更をブランチ履歴へどう記録するか。",
+    "settingsAutoMerge": "自動マージ",
+    "settingsAutoMergeHint": "レビュー待ちに達しマージできる変更があるタスクは、「マージ」を押したときと同じように自動で取り込まれます。コミットメッセージはエージェントが生成し、worktree の扱いは下の既定に従います。プリフライトが赤のタスクやマージに失敗したタスクはそのまま残ります。",
     "settingsDeleteWorktree": "マージ後に worktree を削除",
     "settingsDeleteWorktreeHint": "マージ画面で既定でオンになります。その場で変更もできます。",
     "settingsPreflight": "プリフライトコマンド",
