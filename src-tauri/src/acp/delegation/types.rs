@@ -271,8 +271,28 @@ pub enum DelegationError {
     ChildEmpty,
     #[error("subagent ended with unrecognized stop reason: {0}")]
     ChildUnknown(String),
+    /// Child ended via `refusal` AND its stderr tail carried an upstream
+    /// stream-error / rate-limit / overload keyword (see
+    /// [`classify_child_refusal`]). Lifted out of the generic
+    /// [`Self::ChildRefusal`] bucket so the parent UI + LLM can distinguish
+    /// "the model refused" from "the upstream endpoint dropped mid-turn". Wire
+    /// code is `child_upstream_stream_error`.
+    #[error("subagent upstream stream error: {0}")]
+    ChildUpstreamStreamError(String),
     #[error("canceled: {reason}")]
     Canceled { reason: String },
+    /// Distinct from the generic [`Self::Canceled`]: the parent codeg-mcp
+    /// companion process exited (parent-PID watchdog fired, or stdin closed),
+    /// triggering `drain_and_cancel_all` — every in-flight delegation under
+    /// that companion was force-cancelled as collateral, not because the LLM
+    /// or the user asked. Wire code is `parent_mcp_cascade`.
+    #[error("parent MCP companion exited; delegation cancelled as collateral: {reason}")]
+    ParentMcpCascade { reason: String },
+    /// Distinct from the generic [`Self::Canceled`]: the LLM (via
+    /// `cancel_delegation` MCP tool) or the user (via UI) explicitly stopped
+    /// this task. Wire code is `user_canceled`.
+    #[error("subagent canceled by user or LLM request: {reason}")]
+    UserCanceled { reason: String },
     #[error("parent session is gone")]
     ParentSessionGone,
     /// `continue_with_session` targeted a task whose current turn is still
@@ -322,6 +342,102 @@ pub const INVALID_PERSONA_WIRE_CODE: &str = "invalid_persona";
 /// pre-typed rejection path and [`DelegationOutcome::from_err`] must both read
 /// this constant, so renaming or extending the code is a one-line change.
 pub const INVALID_MODEL_WIRE_CODE: &str = "invalid_model";
+
+/// Wire-stable `DelegationOutcome::Err.code` for
+/// [`DelegationError::ChildUpstreamStreamError`]. See [`classify_child_refusal`]
+/// for the keyword heuristic that promotes a bare `child_refusal` into this
+/// bucket.
+pub const CHILD_UPSTREAM_STREAM_ERROR_WIRE_CODE: &str = "child_upstream_stream_error";
+
+/// Wire-stable code for [`DelegationError::ParentMcpCascade`] — every task
+/// drained by codeg-mcp's parent-PID watchdog (or stdin close) carries this
+/// so the LLM can distinguish "the companion process itself died" from a
+/// deliberate user / LLM cancel.
+pub const PARENT_MCP_CASCADE_WIRE_CODE: &str = "parent_mcp_cascade";
+
+/// Wire-stable code for [`DelegationError::UserCanceled`] — the LLM's own
+/// `cancel_delegation` tool call or a UI-initiated cancel. Distinguishable
+/// from `parent_mcp_cascade` (upstream collateral) and `canceled` (unknown
+/// source fallback).
+pub const USER_CANCELED_WIRE_CODE: &str = "user_canceled";
+
+/// Reason-string prefix codeg-mcp uses when its parent-PID watchdog fires,
+/// its stdin closes, or its stdin errors — every task drained by
+/// `drain_and_cancel_all` rides one of these strings on the wire, so the
+/// broker can promote the incoming `cancel_by_external_handle` into
+/// [`DelegationError::ParentMcpCascade`] instead of the generic
+/// [`DelegationError::Canceled`]. See
+/// `src/bin/codeg_mcp.rs` for the producer sites.
+pub const PARENT_MCP_CASCADE_REASON_PREFIXES: &[&str] = &[
+    "parent process exited",
+    "companion stdio closed",
+    "companion stdin error",
+];
+
+/// Reason-string used by the LLM `cancel_delegation` tool path — see
+/// [`super::broker::DelegationBroker::cancel_task_by_id`]. The prefix is
+/// the SSOT the broker keys on to promote an incoming
+/// `cancel_by_external_handle` into
+/// [`DelegationError::UserCanceled`].
+pub const USER_CANCEL_REASON_PREFIX: &str = "canceled by request";
+
+/// Classify a `refusal`-stop-reason failure by inspecting the child's stderr
+/// tail: an upstream stream-error / rate-limit / overload keyword promotes it
+/// to [`DelegationError::ChildUpstreamStreamError`]; anything else stays as
+/// the generic [`DelegationError::ChildRefusal`].
+///
+/// # Why heuristic, not exhaustive
+///
+/// Claude Code SDK issues at anthropics/claude-code #49619 / #38905 / #75658
+/// show the SDK reports `stop_reason=refusal` for a range of upstream-side
+/// failures (Anthropic API `stream_error`, `Overloaded`, 429 rate limits,
+/// gateway 529 saturation, chunked-transfer aborts) — semantically they are
+/// **not** refusals, but the wire shape from codeg's angle is identical.
+/// Matching on stderr keywords is the only inspectable signal we have.
+///
+/// # Fallback guarantee
+///
+/// A stderr tail with no known keyword falls back to plain
+/// [`DelegationError::ChildRefusal`], so future SDK wording changes cannot
+/// regress the existing wire contract — the worst case is that a stream
+/// error is misreported as `child_refusal`, i.e. the pre-fix baseline.
+pub fn classify_child_refusal(stderr_tail: &str) -> DelegationError {
+    /// Case-insensitive matched against the whole tail. Order irrelevant —
+    /// any hit promotes.
+    const UPSTREAM_STREAM_ERROR_KEYWORDS: &[&str] = &[
+        "stream_error",
+        "streaming_error",
+        "overloaded",
+        "overloaded_error",
+        "\"code\":\"stream_error\"",
+        "\"type\":\"overloaded_error\"",
+        "http/1.1 429",
+        "http/1.1 529",
+        "status 429",
+        "status 529",
+        "rate limit",
+        "rate_limit",
+        "rate_limit_error",
+        "chunked",
+    ];
+    let lowered = stderr_tail.to_ascii_lowercase();
+    for kw in UPSTREAM_STREAM_ERROR_KEYWORDS {
+        if lowered.contains(&kw.to_ascii_lowercase()) {
+            // Preserve the last matching keyword-carrying line — better than
+            // the whole tail for a message field.
+            let excerpt: String = lowered
+                .lines()
+                .rev()
+                .find(|line| line.contains(&kw.to_ascii_lowercase()))
+                .unwrap_or(kw)
+                .chars()
+                .take(200)
+                .collect();
+            return DelegationError::ChildUpstreamStreamError(excerpt);
+        }
+    }
+    DelegationError::ChildRefusal
+}
 
 /// Historical alias accepted on the facade (R2-B4): upstream PR #375 named the
 /// released state `session_closed`; this build reports `session_released`.
@@ -466,7 +582,10 @@ impl DelegationOutcome {
             DelegationError::ChildMaxTurnRequests => "child_max_turn_requests",
             DelegationError::ChildEmpty => "child_empty",
             DelegationError::ChildUnknown(_) => "child_unknown",
+            DelegationError::ChildUpstreamStreamError(_) => CHILD_UPSTREAM_STREAM_ERROR_WIRE_CODE,
             DelegationError::Canceled { .. } => "canceled",
+            DelegationError::ParentMcpCascade { .. } => PARENT_MCP_CASCADE_WIRE_CODE,
+            DelegationError::UserCanceled { .. } => USER_CANCELED_WIRE_CODE,
             DelegationError::ParentSessionGone => "canceled",
             DelegationError::SessionStillRunning => "session_still_running",
             DelegationError::SessionReleased => "session_released",
@@ -602,5 +721,127 @@ mod tests {
             }
             other => panic!("expected Err outcome, got {other:?}"),
         }
+    }
+
+    // ---- new wire codes for the crash-observability split ----
+
+    /// The three new variants project onto DISTINCT wire codes — the whole
+    /// point is that a consumer can tell them apart without inspecting
+    /// message strings.
+    #[test]
+    fn crash_observability_variants_have_distinct_wire_codes() {
+        let cases: Vec<(DelegationError, &str)> = vec![
+            (
+                DelegationError::ChildUpstreamStreamError("stream_error".into()),
+                CHILD_UPSTREAM_STREAM_ERROR_WIRE_CODE,
+            ),
+            (
+                DelegationError::ParentMcpCascade {
+                    reason: "parent process exited".into(),
+                },
+                PARENT_MCP_CASCADE_WIRE_CODE,
+            ),
+            (
+                DelegationError::UserCanceled {
+                    reason: "canceled by request".into(),
+                },
+                USER_CANCELED_WIRE_CODE,
+            ),
+        ];
+        let mut codes: Vec<String> = Vec::new();
+        for (err, want) in cases {
+            match DelegationOutcome::from_err(err, None) {
+                DelegationOutcome::Err { code, .. } => {
+                    assert_eq!(code, want);
+                    codes.push(code);
+                }
+                other => panic!("expected Err outcome, got {other:?}"),
+            }
+        }
+        codes.sort();
+        codes.dedup();
+        assert_eq!(codes.len(), 3, "wire codes must be distinct");
+        // And none of them collapses back to the legacy `canceled` code.
+        for c in &codes {
+            assert_ne!(c, "canceled", "must not shadow generic canceled bucket");
+        }
+    }
+
+    /// The generic `Canceled` variant STILL maps to `canceled` — the fix
+    /// only splits *known* sources off; anything otherwise unattributed keeps
+    /// the wire contract it had before.
+    #[test]
+    fn generic_canceled_still_maps_to_canceled() {
+        let out = DelegationOutcome::from_err(
+            DelegationError::Canceled {
+                reason: "unknown source".into(),
+            },
+            None,
+        );
+        match out {
+            DelegationOutcome::Err { code, .. } => assert_eq!(code, "canceled"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_child_refusal_promotes_on_stream_error_keyword() {
+        let tail =
+            "some earlier line\nAnthropicError: stream_error mid-turn, closing\nmore".to_string();
+        match classify_child_refusal(&tail) {
+            DelegationError::ChildUpstreamStreamError(excerpt) => {
+                assert!(excerpt.contains("stream_error"), "got: {excerpt}");
+            }
+            other => panic!("expected ChildUpstreamStreamError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_child_refusal_promotes_on_overloaded_and_429() {
+        for tail in [
+            "Overloaded",
+            "overloaded_error",
+            "HTTP/1.1 429 Too Many Requests",
+            "status 529 upstream saturated",
+            "rate_limit_error: exceeded",
+        ] {
+            match classify_child_refusal(tail) {
+                DelegationError::ChildUpstreamStreamError(_) => {}
+                other => panic!("expected upstream stream error for {tail:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_child_refusal_falls_back_when_no_keyword() {
+        let tail = "just a plain SDK refusal message with no upstream fingerprint";
+        match classify_child_refusal(tail) {
+            DelegationError::ChildRefusal => {}
+            other => panic!("expected fallback ChildRefusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_child_refusal_is_case_insensitive() {
+        for tail in ["STREAM_ERROR", "Stream_Error", "OVERLOADED"] {
+            assert!(
+                matches!(
+                    classify_child_refusal(tail),
+                    DelegationError::ChildUpstreamStreamError(_)
+                ),
+                "case-insensitive match failed for {tail}"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_mcp_cascade_reason_prefixes_are_stable() {
+        // These strings ship on the wire from codeg-mcp watchdog paths
+        // (`src/bin/codeg_mcp.rs`). Renaming any of them silently breaks the
+        // broker's `cancel_by_external_handle` classification.
+        assert!(PARENT_MCP_CASCADE_REASON_PREFIXES.contains(&"parent process exited"));
+        assert!(PARENT_MCP_CASCADE_REASON_PREFIXES.contains(&"companion stdio closed"));
+        assert!(PARENT_MCP_CASCADE_REASON_PREFIXES.contains(&"companion stdin error"));
+        assert_eq!(USER_CANCEL_REASON_PREFIX, "canceled by request");
     }
 }

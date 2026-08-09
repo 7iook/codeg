@@ -350,8 +350,22 @@ async fn forward_turn_complete_to_broker(
         // parent UI can show a more useful error label than a generic
         // "subagent error". Mirrors the parent's own
         // `turn_failure_error_event` mapping in `connection.rs`.
+        //
+        // `refusal`: some SDKs (Claude Code — see anthropics/claude-code
+        // #49619 / #38905 / #75658) report `stop_reason=refusal` for
+        // upstream stream errors / rate limits / gateway overloads instead
+        // of a real refusal. Peek at `last_text` — it is the last agent
+        // message chunk before end-of-turn, which for SDK-side upstream
+        // failures often carries the fingerprint verbatim — and promote to
+        // the distinct wire code when a keyword matches. Falls back to the
+        // generic `child_refusal` code when no keyword is found, so
+        // pre-fix behaviour is preserved.
         "refusal" => {
-            DelegationOutcome::from_err(DelegationError::ChildRefusal, Some(conversation_id))
+            let classified = last_text
+                .as_deref()
+                .map(crate::acp::delegation::types::classify_child_refusal)
+                .unwrap_or(DelegationError::ChildRefusal);
+            DelegationOutcome::from_err(classified, Some(conversation_id))
         }
         "max_tokens" => {
             DelegationOutcome::from_err(DelegationError::ChildMaxTokens, Some(conversation_id))

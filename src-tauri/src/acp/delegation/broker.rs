@@ -1552,6 +1552,82 @@ fn canceled_outcome(child_conversation_id: i32, reason: &str) -> DelegationOutco
     )
 }
 
+/// Cancel source, resolved at the entry point. Drives the wire code the LLM
+/// / UI sees so the four sources (user request, parent-MCP cascade, upstream
+/// stream error, unknown) never collapse to the same `canceled` bucket.
+///
+/// Kept as an enum here so `drain_and_record_canceled_with_source` can pick
+/// the right typed variant in one place — mirrors the crash-observability
+/// fix's whole point: one wire code per attributable source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelSource {
+    /// Fallback: reason string didn't match any known producer prefix.
+    Unknown,
+    /// LLM `cancel_delegation` tool / UI cancel button — see
+    /// [`crate::acp::delegation::types::USER_CANCEL_REASON_PREFIX`].
+    User,
+    /// codeg-mcp companion parent-watchdog / stdin-EOF / stdin-error drained
+    /// every in-flight task — see
+    /// [`crate::acp::delegation::types::PARENT_MCP_CASCADE_REASON_PREFIXES`].
+    ParentMcpCascade,
+    /// Child process ended without `TurnComplete` (Disconnected / Error) AND
+    /// its terminal_error carries an upstream stream-error / rate-limit /
+    /// overload keyword (see
+    /// [`crate::acp::delegation::types::classify_child_refusal`]).
+    ChildUpstreamStream,
+}
+
+impl CancelSource {
+    /// Resolve the source purely from the reason string. See constants in
+    /// [`crate::acp::delegation::types`] — those strings are the SSOT for
+    /// the producer sites (`codeg_mcp.rs` watchdog, `cancel_task_by_id`).
+    fn classify(reason: &str) -> Self {
+        use crate::acp::delegation::types::{
+            PARENT_MCP_CASCADE_REASON_PREFIXES, USER_CANCEL_REASON_PREFIX,
+        };
+        if reason.starts_with(USER_CANCEL_REASON_PREFIX) {
+            return Self::User;
+        }
+        for p in PARENT_MCP_CASCADE_REASON_PREFIXES {
+            if reason.starts_with(p) {
+                return Self::ParentMcpCascade;
+            }
+        }
+        Self::Unknown
+    }
+
+    /// Project the source + reason onto the typed [`DelegationError`] that
+    /// carries the wire code.
+    fn into_error(self, reason: &str) -> DelegationError {
+        match self {
+            Self::User => DelegationError::UserCanceled {
+                reason: reason.to_string(),
+            },
+            Self::ParentMcpCascade => DelegationError::ParentMcpCascade {
+                reason: reason.to_string(),
+            },
+            Self::ChildUpstreamStream => {
+                DelegationError::ChildUpstreamStreamError(reason.to_string())
+            }
+            Self::Unknown => DelegationError::Canceled {
+                reason: reason.to_string(),
+            },
+        }
+    }
+}
+
+/// Same as [`canceled_outcome`] but taking an explicit [`CancelSource`] so the
+/// caller controls the wire variant (user / parent-MCP-cascade / upstream /
+/// unknown). Callers that already know the source through a string prefix
+/// use [`CancelSource::classify`] to derive it.
+fn canceled_outcome_with_source(
+    child_conversation_id: i32,
+    reason: &str,
+    source: CancelSource,
+) -> DelegationOutcome {
+    DelegationOutcome::from_err(source.into_error(reason), Some(child_conversation_id))
+}
+
 /// What a parent-cancel cascade does to the parent's [`Seal`] — resolved and
 /// acted on inside the SAME lock acquisition that then filters and drains, so a
 /// cascade can never act on a seal state that changed after it looked.
@@ -1620,10 +1696,23 @@ fn drain_and_record_canceled(
     keys: Vec<String>,
     reason: &str,
 ) -> Vec<(RunningTask, u64)> {
+    drain_and_record_canceled_with_source(inner, keys, reason, CancelSource::classify(reason))
+}
+
+/// Same as [`drain_and_record_canceled`] but with an explicit
+/// [`CancelSource`], for callers that already have out-of-band evidence of
+/// the source (e.g. a child-disconnect path knows the upstream classification
+/// from the stderr tail before entering this drain).
+fn drain_and_record_canceled_with_source(
+    inner: &mut PendingInner,
+    keys: Vec<String>,
+    reason: &str,
+    source: CancelSource,
+) -> Vec<(RunningTask, u64)> {
     let mut out = Vec::with_capacity(keys.len());
     for k in keys {
         let task = inner.running.remove(&k).expect("key just observed");
-        let outcome = canceled_outcome(task.child_conversation_id, reason);
+        let outcome = canceled_outcome_with_source(task.child_conversation_id, reason, source);
         let duration_ms = task.started_at.elapsed().as_millis() as u64;
         inner.insert_completed(
             &k,
@@ -4477,6 +4566,22 @@ impl DelegationBroker {
         terminal_error: Option<&str>,
     ) {
         let reason = child_canceled_reason(terminal_error);
+        // Classification precedence: an upstream stream-error / overload
+        // keyword in the terminal_error tail promotes this bucket to a
+        // distinct wire code so the parent LLM + UI can tell "child crashed
+        // mid-turn" apart from the generic disconnect. Fall through to the
+        // reason-string classifier otherwise (which itself resolves the
+        // user vs parent-MCP-cascade split).
+        let source = terminal_error
+            .and_then(|detail| {
+                match crate::acp::delegation::types::classify_child_refusal(detail) {
+                    DelegationError::ChildUpstreamStreamError(_) => {
+                        Some(CancelSource::ChildUpstreamStream)
+                    }
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| CancelSource::classify(&reason));
         let drained = {
             let mut inner = self.pending.inner.lock().await;
             let keys: Vec<String> = inner
@@ -4498,7 +4603,7 @@ impl DelegationBroker {
                 );
                 Vec::new()
             } else {
-                drain_and_record_canceled(&mut inner, keys, &reason)
+                drain_and_record_canceled_with_source(&mut inner, keys, &reason, source)
             }
         };
         for (task, duration_ms) in drained {
@@ -13330,6 +13435,164 @@ mod tests {
                 assert_eq!(
                     message,
                     "canceled: child session ended without TurnComplete"
+                );
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_by_external_handle_parent_mcp_reason_maps_to_cascade_wire_code() {
+        // codeg-mcp companion's `drain_and_cancel_all` fires when the parent
+        // process exits (watchdog) or its stdin closes/errors. Each drained
+        // task rides one of the stable reason strings — the broker MUST
+        // promote it to the `parent_mcp_cascade` wire code so the LLM /
+        // frontend can tell "the companion process died" apart from a user
+        // cancel.
+        for reason_prefix in
+            crate::acp::delegation::types::PARENT_MCP_CASCADE_REASON_PREFIXES.iter()
+        {
+            let mock = Arc::new(MockSpawner::new());
+            mock.queue_spawn(Ok("c-cascade".into())).await;
+            mock.queue_send(Ok(200)).await;
+            let broker =
+                DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+            enable_delegation(&broker).await;
+
+            let driver = {
+                let broker = broker.clone();
+                tokio::spawn(async move {
+                    broker
+                        .handle_request(request_with_handle(1, "pt-cascade", "h-cascade"))
+                        .await
+                })
+            };
+            while broker.pending_count().await == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            broker
+                .cancel_by_external_handle("h-cascade", (*reason_prefix).to_string())
+                .await;
+            let outcome = driver.await.unwrap();
+            match outcome {
+                DelegationOutcome::Err { code, .. } => assert_eq!(
+                    code,
+                    crate::acp::delegation::types::PARENT_MCP_CASCADE_WIRE_CODE,
+                    "prefix {reason_prefix:?} must promote to parent_mcp_cascade",
+                ),
+                other => panic!("expected Err, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_by_external_handle_user_reason_maps_to_user_wire_code() {
+        // A user-driven cancel — LLM's own `cancel_delegation` tool OR a UI
+        // cancel button reaching `cancel_by_external_handle` with the
+        // reason string `cancel_task_by_id` uses — MUST NOT collapse into
+        // the generic `canceled` bucket, so the LLM can distinguish
+        // "I asked to stop this task" from an upstream drop.
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-usercancel".into())).await;
+        mock.queue_send(Ok(201)).await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .handle_request(request_with_handle(1, "pt-uc", "h-uc"))
+                    .await
+            })
+        };
+        while broker.pending_count().await == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        broker
+            .cancel_by_external_handle(
+                "h-uc",
+                crate::acp::delegation::types::USER_CANCEL_REASON_PREFIX.to_string(),
+            )
+            .await;
+        match driver.await.unwrap() {
+            DelegationOutcome::Err { code, .. } => {
+                assert_eq!(code, crate::acp::delegation::types::USER_CANCELED_WIRE_CODE,)
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_by_external_handle_unknown_reason_still_maps_to_canceled() {
+        // Backwards-compat guard: an unattributed reason string keeps the
+        // legacy `canceled` code so any consumer that never learns about
+        // the new codes doesn't lose behaviour.
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-unknown".into())).await;
+        mock.queue_send(Ok(202)).await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .handle_request(request_with_handle(1, "pt-unk", "h-unk"))
+                    .await
+            })
+        };
+        while broker.pending_count().await == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        broker
+            .cancel_by_external_handle("h-unk", "mcp client canceled".into())
+            .await;
+        match driver.await.unwrap() {
+            DelegationOutcome::Err { code, .. } => assert_eq!(code, "canceled"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_by_child_connection_promotes_upstream_stream_error() {
+        // Case B in the RCA: the child process dies without TurnComplete
+        // AND its stderr detail carries an upstream stream-error / overload /
+        // rate-limit keyword. The broker MUST promote the outcome to the
+        // `child_upstream_stream_error` wire code so the parent LLM can
+        // distinguish "the model's endpoint dropped" from a plain refusal
+        // or an opaque cancel.
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-upstream".into())).await;
+        mock.queue_send(Ok(203)).await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "pt-up")).await })
+        };
+        while broker.pending_count().await == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        broker
+            .cancel_by_child_connection(
+                "c-upstream",
+                Some("AnthropicError: stream_error mid-turn, closing connection"),
+            )
+            .await;
+        match driver.await.unwrap() {
+            DelegationOutcome::Err { code, message, .. } => {
+                assert_eq!(
+                    code,
+                    crate::acp::delegation::types::CHILD_UPSTREAM_STREAM_ERROR_WIRE_CODE
+                );
+                assert!(
+                    message.contains("stream_error"),
+                    "reason should preserve the keyword: {message}"
                 );
             }
             other => panic!("expected Err, got {other:?}"),
