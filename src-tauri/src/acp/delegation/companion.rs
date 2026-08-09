@@ -596,12 +596,33 @@ async fn build_tools_call_spawn(
             // Mint an external_handle so a `notifications/cancelled` during setup
             // tears down the just-started child via `cancel_by_external_handle`.
             let external_handle = uuid::Uuid::new_v4().to_string();
+            // Mint a correlation nonce and inject it as a `⟦corr:<nonce>⟧\n`
+            // prefix onto the `task` argument BEFORE forwarding to the broker.
+            // The prefix survives the wire to the ACP-side `tool_call` event
+            // (when the host mirrors `raw_input.task` unchanged), so the
+            // broker can pair the two independent pipelines by a shared
+            // identity — see the header on
+            // [`crate::acp::delegation::broker::DelegationMatchKey::nonce`].
+            // The broker strips the prefix off the task text before it reaches
+            // the child, so the sub-agent never sees it (see
+            // [`crate::acp::lifecycle::split_correlation_nonce_prefix`] is the
+            // ACP-side inverse; the broker's send path calls
+            // `strip_correlation_nonce_prefix`).
+            //
+            // Skipping the injection when the incoming arguments already lack a
+            // `task` string leaves malformed calls unchanged — the listener's
+            // own validation rejects them with a stable error and we don't
+            // want to fabricate a task text here.
+            let correlation_nonce = mint_correlation_nonce();
+            let arguments_with_nonce =
+                inject_correlation_nonce_into_task(arguments, &correlation_nonce);
             let req = BrokerRequest {
                 token: ctx.token.clone(),
                 parent_connection_id: ctx.parent_connection_id.clone(),
                 parent_tool_use_id: tool_use_id,
                 external_handle: Some(external_handle.clone()),
-                input: arguments,
+                correlation_nonce: Some(correlation_nonce),
+                input: arguments_with_nonce,
             };
             let round_trip = Box::pin(async move { client_round_trip(&socket, &req).await });
             register_and_spawn(
@@ -1158,13 +1179,53 @@ pub async fn drain_and_cancel_all(
     }
 }
 
-/// Normalize the MCP `get_delegation_status` arguments into the wire `task_ids`
-/// list. Reads the `task_ids` array, trims each entry, drops empty / whitespace
-/// strings, and de-duplicates while preserving first-seen order. A non-string
-/// entry violates the schema's `items: string` contract, so the whole call is
-/// rejected (`Err`) instead of silently polling a subset — otherwise a malformed
-/// `{"task_ids":[123,"abc"]}` would quietly resolve to just `abc`. `Ok(empty)`
-/// means nothing usable was supplied (missing array, or all empty/whitespace);
+/// Mint a fresh correlation nonce for one `delegate_to_agent` call. The
+/// nonce is a 12-character lowercase-hex slice of a UUIDv4 — enough entropy
+/// (48 bits, ~2.8×10^14) that two overlapping parent turns can safely fire
+/// without collision, short enough to fit invisibly on one screen line, and
+/// ASCII-alphanumeric so [`crate::acp::lifecycle::split_correlation_nonce_prefix`]'s
+/// grammar accepts it verbatim.
+fn mint_correlation_nonce() -> String {
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    // `Uuid::simple()` is 32 lowercase-hex chars — take the leading 12.
+    uuid.chars().take(12).collect()
+}
+
+/// Prepend `⟦corr:<nonce>⟧\n` to the `task` string inside a `delegate_to_agent`
+/// `arguments` JSON object. Returns the arguments unchanged if `task` isn't
+/// a non-empty string — the listener's own validation surfaces that as a
+/// stable schema error, and fabricating a task here would mask the real
+/// input shape from that error.
+///
+/// The BMP `⟦` (U+27E6) / `⟧` (U+27E7) framing is intentional: BMP-only so
+/// no relay collapses a zero-width codepoint, distinctive enough that
+/// legitimate first-line prose starting with `⟦` cannot accidentally look
+/// like the prefix, and single-line so `⟧\n` unambiguously terminates the
+/// header. The ACP-side reader is
+/// [`crate::acp::lifecycle::split_correlation_nonce_prefix`], and the broker
+/// strips the same prefix off the task before dispatch so the child never
+/// sees it.
+fn inject_correlation_nonce_into_task(mut arguments: Value, nonce: &str) -> Value {
+    let Some(obj) = arguments.as_object_mut() else {
+        return arguments;
+    };
+    let Some(task_val) = obj.get_mut("task") else {
+        return arguments;
+    };
+    let Some(task_str) = task_val.as_str() else {
+        return arguments;
+    };
+    if task_str.is_empty() {
+        return arguments;
+    }
+    let with_prefix = format!("\u{27E6}corr:{nonce}\u{27E7}\n{task_str}");
+    *task_val = Value::String(with_prefix);
+    arguments
+}
+
+/// Normalize the `task_ids` array of a `get_delegation_status` call: trim and
+/// de-duplicate strings, preserve order, reject non-string entries. Returns
+/// the normalized list, or an `Err` when the array carries a non-string entry;
 /// the caller rejects both `Err` and `Ok(empty)` with `-32602`. Empty strings are
 /// dropped (not rejected): `items` carries no `minLength`, so `""` satisfies the
 /// schema and is treated as a formatting nicety. No upper bound on the count: a

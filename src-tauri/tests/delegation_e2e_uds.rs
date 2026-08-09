@@ -235,6 +235,7 @@ async fn end_to_end_uds_happy_path() {
         parent_connection_id: "p1".into(),
         parent_tool_use_id: "pt-1".into(),
         external_handle: None,
+        correlation_nonce: None,
         input: json!({"agent_type": "codex", "task": "do x"}),
     };
     let ack = client_round_trip(&socket.to_string_lossy(), &req)
@@ -349,6 +350,7 @@ async fn end_to_end_uds_batch_status() {
             parent_connection_id: "p1".into(),
             parent_tool_use_id: format!("pt-{task}"),
             external_handle: None,
+            correlation_nonce: None,
             input: json!({ "agent_type": "codex", "task": task }),
         };
         let ack = client_round_trip(&socket.to_string_lossy(), &req)
@@ -434,6 +436,7 @@ async fn end_to_end_uds_invalid_token_rejected() {
         parent_connection_id: "p1".into(),
         parent_tool_use_id: "pt-1".into(),
         external_handle: None,
+        correlation_nonce: None,
         input: json!({"agent_type": "codex", "task": "x"}),
     };
     let resp = client_round_trip(&socket.to_string_lossy(), &req)

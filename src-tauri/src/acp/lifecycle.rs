@@ -613,11 +613,62 @@ fn extract_delegation_match_key(raw_input: Option<&str>) -> Option<DelegationMat
         .get("working_dir")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let (task, nonce) = strip_correlation_nonce_prefix(&task);
     Some(DelegationMatchKey {
         agent_type,
         task,
         working_dir,
+        nonce,
     })
+}
+
+/// Peel the correlation-nonce prefix `⟦corr:<nonce>⟧\n` off the start of a
+/// `delegate_to_agent` task string. The codeg-mcp companion injects this line
+/// at `tools/call` entry so the two independent pipelines (ACP
+/// `session/update(tool_call)` and MCP `tools/call`) can pair by an
+/// LLM-invariant identity — a host that mirrors `task` into `raw_input`
+/// carries the prefix through, and the broker's key match rides on it. The
+/// listener strips the prefix off the task text before it reaches the broker
+/// (see the call in `listener.rs::process`), so the sub-agent never sees it.
+/// This function is BOTH the ACP-side inverse (recovering the nonce from a
+/// keyed `raw_input.task`) AND the listener's strip pass — one string
+/// contract, one implementation.
+///
+/// Grammar: the prefix MUST start at byte 0 with the BMP left double angle
+/// bracket `⟦` (U+27E6) and end at the first `⟧` (U+27E7) followed by exactly
+/// one `\n`. The nonce body is 1-64 characters of `[A-Za-z0-9]` — narrow
+/// enough that a legitimate first line of prose containing `⟦` cannot
+/// accidentally match, and BMP-only so the wire can't collapse zero-width
+/// codepoints. On any parse failure the whole string is returned unchanged
+/// and `nonce` is `None`; this is the exact behaviour a legacy companion or
+/// a Cursor `raw_input={}` legacy replay needs (fall through to the ternary
+/// key + FIFO fallback).
+pub(crate) fn strip_correlation_nonce_prefix(task: &str) -> (String, Option<String>) {
+    // Fast path: no chance of a match.
+    if !task.starts_with('\u{27E6}') {
+        return (task.to_string(), None);
+    }
+    // The opening char is 3 bytes in UTF-8 (U+27E6). Slice past it and look
+    // for the closer + literal newline.
+    let after_open = &task['\u{27E6}'.len_utf8()..];
+    let Some(close_rel) = after_open.find('\u{27E7}') else {
+        return (task.to_string(), None);
+    };
+    let inner = &after_open[..close_rel];
+    // Expect `corr:<nonce>` inside the brackets. Reject any other framing.
+    let Some(nonce) = inner.strip_prefix("corr:") else {
+        return (task.to_string(), None);
+    };
+    if nonce.is_empty() || nonce.len() > 64 || !nonce.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return (task.to_string(), None);
+    }
+    // The prefix must be terminated by exactly one `\n` — no CRLF, no other
+    // whitespace, no start-of-task drift.
+    let after_close = &after_open[close_rel + '\u{27E7}'.len_utf8()..];
+    let Some(rest) = after_close.strip_prefix('\n') else {
+        return (task.to_string(), None);
+    };
+    (rest.to_string(), Some(nonce.to_string()))
 }
 
 /// True when an ACP `ToolCallUpdate.status` string is terminal for delegation
@@ -938,6 +989,73 @@ mod delegation_title_tests {
         assert!(!is_terminal(Some("canceled")));
         assert!(!is_terminal(Some("cancelled")));
     }
+
+    // -- Correlation nonce prefix (task first-line ⟦corr:XXX⟧\n) ------------
+
+    #[test]
+    fn strip_correlation_nonce_prefix_recovers_nonce_and_clean_task() {
+        // Happy path: the companion-injected prefix is peeled and its nonce
+        // returned; the remainder is the LLM's original task text.
+        let raw = "\u{27E6}corr:abc123def456\u{27E7}\nreview the PR";
+        let (task, nonce) = super::strip_correlation_nonce_prefix(raw);
+        assert_eq!(task, "review the PR");
+        assert_eq!(nonce.as_deref(), Some("abc123def456"));
+    }
+
+    #[test]
+    fn strip_correlation_nonce_prefix_is_a_noop_without_the_prefix() {
+        // Legacy / downlevel path: a task without the prefix is returned
+        // unchanged and `nonce` is `None`, so the broker falls through to the
+        // pre-fix ternary key + FIFO fallback. This keeps old companions and
+        // Cursor's identity-less `raw_input={}` replay compatible.
+        let (task, nonce) = super::strip_correlation_nonce_prefix("plain task");
+        assert_eq!(task, "plain task");
+        assert!(nonce.is_none());
+
+        // Bracket without the `corr:` framing: rejected, no strip.
+        let (task, nonce) = super::strip_correlation_nonce_prefix("\u{27E6}not:a:corr\u{27E7}\nhi");
+        assert_eq!(task, "\u{27E6}not:a:corr\u{27E7}\nhi");
+        assert!(nonce.is_none());
+
+        // Missing trailing newline: rejected (grammar requires exactly one `\n`).
+        let (task, nonce) =
+            super::strip_correlation_nonce_prefix("\u{27E6}corr:x\u{27E7}same line");
+        assert_eq!(task, "\u{27E6}corr:x\u{27E7}same line");
+        assert!(nonce.is_none());
+
+        // Non-alphanumeric inside the nonce body: rejected.
+        let (task, nonce) =
+            super::strip_correlation_nonce_prefix("\u{27E6}corr:has space\u{27E7}\nhi");
+        assert_eq!(task, "\u{27E6}corr:has space\u{27E7}\nhi");
+        assert!(nonce.is_none());
+    }
+
+    #[test]
+    fn extract_match_key_pulls_nonce_from_task_first_line() {
+        // ACP-side match key building: the host has mirrored the LLM's
+        // `task` argument into `raw_input.task` verbatim, so the correlation
+        // nonce injected by the companion is still on the first line. The
+        // key must carry it as the 4th field AND the `task` field must be
+        // stripped clean — the broker uses this key literally to match the
+        // MCP round-trip whose `DelegationRequest.task` is likewise cleaned.
+        let raw = r#"{"agent_type":"codex","task":"⟦corr:nonce123abc⟧\ndo the thing"}"#;
+        let key = extract_delegation_match_key(Some(raw)).expect("key parses");
+        assert_eq!(key.agent_type, AgentType::Codex);
+        assert_eq!(key.task, "do the thing");
+        assert_eq!(key.nonce.as_deref(), Some("nonce123abc"));
+    }
+
+    #[test]
+    fn extract_match_key_leaves_nonce_none_when_task_carries_no_prefix() {
+        // Legacy replay of a stored ACP event that pre-dates the nonce
+        // injection, OR a host / relay that stripped only the first line: the
+        // key is built with `nonce = None`, which is what the broker's ternary
+        // key + FIFO fallback path expects to see.
+        let raw = r#"{"agent_type":"codex","task":"plain task"}"#;
+        let key = extract_delegation_match_key(Some(raw)).expect("key parses");
+        assert_eq!(key.task, "plain task");
+        assert!(key.nonce.is_none());
+    }
 }
 
 #[cfg(test)]
@@ -1021,6 +1139,7 @@ mod delegation_registration_tests {
             agent_type: AgentType::Codex,
             task: task.to_string(),
             working_dir: None,
+            nonce: None,
         }
     }
 
@@ -2734,6 +2853,7 @@ mod tests {
 
             subagent_type: None,
             model: None,
+            correlation_nonce: None,
         }
     }
 

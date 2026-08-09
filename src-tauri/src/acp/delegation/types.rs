@@ -165,6 +165,16 @@ pub struct DelegationRequest {
     /// `model` is useful there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Correlation nonce minted by the codeg-mcp companion at
+    /// `delegate_to_agent` entry (see
+    /// [`super::transport::BrokerRequest::correlation_nonce`]). The listener
+    /// forwards it through to the broker as the 4th field of
+    /// `DelegationMatchKey` so two parallel `delegate_to_agent` calls that
+    /// share the same `(agent_type, task, working_dir)` triple still pair
+    /// 1:1 with their own ACP `tool_call_id`. `None` on legacy / downlevel
+    /// companions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_nonce: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
