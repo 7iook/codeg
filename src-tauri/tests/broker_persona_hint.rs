@@ -90,6 +90,7 @@ fn persona_request(
         external_handle: None,
         subagent_type: Some(subagent_type.to_string()),
         model: None,
+        correlation_nonce: None,
     }
 }
 

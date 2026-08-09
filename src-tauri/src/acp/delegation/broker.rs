@@ -2212,6 +2212,24 @@ pub struct DelegationMatchKey {
     pub agent_type: AgentType,
     pub task: String,
     pub working_dir: Option<String>,
+    /// Correlation nonce minted by the codeg-mcp companion at
+    /// `delegate_to_agent` entry, injected into BOTH the MCP `tools/call`
+    /// request (as `BrokerRequest.correlation_nonce`) AND the first line of
+    /// the task text as `⟦corr:<nonce>⟧` — so it also rides `raw_input.task`
+    /// when the host mirrors that field into the ACP `tool_call` event. This
+    /// gives the two independent pipelines (ACP `session/update(tool_call)`
+    /// and MCP `tools/call`) a shared, LLM-invariant identity for pairing —
+    /// even when several `delegate_to_agent` calls in one parent turn share
+    /// the SAME `(agent_type, task, working_dir)` triple (typical
+    /// same-task fan-out) or the host strips other args but keeps `task`.
+    ///
+    /// `None` on either side is the LEGACY / DOWNLEVEL path: an old
+    /// companion that pre-dates this field, a host that scrubs `raw_input`
+    /// entirely (Cursor's identity-less MCP announcement), or replay of
+    /// pre-fix stored ACP events. Matching then falls back to the ternary
+    /// key + post-budget FIFO exactly as before — this cannot regress old
+    /// hosts.
+    pub nonce: Option<String>,
 }
 
 /// One captured parent-side `delegate_to_agent` tool_call awaiting its
@@ -3277,6 +3295,7 @@ impl DelegationBroker {
                         agent_type: req.agent_type,
                         task: req.task.clone(),
                         working_dir: req.requested_working_dir.clone(),
+                        nonce: req.correlation_nonce.clone(),
                     };
                     let _ = self
                         .take_matching_tool_call(&req.parent_connection_id, &key)
@@ -3309,6 +3328,7 @@ impl DelegationBroker {
                 agent_type: req.agent_type,
                 task: req.task.clone(),
                 working_dir: req.requested_working_dir.clone(),
+                nonce: req.correlation_nonce.clone(),
             };
             let claimed = self
                 .claim_pending_tool_call_with_brief_wait(&req.parent_connection_id, &match_key)
@@ -6466,6 +6486,7 @@ mod tests {
 
             subagent_type: None,
             model: None,
+            correlation_nonce: None,
         }
     }
 
@@ -9618,6 +9639,7 @@ mod tests {
             agent_type,
             task: task.to_string(),
             working_dir: None,
+            nonce: None,
         }
     }
 
@@ -9626,6 +9648,7 @@ mod tests {
             agent_type: AgentType::Codex,
             task: task.to_string(),
             working_dir: Some(working_dir.to_string()),
+            nonce: None,
         }
     }
 
@@ -9748,6 +9771,125 @@ mod tests {
                 .await
                 .as_deref(),
             Some("tc-a")
+        );
+    }
+
+    /// Build a match key that carries a correlation nonce alongside the
+    /// ternary triple. Used by the nonce-4th-field regressions below.
+    fn key_with_nonce(task: &str, nonce: &str) -> DelegationMatchKey {
+        DelegationMatchKey {
+            agent_type: AgentType::Codex,
+            task: task.to_string(),
+            working_dir: None,
+            nonce: Some(nonce.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_same_triple_but_different_nonces_do_not_swap() {
+        // Root cause under fix: two parallel `delegate_to_agent` calls with
+        // IDENTICAL `(agent_type, task, working_dir)` used to key-collide
+        // (same-task fan-out to two workers) and mis-bind by arrival order.
+        // With the companion-minted correlation nonce as the 4th key field
+        // each call carries its own identity end-to-end, so a round-trip can
+        // ONLY claim its own tool_call_id — the sibling entry is a distinct
+        // key and stays put. Claimed in reverse registration order to prove
+        // the binding is by exact key match, not FIFO.
+        let broker = DelegationBroker::new(
+            Arc::new(MockSpawner::new()) as Arc<dyn ConnectionSpawner>,
+            shallow_lookup(),
+        );
+        broker
+            .register_pending_tool_call_with_key(
+                "p1",
+                "tc-A".into(),
+                Some(key_with_nonce("run tests", "aaa")),
+            )
+            .await;
+        broker
+            .register_pending_tool_call_with_key(
+                "p1",
+                "tc-B".into(),
+                Some(key_with_nonce("run tests", "bbb")),
+            )
+            .await;
+        // The `bbb` round-trip must claim `tc-B` even though `tc-A` registered
+        // first and shares the identical ternary triple.
+        assert_eq!(
+            broker
+                .take_matching_tool_call("p1", &key_with_nonce("run tests", "bbb"))
+                .await
+                .as_deref(),
+            Some("tc-B")
+        );
+        assert_eq!(
+            broker
+                .take_matching_tool_call("p1", &key_with_nonce("run tests", "aaa"))
+                .await
+                .as_deref(),
+            Some("tc-A")
+        );
+        // And a re-claim of either nonce finds nothing (single-shot pairing).
+        assert!(broker
+            .take_matching_tool_call("p1", &key_with_nonce("run tests", "aaa"))
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn nonce_mismatch_prevents_cross_binding() {
+        // Belt-and-braces: even if only ONE keyed entry is registered, a
+        // round-trip whose nonce does not equal that entry's nonce must NOT
+        // claim it. This is the property that keeps the fan-out worker's
+        // MCP round-trip from stealing its sibling's ACP id while the
+        // sibling's own MCP round-trip is still in flight.
+        let broker = DelegationBroker::new(
+            Arc::new(MockSpawner::new()) as Arc<dyn ConnectionSpawner>,
+            shallow_lookup(),
+        );
+        broker
+            .register_pending_tool_call_with_key(
+                "p1",
+                "tc-A".into(),
+                Some(key_with_nonce("run tests", "aaa")),
+            )
+            .await;
+        // A round-trip with a different nonce sees NO match — even though the
+        // triple `(agent_type, task, working_dir)` is identical.
+        assert!(broker
+            .take_matching_tool_call("p1", &key_with_nonce("run tests", "zzz"))
+            .await
+            .is_none());
+        // The correct nonce still claims cleanly.
+        assert_eq!(
+            broker
+                .take_matching_tool_call("p1", &key_with_nonce("run tests", "aaa"))
+                .await
+                .as_deref(),
+            Some("tc-A")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_key_without_nonce_still_matches_pre_fix_ternary_behaviour() {
+        // Legacy replay / downlevel companion path: both sides carry
+        // `nonce = None`, so matching reduces to the pre-fix ternary triple.
+        // This is what protects hosts / relays that predate the nonce
+        // injection AND Cursor's identity-less `raw_input={}` behaviour on
+        // an old bundle.
+        let broker = DelegationBroker::new(
+            Arc::new(MockSpawner::new()) as Arc<dyn ConnectionSpawner>,
+            shallow_lookup(),
+        );
+        broker
+            .register_pending_tool_call_with_key("p1", "tc-legacy".into(), Some(task_key("do x")))
+            .await;
+        assert_eq!(
+            broker
+                .take_matching_tool_call("p1", &task_key("do x"))
+                .await
+                .as_deref(),
+            Some("tc-legacy")
         );
     }
 
@@ -11785,6 +11927,7 @@ mod tests {
                     agent_type: AgentType::ClaudeCode,
                     task: "do x".into(),
                     working_dir: None,
+                    nonce: None,
                 }),
             )
             .await;
@@ -13997,6 +14140,7 @@ mod tests {
             agent_type: AgentType::ClaudeCode,
             task: "do x".into(),
             working_dir: None,
+            nonce: None,
         };
         // The lifecycle registered the keyed tool_call for this delegation.
         broker
@@ -14235,6 +14379,7 @@ mod tests {
             external_handle: None,
             subagent_type: subagent_type.map(str::to_string),
             model: None,
+            correlation_nonce: None,
         }
     }
 

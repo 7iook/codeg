@@ -80,6 +80,22 @@ pub struct BrokerRequest {
     /// cancel path for that call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_handle: Option<String>,
+    /// Correlation nonce minted by the codeg-mcp companion at
+    /// `delegate_to_agent` entry (see [`super::companion`]). The companion
+    /// simultaneously injects the same nonce as a `⟦corr:<nonce>⟧\n` prefix on
+    /// the `task` text so the ACP-side `session/update(tool_call)` (whose
+    /// `raw_input.task` mirrors what the LLM sent) carries the same identity
+    /// through a completely independent pipeline. The broker builds its
+    /// `DelegationMatchKey` with this as the 4th field so parallel calls
+    /// sharing an `(agent_type, task, working_dir)` triple still pair 1:1
+    /// with their own `tool_call_id`.
+    ///
+    /// `None` = legacy / downlevel companion; the broker falls through to
+    /// ternary-key match + FIFO fallback (the pre-fix behaviour). Serde
+    /// `default` + `skip` keeps the wire format backward-compatible with
+    /// older companions that don't emit the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_nonce: Option<String>,
     /// Raw `arguments` JSON from the MCP `tools/call` request, schema-shaped
     /// per [`super::tool_schema_json`]. The main process re-parses into
     /// [`super::types::DelegationRequest`].
@@ -566,6 +582,7 @@ mod tests {
             parent_connection_id: "p1".into(),
             parent_tool_use_id: "pt1".into(),
             external_handle: Some("h1".into()),
+            correlation_nonce: None,
             input: json!({"agent_type": "codex", "task": "hi"}),
         });
         write_frame(&mut a, &msg).await.unwrap();
@@ -674,6 +691,7 @@ mod tests {
             parent_connection_id: "p1".into(),
             parent_tool_use_id: "pt1".into(),
             external_handle: None,
+            correlation_nonce: None,
             input: json!({"agent_type": "codex", "task": "do x"}),
         };
         let resp = client_round_trip(&pipe_name, &req).await.unwrap();
@@ -710,6 +728,7 @@ mod tests {
             parent_connection_id: "p1".into(),
             parent_tool_use_id: "pt1".into(),
             external_handle: None,
+            correlation_nonce: None,
             input: json!({"agent_type": "codex", "task": "do x"}),
         };
         let resp = client_round_trip(&server_path, &req).await.unwrap();

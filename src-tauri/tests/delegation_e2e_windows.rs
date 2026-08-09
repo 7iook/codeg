@@ -230,6 +230,7 @@ async fn end_to_end_named_pipe_happy_path() {
         parent_connection_id: "p1".into(),
         parent_tool_use_id: "pt-1".into(),
         external_handle: None,
+        correlation_nonce: None,
         input: json!({"agent_type": "codex", "task": "do x"}),
     };
     let ack = client_round_trip_with_retry(&pipe, &req)
@@ -364,6 +365,7 @@ async fn end_to_end_named_pipe_back_to_back_requests() {
             parent_connection_id: "p1".into(),
             parent_tool_use_id: format!("pt-{i}"),
             external_handle: None,
+            correlation_nonce: None,
             input: json!({"agent_type": "codex", "task": "x"}),
         };
         let resp = client_round_trip_with_retry(&pipe, &req)
@@ -487,6 +489,7 @@ async fn stage8_wire_kiro_native_persona_reaches_spawn_and_status() {
         parent_connection_id: "p1".into(),
         parent_tool_use_id: "pt-kiro".into(),
         external_handle: None,
+        correlation_nonce: None,
         input: json!({
             "agent_type": "kiro",
             "task": "plan the recon",
@@ -589,6 +592,7 @@ async fn stage8_wire_unsupported_cli_silently_downgrades_with_note() {
         parent_connection_id: "p1".into(),
         parent_tool_use_id: "pt-gem".into(),
         external_handle: None,
+        correlation_nonce: None,
         input: json!({
             "agent_type": "gemini",
             "task": "do gemini work",
@@ -700,6 +704,7 @@ async fn stage8_wire_invalid_persona_fails_before_spawn() {
             parent_connection_id: "p1".into(),
             parent_tool_use_id: "pt-inv".into(),
             external_handle: None,
+            correlation_nonce: None,
             input: json!({
                 "agent_type": "claude_code",
                 "task": "do it",
@@ -784,6 +789,7 @@ async fn stage8_wire_persona_name_grammar_rejected() {
             parent_connection_id: "p1".into(),
             parent_tool_use_id: format!("pt-bad-{tag}"),
             external_handle: None,
+            correlation_nonce: None,
             input: json!({
                 "agent_type": "kiro",
                 "task": "do x",

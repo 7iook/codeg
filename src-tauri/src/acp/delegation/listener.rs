@@ -27,6 +27,7 @@ use crate::acp::delegation::types::{
     DelegationError, DelegationRequest, DelegationTaskReport, TaskStatus, INVALID_MODEL_WIRE_CODE,
 };
 use crate::acp::feedback::{PendingFeedback, SessionFeedbackAccess};
+use crate::acp::lifecycle::strip_correlation_nonce_prefix;
 use crate::acp::question::{QuestionOutcome, SessionQuestionAccess};
 use crate::acp::session_info::{SessionInfo, SessionInfoAccess};
 use crate::acp::work_task_tools::{TaskReportAck, WorkTaskToolAccess};
@@ -711,6 +712,25 @@ impl DelegationListener {
                 return report_failed("invalid_working_dir", "missing or empty task");
             }
         };
+        // Strip the companion-injected `⟦corr:<nonce>⟧\n` prefix off the task
+        // BEFORE the broker sees it. From this point on the string is the real
+        // LLM-authored task — used by the broker as both the `DelegationMatchKey`
+        // `task` field (must equal what ACP-side
+        // `extract_delegation_match_key` produces, and that side also strips)
+        // AND as the first-turn prompt sent to the child (which must never
+        // see the correlation header). The nonce itself rides through as
+        // `DelegationRequest.correlation_nonce` below — the wire-authoritative
+        // path from `BrokerRequest`. On a legacy companion that shipped no
+        // prefix this is a no-op; the fallback also handles the pathological
+        // "companion set `correlation_nonce` but forgot the prefix" shape by
+        // keeping the task text as-is (the wire nonce still binds).
+        let (task, task_nonce) = strip_correlation_nonce_prefix(&task);
+        // Prefer the wire-authoritative nonce (`BrokerRequest.correlation_nonce`)
+        // — it comes from the same place that injected the task prefix, so on
+        // any healthy call they match. The task-derived nonce is a defensive
+        // fallback for hosts / relays that surface `raw_input.task` but not
+        // custom wire fields, and never overrides an explicit wire value.
+        let correlation_nonce = req.correlation_nonce.clone().or(task_nonce);
         // The `working_dir` the LLM explicitly passed (before defaulting),
         // used by the broker's correlation key. `None` when omitted —
         // symmetric with the ACP `raw_input`, which also omits it then.
@@ -754,6 +774,7 @@ impl DelegationListener {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             model,
+            correlation_nonce,
         };
         self.broker.start_delegation(delegation_req).await
     }
@@ -1338,6 +1359,7 @@ mod tests {
             parent_connection_id: "parent-conn".into(),
             parent_tool_use_id: "pt-1".into(),
             external_handle: None,
+            correlation_nonce: None,
             input,
         }
     }
@@ -1461,6 +1483,7 @@ mod tests {
             parent_connection_id: "parent-conn".into(),
             parent_tool_use_id: "pt-1".into(),
             external_handle: None,
+            correlation_nonce: None,
             input: json!({"agent_type": "codex", "task": "do x"}),
         });
         write_frame(&mut client, &msg).await.unwrap();
@@ -1539,6 +1562,7 @@ mod tests {
 
                 subagent_type: None,
                 model: None,
+                correlation_nonce: None,
             })
             .await;
         let task_id = ack.task_id.clone().expect("running task carries an id");
@@ -1698,6 +1722,7 @@ mod tests {
 
                         subagent_type: None,
                         model: None,
+                        correlation_nonce: None,
                     })
                     .await
                     .task_id
@@ -1806,6 +1831,7 @@ mod tests {
 
                 subagent_type: None,
                 model: None,
+                correlation_nonce: None,
             })
             .await;
         let task_id = ack.task_id.clone().unwrap();
@@ -1860,6 +1886,7 @@ mod tests {
 
                     subagent_type: None,
                     model: None,
+                    correlation_nonce: None,
                 };
                 broker.handle_request(req).await
             })
