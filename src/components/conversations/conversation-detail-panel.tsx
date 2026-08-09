@@ -10,12 +10,15 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react"
 import {
+  AlertCircle,
   Copy,
   Download,
   FileCode,
   FileImage,
   FileText,
   Info,
+  Loader2,
+  Plus,
   RefreshCw,
   SquarePen,
   X,
@@ -234,6 +237,7 @@ const ConversationTabView = memo(function ConversationTabView({
   const tWelcome = useTranslations("Folder.chat.welcomeInputPanel")
   const tDiag = useTranslations("DiagnosticsSettings")
   const sharedT = useTranslations("Folder.chat.shared")
+  const tMessageList = useTranslations("Folder.chat.messageList")
   const refreshConversations = useAppWorkspaceStore(
     (s) => s.refreshConversations
   )
@@ -1556,6 +1560,53 @@ const ConversationTabView = memo(function ConversationTabView({
     closeTab(tabId)
   }, [closeTab, folder, openNewConversationTab, tabId, workingDirForConnection])
 
+  // A session/load failure no longer hijacks the whole message area (the
+  // transcript stays readable — see message-list-view's blockingLoadError);
+  // instead the failure lands here, as a banner docked where the composer
+  // sits, carrying the same Reload / New session recovery actions. Persisted
+  // conversations only: drafts never session/load.
+  const acpLoadErrorBanner =
+    hasPersistedConversation && acpLoadError ? (
+      <div
+        role="alert"
+        className="flex w-full items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+      >
+        <AlertCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+        <span
+          className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap"
+          title={acpLoadError}
+        >
+          {acpLoadError}
+        </span>
+        {canShowDetailErrorActions && (
+          <>
+            <button
+              type="button"
+              onClick={handleReloadDetail}
+              disabled={detailLoading}
+              aria-busy={detailLoading}
+              className="flex shrink-0 items-center gap-1 rounded border border-destructive/40 px-2 py-0.5 font-medium transition-colors hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-50"
+            >
+              {detailLoading ? (
+                <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+              ) : (
+                <RefreshCw aria-hidden="true" className="h-3 w-3" />
+              )}
+              {tMessageList("errorActionReload")}
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenNewSession}
+              className="flex shrink-0 items-center gap-1 rounded border border-destructive/40 px-2 py-0.5 font-medium transition-colors hover:bg-destructive/10"
+            >
+              <Plus aria-hidden="true" className="h-3 w-3" />
+              {tMessageList("errorActionNewSession")}
+            </button>
+          </>
+        )}
+      </div>
+    ) : null
+
   // Goal pause/clear is a live, owner-only action, so decide availability once
   // here (where the connection is owned) rather than in the deep goal card.
   // `null` when the session isn't live or the user is a viewer → the card hides
@@ -1668,6 +1719,7 @@ const ConversationTabView = memo(function ConversationTabView({
       attachmentTabId={tabId}
       draftStorageKey={draftStorageKey}
       hideInput={isWelcomeMode || Boolean(acpLoadError)}
+      composerBanner={acpLoadErrorBanner}
       feedbackList={
         feedback.showList ? (
           <FeedbackNotesDisplay notes={feedback.notes} />

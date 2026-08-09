@@ -83,10 +83,11 @@ interface MessageListViewProps {
   detailError?: string | null
   /**
    * Set when the agent rejected `session/load` non-recoverably (e.g. the
-   * historical session_id was deleted). Takes precedence over `detailError`
-   * AND the renderable-content gate: even when the local DB has the full
-   * message history, the user must explicitly choose Reload or start a new
-   * conversation since the agent can't continue this thread.
+   * historical session_id was deleted, or the conversation's folder is gone).
+   * Replaces the message area only when nothing is renderable; when the local
+   * DB has the message history, the transcript stays visible and the owning
+   * panel surfaces this error as a banner in the composer area instead (with
+   * Reload / New session actions), since the agent can't continue the thread.
    */
   acpLoadError?: string | null
   hideEmptyState?: boolean
@@ -1052,11 +1053,13 @@ export function MessageListView({
     )
   }
 
-  // ACP load failures always replace content: even when the local DB has
-  // the conversation, the agent can't resume it, so silently rendering
-  // the history would mislead the user into thinking a follow-up message
-  // would extend the same thread.
-  const blockingLoadError = acpLoadError ?? null
+  // An ACP load failure replaces content only when there is nothing to show
+  // (e.g. the DB detail also failed). When the local DB has the conversation,
+  // keep the transcript visible — the failure is not silent: the detail panel
+  // renders the load error as a banner in the composer area (with Reload /
+  // New session actions), so the user still learns that a follow-up message
+  // can't extend this thread.
+  const blockingLoadError = hasRenderableContent ? null : (acpLoadError ?? null)
   const fallbackLoadError =
     detailError && !hasRenderableContent ? detailError : null
   const renderedLoadError = blockingLoadError ?? fallbackLoadError
