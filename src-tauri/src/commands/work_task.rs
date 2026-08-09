@@ -48,11 +48,58 @@ pub async fn work_task_list_core(
     db: &AppDatabase,
     folder_id: Option<i32>,
 ) -> Result<Vec<WorkTaskInfo>, DbError> {
-    work_task_service::list(&db.conn, folder_id).await
+    let mut infos = work_task_service::list(&db.conn, folder_id).await?;
+    annotate_worktree_missing(db, &mut infos).await?;
+    Ok(infos)
 }
 
 pub async fn work_task_get_core(db: &AppDatabase, id: i32) -> Result<WorkTaskInfo, DbError> {
-    work_task_service::get(&db.conn, id).await
+    let mut infos = vec![work_task_service::get(&db.conn, id).await?];
+    annotate_worktree_missing(db, &mut infos).await?;
+    Ok(infos.pop().expect("annotated the one row"))
+}
+
+/// Stamp `worktree_missing` on every row whose recorded worktree can no longer
+/// serve a merge: its folder row was removed, or its directory is gone from
+/// disk. One batched folder query plus a stat per distinct worktree — cheap
+/// enough for every list, and the board needs it live: a reviewed task whose
+/// worktree vanished must offer "complete" instead of a merge that can only
+/// fail.
+async fn annotate_worktree_missing(
+    db: &AppDatabase,
+    infos: &mut [WorkTaskInfo],
+) -> Result<(), DbError> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let ids: std::collections::BTreeSet<i32> =
+        infos.iter().filter_map(|t| t.worktree_folder_id).collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let live_paths: std::collections::HashMap<i32, String> =
+        crate::db::entities::folder::Entity::find()
+            .filter(crate::db::entities::folder::Column::Id.is_in(ids.iter().copied()))
+            .filter(crate::db::entities::folder::Column::DeletedAt.is_null())
+            .all(&db.conn)
+            .await?
+            .into_iter()
+            .map(|f| (f.id, f.path))
+            .collect();
+    let on_disk: std::collections::HashMap<i32, bool> = ids
+        .iter()
+        .map(|id| {
+            let present = live_paths
+                .get(id)
+                .is_some_and(|path| std::path::Path::new(path).exists());
+            (*id, present)
+        })
+        .collect();
+    for info in infos.iter_mut() {
+        if let Some(wt_id) = info.worktree_folder_id {
+            info.worktree_missing = !on_disk.get(&wt_id).copied().unwrap_or(false);
+        }
+    }
+    Ok(())
 }
 
 pub async fn work_task_events_core(

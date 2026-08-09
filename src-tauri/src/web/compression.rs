@@ -58,8 +58,7 @@ impl Predicate for CompressibleContentType {
 /// The compression layer installed at the top of the router stack (covers
 /// `/api` and the static `ServeDir`; the WebSocket route is an upgrade with
 /// no response body and is unaffected).
-pub fn compression_layer(
-) -> CompressionLayer<impl Predicate + Clone> {
+pub fn compression_layer() -> CompressionLayer<impl Predicate> {
     CompressionLayer::new()
         .compress_when(SizeAbove::new(MIN_COMPRESS_BYTES).and(CompressibleContentType))
 }

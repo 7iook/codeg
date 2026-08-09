@@ -19,6 +19,12 @@ pub struct WorkTaskInfo {
     pub run_seq: i32,
     pub sort_order: i32,
     pub worktree_folder_id: Option<i32>,
+    /// A worktree is recorded but unusable: its folder row was removed, or its
+    /// directory is gone from disk. Stamped by the list/get commands (the row
+    /// itself cannot know) — the board reads it to stop offering a merge that
+    /// can only fail.
+    #[serde(default)]
+    pub worktree_missing: bool,
     pub conversation_id: Option<i32>,
     /// Live ACP connection of the current generation — the transcript viewer
     /// attaches by it. Only meaningful while the task is running/awaiting;

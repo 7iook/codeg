@@ -60,6 +60,7 @@ fn to_info(m: work_task::Model) -> WorkTaskInfo {
         run_seq: m.run_seq,
         sort_order: m.sort_order,
         worktree_folder_id: m.worktree_folder_id,
+        worktree_missing: false, // stamped by the command layer (needs disk + folder rows)
         conversation_id: m.conversation_id,
         connection_id: m.connection_id,
         base_branch: m.base_branch,
@@ -1497,11 +1498,17 @@ pub async fn merge_landed(
     Ok(true)
 }
 
-/// review → done for a task that produced nothing to land: the user accepted
-/// it outright instead of merging an empty change set. The second writer of
-/// `done` (see [`merge_landed`]) — `merge_commit` stays NULL, and the caller
-/// has already checked git truth, so the CAS is the whole guard.
-pub async fn complete_without_merge(conn: &DatabaseConnection, id: i32) -> Result<bool, DbError> {
+/// review → done for a task with no merge to run: the user accepted it
+/// outright — because the change set is empty, or because the worktree is gone
+/// and no merge generation could execute. The second writer of `done` (see
+/// [`merge_landed`]) — `merge_commit` stays NULL, and the caller has already
+/// checked git truth, so the CAS is the whole guard. `reason` is the
+/// human-readable line the timeline shows under the done header.
+pub async fn complete_without_merge(
+    conn: &DatabaseConnection,
+    id: i32,
+    reason: &str,
+) -> Result<bool, DbError> {
     let now = Utc::now();
     let txn = conn.begin().await?;
     let res = work_task::Entity::update_many()
@@ -1530,7 +1537,7 @@ pub async fn complete_without_merge(conn: &DatabaseConnection, id: i32) -> Resul
         "user",
         Some(WorkTaskStatus::Review),
         WorkTaskStatus::Done,
-        Some(serde_json::json!({ "reason": "completed without merging: no changes" })),
+        Some(serde_json::json!({ "reason": reason })),
     )
     .await?;
     txn.commit().await?;
@@ -2634,7 +2641,9 @@ mod tests {
         let t = create(&db.conn, draft(folder_id, "t")).await.unwrap();
 
         // A todo task is not up for acceptance.
-        assert!(!complete_without_merge(&db.conn, t.id).await.unwrap());
+        assert!(!complete_without_merge(&db.conn, t.id, "no changes")
+            .await
+            .unwrap());
 
         to_review(&db, t.id).await;
         // A refused merge leaves its banner on the review row; finishing the
@@ -2655,7 +2664,9 @@ mod tests {
             Some("nope")
         );
 
-        assert!(complete_without_merge(&db.conn, t.id).await.unwrap());
+        assert!(complete_without_merge(&db.conn, t.id, "no changes")
+            .await
+            .unwrap());
         let got = get(&db.conn, t.id).await.unwrap();
         assert_eq!(got.status, WorkTaskStatus::Done);
         // Nothing was merged, so nothing points at a merge commit.
@@ -2664,7 +2675,9 @@ mod tests {
         assert!(got.last_error.is_none());
 
         // Terminal: a second acceptance and a late merge settle are no-ops.
-        assert!(!complete_without_merge(&db.conn, t.id).await.unwrap());
+        assert!(!complete_without_merge(&db.conn, t.id, "no changes")
+            .await
+            .unwrap());
         assert!(!merge_landed(&db.conn, t.id, "abc").await.unwrap());
         assert_eq!(
             get(&db.conn, t.id).await.unwrap().status,
@@ -2679,6 +2692,15 @@ mod tests {
         assert_eq!(
             settle.payload.as_ref().and_then(|p| p.get("to")).and_then(|v| v.as_str()),
             Some("done")
+        );
+        // The caller's reason is what the timeline shows under the header.
+        assert_eq!(
+            settle
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("reason"))
+                .and_then(|v| v.as_str()),
+            Some("no changes")
         );
     }
 

@@ -1117,6 +1117,16 @@ impl TaskEngine {
             }
         }
 
+        // The directory is gone, but the branch may not be: a retry / follow-up
+        // after the checkout was removed must continue the work already
+        // committed on the branch — not restart on a fresh base while those
+        // commits sit stranded on a branch nothing points to. Only when the
+        // branch cannot be re-checked-out does the fresh mint below take over
+        // (re-recording base + branch).
+        if let Some(wt) = self.recreate_worktree_from_branch(task, root).await {
+            return Ok(wt);
+        }
+
         let head = resolve_git_head(&root.path).await.map_err(|e| e.to_string())?;
         let base_branch = head
             .branch
@@ -1167,6 +1177,91 @@ impl TaskEngine {
         .await
         .map_err(|e| e.to_string())?;
         Ok(WorktreeRef {
+            folder_id: wt.id,
+            path: wt.path,
+        })
+    }
+
+    /// Try to re-create the task's worktree from its still-existing work
+    /// branch (`git worktree add <path> <branch>`, prior commits intact), at
+    /// the recorded folder's path — or the standard naming when that row is
+    /// gone. `None` when the branch is gone too, the path is occupied, or git
+    /// refuses (e.g. the branch is checked out elsewhere) — the caller then
+    /// mints a fresh worktree.
+    async fn recreate_worktree_from_branch(
+        &self,
+        task: &crate::db::entities::work_task::Model,
+        root: &crate::models::FolderDetail,
+    ) -> Option<WorktreeRef> {
+        let branch = task.work_branch.as_deref()?;
+        // The recorded base stays authoritative for the branch's history; the
+        // three are only ever written together, but a row missing them must
+        // fall through to the fresh mint that records them.
+        let base_branch = task.base_branch.as_deref()?;
+        let base_sha = task.base_sha.as_deref()?;
+        // The LOCAL branch specifically — an unqualified lookup would let a
+        // same-name tag answer here and the add below would check out a
+        // detached HEAD instead of the branch.
+        match task_git::local_branch_tip(&root.path, branch).await {
+            Ok(Some(_)) => {}
+            _ => return None, // branch gone too — nothing to continue from
+        }
+        // Prefer the recorded folder row's path so the row binds back to the
+        // same workspace entry; fall back to the standard naming.
+        let recorded = match task.worktree_folder_id {
+            Some(wt_id) => get_folder_core(&self.db, wt_id).await.ok().map(|d| d.path),
+            None => None,
+        };
+        let path = recorded.unwrap_or_else(|| {
+            sibling_path(
+                &root.path,
+                &format!("{}-task-{}", basename(&root.path), task.id),
+            )
+        });
+        if Path::new(&path).exists() {
+            return None; // something else lives there now
+        }
+        if let Err(e) = task_git::worktree_add_existing_branch(&root.path, &path, branch).await {
+            tracing::info!(
+                "[work_task] task {}: could not re-create the worktree from branch \
+                 {branch}: {e}",
+                task.id
+            );
+            return None;
+        }
+        let wt = match open_worktree_folder_core(&self.db, path.clone(), task.folder_id).await {
+            Ok(wt) => wt,
+            Err(e) => {
+                // The checkout exists but has no folder row; the fresh-mint
+                // fallback will collide on the path and suffix itself, so the
+                // launch still proceeds.
+                tracing::warn!(
+                    "[work_task] task {}: recreated worktree at {path} but could not open \
+                     its folder: {e}",
+                    task.id
+                );
+                return None;
+            }
+        };
+        // Re-attach under the ORIGINAL base: the branch's history is diffed
+        // against it, and re-recording today's HEAD would misstate the change
+        // set the review shows.
+        if let Err(e) = work_task_service::attach_worktree(
+            &self.db.conn,
+            task.id,
+            wt.id,
+            base_branch,
+            base_sha,
+            branch,
+        )
+        .await
+        {
+            tracing::warn!(
+                "[work_task] task {}: could not re-attach the recreated worktree: {e}",
+                task.id
+            );
+        }
+        Some(WorktreeRef {
             folder_id: wt.id,
             path: wt.path,
         })
@@ -1677,20 +1772,29 @@ impl TaskEngine {
 
     // ── accept without merging ─────────────────────────────────────────────
 
-    /// Accept a reviewed task that produced nothing to land: no merge
-    /// generation, just review → done, optionally taking the worktree with it.
+    /// Accept a reviewed task without dispatching a merge generation: review →
+    /// done, optionally taking the worktree with it.
     ///
-    /// The board only offers this when the recorded diff stat is empty, and
-    /// that stat is a snapshot from when the run settled — so git, not the row,
-    /// decides. The whole decision runs inside the folder's git lock, with the
-    /// CAS in the middle: check, settle and remove form one critical section,
-    /// leaving no window in which the task can gain a commit between the check
-    /// that cleared it and the `branch -D` that would take it away.
+    /// Two ways in, and the board offers exactly one of them per task:
+    /// - the recorded diff stat is empty — nothing to land. The stat is a
+    ///   snapshot from when the run settled, so git (not the row) re-decides
+    ///   under the lock;
+    /// - the worktree is GONE (folder row removed, or its directory deleted
+    ///   from disk) — a merge generation cannot run at all, so completing is
+    ///   the only acceptance left. The leftovers are converged like any other
+    ///   removal, except the work branch survives whenever it still holds
+    ///   commits the base never received.
     ///
-    /// Two probes, because neither alone sees everything the removal destroys:
-    /// a commit made on the work branch is invisible to `git status` but shows
-    /// up in the diff against the base, and an untracked file is the reverse.
-    /// Anything either one finds keeps the worktree on disk.
+    /// The whole decision runs inside the folder's git lock, with the CAS in
+    /// the middle: check, settle and remove form one critical section, leaving
+    /// no window in which the task can gain a commit between the check that
+    /// cleared it and the `branch -D` that would take it away.
+    ///
+    /// Two probes on the live-worktree path, because neither alone sees
+    /// everything the removal destroys: a commit made on the work branch is
+    /// invisible to `git status` but shows up in the diff against the base, and
+    /// an untracked file is the reverse. Anything either one finds keeps the
+    /// worktree on disk.
     pub async fn complete_task(&self, task_id: i32, delete_worktree: bool) -> Result<(), String> {
         let task = work_task_service::get_model(&self.db.conn, task_id)
             .await
@@ -1705,12 +1809,20 @@ impl TaskEngine {
         let lock = self.folder_lock(task.folder_id).await;
         let _guard = lock.lock().await;
 
-        if self.has_landable_changes(&task).await? {
-            return Err(
-                "this task changed files after all — merge it instead of completing it".to_string(),
-            );
-        }
-        if !work_task_service::complete_without_merge(&self.db.conn, task_id)
+        let live_wt = self.live_worktree(&task).await;
+        let reason = match &live_wt {
+            Some(wt) => {
+                if self.has_landable_changes(&task, &wt.path).await? {
+                    return Err(
+                        "this task changed files after all — merge it instead of completing it"
+                            .to_string(),
+                    );
+                }
+                "completed without merging: no changes"
+            }
+            None => "completed without merging: the worktree is gone",
+        };
+        if !work_task_service::complete_without_merge(&self.db.conn, task_id, reason)
             .await
             .map_err(|e| e.to_string())?
         {
@@ -1718,7 +1830,13 @@ impl TaskEngine {
         }
         self.emit_upsert(task_id);
 
-        if delete_worktree {
+        if live_wt.is_none() {
+            // Nothing usable is left behind the worktree pointer — converge
+            // the bookkeeping regardless of the checkbox (there is no worktree
+            // left to keep), sparing only a branch that still holds work.
+            self.converge_missing_worktree(&task).await;
+            self.emit_upsert(task_id);
+        } else if delete_worktree {
             if self.worktree_holds_uncommitted(&task).await {
                 let _ = work_task_service::set_cleanup_state(
                     &self.db.conn,
@@ -1737,6 +1855,82 @@ impl TaskEngine {
             self.emit_upsert(task_id);
         }
         Ok(())
+    }
+
+    /// The task's recorded worktree while it can still serve a merge: folder
+    /// row live and directory on disk. `None` covers "never recorded", "row
+    /// removed" and "directory gone" alike.
+    async fn live_worktree(
+        &self,
+        task: &crate::db::entities::work_task::Model,
+    ) -> Option<crate::models::FolderDetail> {
+        let wt_id = task.worktree_folder_id?;
+        let detail = get_folder_core(&self.db, wt_id).await.ok()?;
+        Path::new(&detail.path).exists().then_some(detail)
+    }
+
+    /// Converge the leftovers of a worktree that is no longer usable (folder
+    /// row removed, or directory gone from disk): prune the stale git
+    /// registration, soft-delete the folder row, re-parent its conversations —
+    /// the same sequence every other removal runs — EXCEPT that the work
+    /// branch survives whenever it still holds commits the base never
+    /// received. This path is reached without the user ever confirming a
+    /// deletion of work, and `branch -D` is its only irreversible step; a kept
+    /// branch stays visible in the branch selector for a manual merge or
+    /// delete. Caller holds the folder git lock.
+    async fn converge_missing_worktree(&self, task: &crate::db::entities::work_task::Model) {
+        let task_id = task.id;
+        let Some(wt_id) = task.worktree_folder_id else {
+            return; // already detached — nothing to converge
+        };
+        let root = get_folder_core(&self.db, task.folder_id).await.ok();
+        let wt = get_folder_core(&self.db, wt_id).await.ok();
+        let (Some(root), Some(wt)) = (root, wt) else {
+            // The folder rows are already gone — detach, and tell clients
+            // still holding a stale copy to drop it.
+            let _ = work_task_service::clear_worktree(&self.db.conn, task_id).await;
+            emit_folder_deleted(&self.emitter, wt_id);
+            return;
+        };
+        let mut branch_to_delete = task.work_branch.as_deref();
+        if let Some(branch) = branch_to_delete {
+            if task_git::branch_holds_unlanded_work(
+                &root.path,
+                branch,
+                task.base_branch.as_deref(),
+                task.base_sha.as_deref(),
+            )
+            .await
+            {
+                tracing::info!(
+                    "[work_task] task {task_id}: keeping branch {branch} — it still holds \
+                     unlanded commits"
+                );
+                let _ = work_task_service::record_event(
+                    &self.db.conn,
+                    task_id,
+                    "user_action",
+                    "engine",
+                    Some(serde_json::json!({ "action": "branch_kept", "branch": branch })),
+                )
+                .await;
+                branch_to_delete = None;
+            }
+        }
+        if let Err(e) =
+            task_git::remove_worktree_and_branch(&root.path, &wt.path, branch_to_delete).await
+        {
+            let _ = work_task_service::set_cleanup_state(
+                &self.db.conn,
+                task_id,
+                true,
+                Some(e.to_string()),
+            )
+            .await;
+            return;
+        }
+        converge_worktree_removal(&self.db, &self.emitter, task_id, wt_id, task.folder_id, &wt.path)
+            .await;
     }
 
     /// Whether the task worktree still has anything uncommitted (tracked edits
@@ -1760,22 +1954,17 @@ impl TaskEngine {
     /// task?" — including work committed on the branch after the run settled,
     /// which `git status` reports as a clean worktree. Mirrors the changed-files
     /// view the user reviewed (same base fallback), so the board's offer and
-    /// this check cannot disagree. A task whose worktree is already gone has
-    /// nothing to land.
+    /// this check cannot disagree. `wt_path` is the already-verified live
+    /// worktree (see [`Self::live_worktree`]).
     async fn has_landable_changes(
         &self,
         task: &crate::db::entities::work_task::Model,
+        wt_path: &str,
     ) -> Result<bool, String> {
-        let Some(wt_id) = task.worktree_folder_id else {
-            return Ok(false);
-        };
         let Some(base) = task.base_sha.clone().or_else(|| task.base_branch.clone()) else {
             return Ok(false);
         };
-        let wt = get_folder_core(&self.db, wt_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let files = task_git::diff_numstat(&wt.path, &base)
+        let files = task_git::diff_numstat(wt_path, &base)
             .await
             .map_err(|e| format!("could not read the task's changes: {e}"))?;
         Ok(!files.is_empty())
@@ -2168,6 +2357,12 @@ impl TaskEngine {
             return;
         };
         let Some(wt_id) = task.worktree_folder_id else {
+            // Nothing left to remove. A cleanup flag surviving past the
+            // detach would offer a retry that can never succeed — clear it.
+            if task.cleanup_state.is_some() {
+                let _ =
+                    work_task_service::set_cleanup_state(&self.db.conn, task_id, false, None).await;
+            }
             return;
         };
         // Precondition: no live connection of ours on this task.

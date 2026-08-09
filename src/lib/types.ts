@@ -1343,6 +1343,10 @@ export interface WorkTask {
   run_seq: number
   sort_order: number
   worktree_folder_id: number | null
+  /** A worktree is recorded but unusable — its folder row was removed or its
+   *  directory is gone from disk. Merge cannot run; review offers "complete"
+   *  instead. Absent = false (stamped by the list/get commands). */
+  worktree_missing?: boolean
   conversation_id: number | null
   /** Live ACP connection of the current generation; stale after a settle —
    *  gate on status before attaching. */

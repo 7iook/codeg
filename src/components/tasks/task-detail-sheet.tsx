@@ -218,6 +218,10 @@ export function TaskDetailSheet({
 
   const taskId = task?.id ?? null
   const hasWorktree = task?.worktree_folder_id != null
+  // Recorded AND still on disk — the only state a diff can be read in. The
+  // cleanup / delete entries below stay on `hasWorktree`: converging the
+  // leftovers of a vanished worktree is exactly what they are for.
+  const worktreeUsable = hasWorktree && task?.worktree_missing !== true
   const conversationId = task?.conversation_id ?? null
   const taskStatus = task?.status ?? null
   // Total token usage of the task's conversation — parsed from the agent's own
@@ -265,7 +269,7 @@ export function TaskDetailSheet({
     try {
       const [evs, fls] = await Promise.all([
         workTaskEvents(taskId),
-        hasWorktree ? workTaskChangedFiles(taskId) : Promise.resolve([]),
+        worktreeUsable ? workTaskChangedFiles(taskId) : Promise.resolve([]),
       ])
       if (id === reqRef.current) {
         setEvents(evs)
@@ -274,7 +278,7 @@ export function TaskDetailSheet({
     } catch {
       // keep previous data on transient error
     }
-  }, [taskId, hasWorktree])
+  }, [taskId, worktreeUsable])
 
   useEffect(() => {
     if (!open || taskId == null) return
@@ -973,7 +977,7 @@ export function TaskDetailSheet({
               </section>
 
               {/* Changed files vs the recorded base. */}
-              {hasWorktree ? (
+              {worktreeUsable ? (
                 <section className="flex flex-col gap-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <h3 className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground">

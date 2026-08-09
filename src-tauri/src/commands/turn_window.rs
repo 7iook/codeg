@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn tail_alignment_respects_cap() {
         let mut roles = vec![U];
-        roles.extend(std::iter::repeat(A).take(ROUND_ALIGN_CAP + 50));
+        roles.extend(std::iter::repeat_n(A, ROUND_ALIGN_CAP + 50));
         let turns = sample(&roles);
         let offset = resolve_window_offset(&turns, TurnWindowReq::Tail(1));
         // Walked ROUND_ALIGN_CAP steps back from the raw start without
