@@ -315,6 +315,21 @@ pub enum DelegationError {
     /// `session/new` (Requirements 3.3, 7.7).
     #[error("resume unavailable: {0}")]
     ResumeUnavailable(String),
+    /// The user-side continuation entry (UI panel `continue`) resolved the
+    /// child session but could not locate a LIVE parent ACP connection to
+    /// inherit `emitter` / `owner_window` / `working_dir` from — the child
+    /// resume spawn needs a real parent connection, and the synthetic
+    /// `USER_ENTRY_CONNECTION_ID` never resolves to one. Distinct from
+    /// [`ResumeUnavailable`] because the resume credential itself is still
+    /// good: reopening the parent conversation (which reconnects the parent
+    /// ACP session) unblocks a future retry. Returned BEFORE any prompt side
+    /// effect and BEFORE `spawn_for_resume` is called, so the credential is
+    /// untouched.
+    #[error(
+        "parent conversation has no live ACP connection to inherit; \
+         reopen the parent conversation and try again"
+    )]
+    ParentContextUnavailable,
     /// The same `continuation_id` was reused with a different payload
     /// (Requirement 2.13 — idempotency keys bind to one exact request).
     #[error("continuation_id was already used with a different payload")]
@@ -591,6 +606,7 @@ impl DelegationOutcome {
             DelegationError::SessionReleased => "session_released",
             DelegationError::NotContinuable(_) => "not_continuable",
             DelegationError::ResumeUnavailable(_) => "resume_unavailable",
+            DelegationError::ParentContextUnavailable => "parent_context_unavailable",
             DelegationError::ContinuationConflict => "continuation_conflict",
             DelegationError::Rebuilding => "rebuilding",
         };
@@ -624,6 +640,10 @@ mod tests {
             (
                 DelegationError::ResumeUnavailable("y".into()),
                 "resume_unavailable",
+            ),
+            (
+                DelegationError::ParentContextUnavailable,
+                "parent_context_unavailable",
             ),
             (
                 DelegationError::ContinuationConflict,
