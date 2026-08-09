@@ -83,6 +83,13 @@ const EXACT_TOOL_NAME_ALIASES: Record<string, string> = {
   wait_agent: "task",
   close_agent: "task",
   update_plan: "task",
+  // Grok
+  // The native sub-agent launcher. The history parser rewrites it to "Agent"
+  // and the live path classifies it from `rawInput.subagent_type`; this alias
+  // is the belt-and-braces for any path where only the raw name survives
+  // (`x.ai/tool.name` fallback with no rawInput). The freeform `\bagent\b`
+  // matcher can NOT catch it — "subagent" has no word boundary before "agent".
+  spawn_subagent: "agent",
   create_goal: "create_goal",
   "functions.create_goal": "create_goal",
   update_goal: "update_goal",

@@ -479,6 +479,50 @@ describe("normalizeToolName Grok terminal tool", () => {
   })
 })
 
+describe("Grok spawn_subagent routes to the Agent card", () => {
+  it("aliases the raw spawn_subagent name to agent", () => {
+    // The freeform `\bagent\b` matcher can NOT catch it — "subagent" has no
+    // word boundary before "agent" — so without the exact alias any path
+    // where only the raw name survives renders a generic card.
+    expect(normalizeToolName("spawn_subagent")).toBe("agent")
+  })
+
+  it("classifies the live frame-1 tool_call by its input shape", () => {
+    // The exact first frame captured from a real grok session (019f9432):
+    // rawInput carries the standard `{description, prompt, subagent_type}`.
+    expect(
+      inferLiveToolName({
+        title: "spawn_subagent",
+        kind: "other",
+        rawInput: JSON.stringify({
+          description: "Explore test pages patterns",
+          prompt: "Explore this Next.js app codebase…",
+          subagent_type: "explore",
+          capability_mode: "read-only",
+        }),
+        meta: {
+          "x.ai/tool": {
+            name: "spawn_subagent",
+            kind: "task",
+            label: "Subagent",
+          },
+        },
+      })
+    ).toBe("agent")
+  })
+
+  it("still resolves via x.ai/tool.name when rawInput is absent", () => {
+    expect(
+      inferLiveToolName({
+        title: "Explore test pages patterns",
+        kind: "other",
+        rawInput: null,
+        meta: { "x.ai/tool": { name: "spawn_subagent", kind: "task" } },
+      })
+    ).toBe("agent")
+  })
+})
+
 describe("inferLiveToolName cursor task and MCP shapes", () => {
   it("routes cursor's task tool to the Agent card from the bare _toolName snapshot", () => {
     // Cursor announces the tool_call before its args stream in, so the live

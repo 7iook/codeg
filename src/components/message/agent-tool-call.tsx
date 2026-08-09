@@ -115,6 +115,44 @@ function parseTaskOutcomeEnvelope(
  *  so the count stays small in practice; this is a backstop). */
 const AGENT_TRANSCRIPT_RENDER_TAIL = 20
 
+interface GrokSubagentProgress {
+  durationMs: number | null
+  turnCount: number | null
+  toolCallCount: number | null
+  contextUsagePct: number | null
+}
+
+/**
+ * Grok's live sub-agent progress, forwarded by the backend as
+ * `meta.grokSubagentProgress` on the launching Agent tool call
+ * (`connection.rs::map_grok_subagent_notification`, from grok 0.2.11x's
+ * `subagent_progress` ext notification). Grok never streams a child's chunks
+ * or tool calls over ACP, so this ticker is the only live signal of what the
+ * child is doing. `null` for any other meta shape.
+ */
+function parseGrokSubagentProgress(
+  meta: Record<string, unknown> | null | undefined
+): GrokSubagentProgress | null {
+  if (!meta || typeof meta !== "object") return null
+  const raw = (meta as Record<string, unknown>).grokSubagentProgress
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+  const obj = raw as Record<string, unknown>
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null
+  const progress: GrokSubagentProgress = {
+    durationMs: num(obj.durationMs),
+    turnCount: num(obj.turnCount),
+    toolCallCount: num(obj.toolCallCount),
+    contextUsagePct: num(obj.contextUsagePct),
+  }
+  return progress.durationMs != null ||
+    progress.turnCount != null ||
+    progress.toolCallCount != null ||
+    progress.contextUsagePct != null
+    ? progress
+    : null
+}
+
 // ── main component ────────────────────────────────────────────────────
 
 export const AgentToolCallPart = memo(function AgentToolCallPart({
@@ -267,6 +305,38 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
     [agentStats?.tool_calls, part.toolCallId]
   )
 
+  // Grok live sub-agent ticker — the only live signal of the child's work
+  // (grok forwards no child chunks/tool calls). Shown while the child runs:
+  // in-turn for a blocking spawn, alongside the "running in background" state
+  // for a background one. Frozen values disappear with those states.
+  const grokProgress = useMemo(
+    () => parseGrokSubagentProgress(part.meta),
+    [part.meta]
+  )
+  const grokProgressLine = useMemo(() => {
+    if (!grokProgress) return null
+    const pieces: string[] = []
+    if (grokProgress.toolCallCount != null) {
+      pieces.push(
+        t("agentProgressTools", { count: grokProgress.toolCallCount })
+      )
+    }
+    if (grokProgress.turnCount != null) {
+      pieces.push(t("agentProgressTurns", { count: grokProgress.turnCount }))
+    }
+    if (grokProgress.durationMs != null) {
+      pieces.push(formatDuration(grokProgress.durationMs))
+    }
+    if (grokProgress.contextUsagePct != null) {
+      pieces.push(
+        t("agentProgressContext", {
+          pct: Math.round(grokProgress.contextUsagePct),
+        })
+      )
+    }
+    return pieces.length > 0 ? pieces.join(" · ") : null
+  }, [grokProgress, t])
+
   const durationSuffix = useMemo(() => {
     if (agentStats?.total_duration_ms) {
       return formatDuration(agentStats.total_duration_ms)
@@ -374,6 +444,12 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
               : t("agentRunning")}
           </Shimmer>
         </div>
+      )}
+
+      {/* Grok live sub-agent ticker (`subagent_progress`) — only while the
+          child is still running; the settled card renders stats/result. */}
+      {(isRunning || isLiveBackgroundLaunch) && grokProgressLine && (
+        <div className="text-xs text-muted-foreground">{grokProgressLine}</div>
       )}
 
       {/* Error output */}

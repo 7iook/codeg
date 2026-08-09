@@ -206,6 +206,44 @@ function grokResultObjects(
   return out
 }
 
+/**
+ * Map Grok's `SubagentCompleted` `rawOutput` — the sibling `ToolOutput`
+ * variant a `get_command_or_subagent_output` poll returns for a background
+ * SUB-AGENT (grok 0.2.11x; 0.2.9x instead folded subagents into a
+ * `TaskOutput.Result` whose `command` reads `[subagent:<type>] <description>`)
+ * — onto the shared envelope. Its fields sit flat on the envelope object
+ * (`subagent_id`, `subagent_type`, `tool_calls`, `turns`, `duration_ms`,
+ * `worktree_path`, …); the output text's exact field name isn't pinned by a
+ * capture, so read the plausible spellings tolerantly.
+ */
+function grokSubagentCompletedToEnvelope(
+  envelope: Record<string, unknown>
+): BackgroundTaskEnvelope | null {
+  const str = (v: unknown): string | null =>
+    typeof v === "string" && v.length > 0 ? v : null
+  const taskId = str(envelope.subagent_id)
+  const status = str(envelope.status)?.trim().toLowerCase() ?? null
+  const output = str(envelope.output) ?? str(envelope.result)
+  if (taskId == null && status == null && output == null) return null
+  const subagentType = str(envelope.subagent_type)
+  const description = str(envelope.description)
+  // Mirror 0.2.9x's command label so both wire eras render the same row title.
+  const label = subagentType ? `[subagent:${subagentType}]` : null
+  const command =
+    label && description ? `${label} ${description}` : (label ?? description)
+  return {
+    kind: status != null && GROK_STOPPED_STATUSES.has(status) ? "stop" : "poll",
+    retrievalStatus: null,
+    taskId,
+    taskType: "subagent",
+    status,
+    exitCode: null,
+    output,
+    command,
+    message: null,
+  }
+}
+
 /** Parse a Grok `get_command_or_subagent_output` result. Strict on the `type`
  *  discriminator so other JSON tool output is never hijacked. */
 function parseGrokTaskOutputEnvelopes(text: string): BackgroundTaskEnvelope[] {
@@ -220,6 +258,10 @@ function parseGrokTaskOutputEnvelopes(text: string): BackgroundTaskEnvelope[] {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return []
   const envelope = parsed as Record<string, unknown>
+  if (envelope.type === "SubagentCompleted") {
+    const single = grokSubagentCompletedToEnvelope(envelope)
+    return single ? [single] : []
+  }
   if (envelope.type !== "TaskOutput") return []
   return grokResultObjects(envelope)
     .map(grokResultToEnvelope)
@@ -317,9 +359,11 @@ function inputIsBackgroundPoll(input: string | null | undefined): boolean {
  *
  * Grok's `get_command_or_subagent_output` is intentionally absent from
  * `BACKGROUND_TASK_NAMES`: the same tool also polls sub-agents, whose result is
- * a completely different `SubagentCompleted` payload. Matching on the envelope
- * (plus the in-flight input shape) means a sub-agent poll leaves this lane the
- * moment its result lands, keeping its generic rendering.
+ * a different payload per era — `SubagentCompleted` (0.2.11x, parsed into this
+ * lane by `grokSubagentCompletedToEnvelope`) or a `TaskOutput.Result` labeled
+ * `[subagent:<type>]` (0.2.9x). Matching on the envelope (plus the in-flight
+ * input shape) means a settled poll is claimed by what it actually returned,
+ * and an unknown-shaped result falls back to generic rendering.
  */
 export function isBackgroundTaskToolCall(part: AdaptedToolCallPart): boolean {
   if (BACKGROUND_TASK_NAMES.has(part.toolName.trim().toLowerCase())) return true
@@ -333,11 +377,12 @@ export function isBackgroundTaskToolCall(part: AdaptedToolCallPart): boolean {
   // poll — Grok's `get_command_or_subagent_output` does both with identical
   // args. So the input shape only claims a call that is STILL IN FLIGHT (its
   // documented purpose: render the live card in the lane it will settle into).
-  // Once settled, the envelope check above is the sole authority, so a sub-agent
-  // result — `SubagentCompleted`, which no backend path serializes into
-  // `part.output` at all — falls back to generic rendering instead of showing a
-  // permanently "running" background row. Claude Code's own polls are unaffected:
-  // they are claimed by name.
+  // Once settled, the envelope check above is the sole authority: a recognized
+  // result (`TaskOutput`, flat `SubagentCompleted`) claims the row, while an
+  // unknown-shaped or absent result (an older backend that dropped the
+  // envelope) falls back to generic rendering instead of showing a permanently
+  // "running" background row. Claude Code's own polls are unaffected: they are
+  // claimed by name.
   return isUnsettledToolCall(part)
 }
 

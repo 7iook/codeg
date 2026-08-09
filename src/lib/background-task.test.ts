@@ -254,8 +254,10 @@ describe("Grok TaskOutput envelopes", () => {
         grokPoll({ output: null, state: "input-available" })
       )
     ).toBe(true)
-    // Same tool polling a sub-agent: its result is a different payload, so the
-    // call leaves the lane as soon as it settles.
+    // Same tool polling a sub-agent whose payload is an UNKNOWN shape (fields
+    // nested under `Result` — not the flat 0.2.11x envelope): fail-safe out of
+    // the lane. The real flat envelope now parses — see the
+    // "SubagentCompleted" describe below.
     expect(
       isBackgroundTaskToolCall(
         grokPoll({
@@ -266,11 +268,10 @@ describe("Grok TaskOutput envelopes", () => {
         })
       )
     ).toBe(false)
-    // …and it leaves the lane even when the sub-agent payload never reaches
-    // `output` at all: no backend path serializes a `SubagentCompleted`
-    // rawOutput, so the settled poll arrives with an empty result. Keying the
-    // input-shape claim on "still in flight" (not on "has foreign output") is
-    // what stops it from rendering as a permanently running background row.
+    // …and it leaves the lane when a settled poll carries no output at all
+    // (an older backend that dropped the envelope). Keying the input-shape
+    // claim on "still in flight" (not on "has foreign output") is what stops
+    // it from rendering as a permanently running background row.
     expect(
       isBackgroundTaskToolCall(
         grokPoll({ output: null, state: "output-available" })
@@ -321,6 +322,63 @@ describe("Grok TaskOutput envelopes", () => {
       }),
     ])
     expect(rows[0].badge).toBe("failed")
+  })
+})
+
+describe("Grok SubagentCompleted envelopes (0.2.11x sub-agent polls)", () => {
+  // The flat shape the backend now passes through verbatim
+  // (`parsers/grok.rs::grok_task_output_envelope`): fields sit directly on the
+  // envelope, unlike `TaskOutput`'s nested `Result`. 0.2.9x instead folded
+  // sub-agents into `TaskOutput.Result` with a `[subagent:<type>]` command —
+  // parsing this restores that era's lane behavior.
+  const SUBAGENT_DONE = JSON.stringify({
+    type: "SubagentCompleted",
+    subagent_id: "019f9432-e0d8-74c3-bd02-0772c4e04a65",
+    subagent_type: "explore",
+    description: "Explore test pages",
+    status: "completed",
+    tool_calls: 35,
+    turns: 1,
+    duration_ms: 63775,
+    output: "## Codebase exploration summary",
+  })
+
+  it("parses the flat envelope into a sub-agent poll row", () => {
+    const env = parseBackgroundTaskEnvelope(SUBAGENT_DONE)
+    expect(env).not.toBeNull()
+    expect(env!.kind).toBe("poll")
+    expect(env!.taskId).toBe("019f9432-e0d8-74c3-bd02-0772c4e04a65")
+    expect(env!.taskType).toBe("subagent")
+    expect(env!.status).toBe("completed")
+    expect(env!.command).toBe("[subagent:explore] Explore test pages")
+    expect(env!.output).toBe("## Codebase exploration summary")
+  })
+
+  it("maps a cancelled sub-agent to the stopped kind", () => {
+    const env = parseBackgroundTaskEnvelope(
+      JSON.stringify({
+        type: "SubagentCompleted",
+        subagent_id: "s1",
+        status: "cancelled",
+      })
+    )
+    expect(env!.kind).toBe("stop")
+  })
+
+  it("rejects an empty envelope (nothing identifying)", () => {
+    expect(
+      parseBackgroundTaskEnvelope(JSON.stringify({ type: "SubagentCompleted" }))
+    ).toBeNull()
+  })
+
+  it("routes a settled flat sub-agent poll into the background lane", () => {
+    expect(isBackgroundTaskToolCall(grokPoll({ output: SUBAGENT_DONE }))).toBe(
+      true
+    )
+    const rows = buildBackgroundTaskRows([grokPoll({ output: SUBAGENT_DONE })])
+    expect(rows).toHaveLength(1)
+    expect(rows[0].badge).toBe("completed")
+    expect(rows[0].command).toBe("[subagent:explore] Explore test pages")
   })
 })
 
