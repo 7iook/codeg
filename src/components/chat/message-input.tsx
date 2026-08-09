@@ -73,7 +73,10 @@ import {
 import { ComposerContextUsage } from "@/components/chat/composer-context-usage"
 import { ComposerConnectionStatus } from "@/components/chat/composer-connection-status"
 import { InlineModeSelector } from "@/components/chat/mode-selector"
-import { InlineSessionConfigSelector } from "@/components/chat/session-config-selector"
+import {
+  InlineSessionConfigSelector,
+  InlineSessionConfigToggle,
+} from "@/components/chat/session-config-selector"
 import { ModelOptionPicker } from "@/components/chat/model-option-picker"
 import {
   SessionSelectorsPanel,
@@ -1328,6 +1331,21 @@ export function MessageInput({
     <>
       {hasConfigOptions &&
         availableConfigOptions.map((option) => {
+          // On/off options flip in place — a dropdown for a binary choice is a
+          // wasted interaction.
+          if (option.kind.type === "boolean") {
+            return (
+              <InlineSessionConfigToggle
+                key={option.id}
+                option={option}
+                onLabel={t("toggleOn")}
+                offLabel={t("toggleOff")}
+                onSelect={(configId, value) =>
+                  onConfigOptionChange?.(configId, value)
+                }
+              />
+            )
+          }
           // Long model lists get the searchable + virtualized popover (a Radix
           // menu of hundreds of items is the scroll jank); every other option —
           // and short model lists — keep the lightweight inline dropdown.
@@ -1373,6 +1391,30 @@ export function MessageInput({
     const result: SessionSelectorSetting[] = []
     if (hasConfigOptions) {
       for (const option of availableConfigOptions) {
+        // An on/off option becomes a two-item headerless group — the same shape
+        // the mode picker below uses — so the panel needs no toggle affordance
+        // of its own.
+        if (option.kind.type === "boolean") {
+          const checked = option.kind.current_value
+          result.push({
+            key: `config:${option.id}`,
+            title: option.name,
+            currentValue: checked ? "true" : "false",
+            currentLabel: checked ? t("toggleOn") : t("toggleOff"),
+            groups: [
+              {
+                key: "__boolean__",
+                name: null,
+                options: [
+                  { value: "true", name: t("toggleOn"), description: null },
+                  { value: "false", name: t("toggleOff"), description: null },
+                ],
+              },
+            ],
+            onSelect: (value) => onConfigOptionChange?.(option.id, value),
+          })
+          continue
+        }
         if (option.kind.type !== "select") continue
         const kind = option.kind
         // Model values that carry a `provider/` prefix group by provider; every

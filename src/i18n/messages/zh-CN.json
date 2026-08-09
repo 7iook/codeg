@@ -2570,6 +2570,8 @@
         "loadingSettings": "正在加载设置...",
         "loadingMode": "正在加载模式...",
         "modeLabel": "模式",
+        "toggleOn": "开",
+        "toggleOff": "关",
         "agentSettings": "智能体设置",
         "searchModel": "搜索模型...",
         "searchModelAria": "搜索模型",

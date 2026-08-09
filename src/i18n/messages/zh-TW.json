@@ -2568,6 +2568,8 @@
         "loadingSettings": "正在載入設定...",
         "loadingMode": "正在載入模式...",
         "modeLabel": "模式",
+        "toggleOn": "開",
+        "toggleOff": "關",
         "agentSettings": "智能體設定",
         "searchModel": "搜尋模型...",
         "searchModelAria": "搜尋模型",

@@ -2570,6 +2570,8 @@
         "loadingSettings": "Loading settings...",
         "loadingMode": "Loading mode...",
         "modeLabel": "Mode",
+        "toggleOn": "On",
+        "toggleOff": "Off",
         "agentSettings": "Agent settings",
         "searchModel": "Search models...",
         "searchModelAria": "Search models",

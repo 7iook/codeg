@@ -171,7 +171,7 @@ export function effectiveSelections(
 // Friendly name for a selected value within a select option — checks groups
 // first, then the flat list, mirroring how ConfigOptionRow renders them.
 function selectValueLabel(
-  kind: SessionConfigOptionInfo["kind"],
+  kind: Extract<SessionConfigOptionInfo["kind"], { type: "select" }>,
   value: string
 ): string | undefined {
   for (const group of kind.groups) {

@@ -596,10 +596,18 @@ pub struct SessionConfigSelectInfo {
     pub groups: Vec<SessionConfigSelectGroupInfo>,
 }
 
+/// An on/off toggle config option (ACP's `unstable_boolean_config`). Cline
+/// 3.0.50+ ships one as `auto_approve` ("Auto-approve tools").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfigBooleanInfo {
+    pub current_value: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionConfigKindInfo {
     Select(SessionConfigSelectInfo),
+    Boolean(SessionConfigBooleanInfo),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2568,6 +2568,8 @@
         "loadingSettings": "設定を読み込み中...",
         "loadingMode": "モードを読み込み中...",
         "modeLabel": "モード",
+        "toggleOn": "オン",
+        "toggleOff": "オフ",
         "agentSettings": "エージェント設定",
         "searchModel": "モデルを検索...",
         "searchModelAria": "モデルを検索",

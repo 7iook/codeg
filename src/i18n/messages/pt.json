@@ -2568,6 +2568,8 @@
         "loadingSettings": "Carregando configurações...",
         "loadingMode": "Carregando modo...",
         "modeLabel": "Modo",
+        "toggleOn": "Ligado",
+        "toggleOff": "Desligado",
         "agentSettings": "Configurações do agente",
         "searchModel": "Buscar modelos...",
         "searchModelAria": "Buscar modelos",

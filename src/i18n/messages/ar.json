@@ -2568,6 +2568,8 @@
         "loadingSettings": "جارٍ تحميل الإعدادات...",
         "loadingMode": "جارٍ تحميل الوضع...",
         "modeLabel": "الوضع",
+        "toggleOn": "تشغيل",
+        "toggleOff": "إيقاف",
         "agentSettings": "إعدادات الوكيل",
         "searchModel": "البحث عن النماذج...",
         "searchModelAria": "البحث عن النماذج",

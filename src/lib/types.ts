@@ -1180,7 +1180,15 @@ export interface SessionConfigSelectInfo {
   groups: SessionConfigSelectGroupInfo[]
 }
 
-export type SessionConfigKindInfo = { type: "select" } & SessionConfigSelectInfo
+/** An on/off toggle config option (ACP's unstable boolean config kind). Cline
+ *  3.0.50+ ships one as `auto_approve` ("Auto-approve tools"). */
+export interface SessionConfigBooleanInfo {
+  current_value: boolean
+}
+
+export type SessionConfigKindInfo =
+  | ({ type: "select" } & SessionConfigSelectInfo)
+  | ({ type: "boolean" } & SessionConfigBooleanInfo)
 
 export interface SessionConfigOptionInfo {
   id: string

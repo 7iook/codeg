@@ -4,17 +4,18 @@ use std::sync::Arc;
 
 use sacp::schema::{
     BlobResourceContents, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
-    CreateTerminalRequest, CreateTerminalResponse,
-    ElicitationCapabilities, ElicitationFormCapabilities, EmbeddedResource, EmbeddedResourceResource,
+    CreateTerminalRequest, CreateTerminalResponse, ElicitationCapabilities,
+    ElicitationFormCapabilities, EmbeddedResource, EmbeddedResourceResource,
     FileSystemCapabilities, ImageContent, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
-    PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus, PromptRequest, ProtocolVersion,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
-    ResumeSessionRequest, ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectGroup, SessionConfigSelectOption, SessionConfigSelectOptions, SessionId,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    KillTerminalResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+    NewSessionResponse, PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus,
+    PromptRequest, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
+    ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectGroup,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionId, SessionModeState,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, StopReason, TerminalExitStatus,
     TerminalOutputRequest, TerminalOutputResponse, TextContent, TextResourceContents,
     ToolCallContent, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
@@ -39,9 +40,9 @@ use crate::acp::terminal_runtime::{TerminalRuntime, TerminalRuntimeError};
 use crate::acp::types::{
     AcpEvent, AvailableCommandInfo, ConnectionInfo, ConnectionStatus, GrokEffortSpec,
     PermissionOptionInfo, PlanEntryInfo, PromptCapabilitiesInfo, PromptInputBlock,
-    SessionConfigKindInfo, SessionConfigOptionInfo, SessionConfigSelectGroupInfo,
-    SessionConfigSelectInfo, SessionConfigSelectOptionInfo, SessionModeInfo, SessionModeStateInfo,
-    ToolCallImageInfo, UserMessageBlock,
+    SessionConfigBooleanInfo, SessionConfigKindInfo, SessionConfigOptionInfo,
+    SessionConfigSelectGroupInfo, SessionConfigSelectInfo, SessionConfigSelectOptionInfo,
+    SessionModeInfo, SessionModeStateInfo, ToolCallImageInfo, UserMessageBlock,
 };
 use crate::logging::throttle::LeadingEdgeThrottle;
 use crate::models::agent::AgentType;
@@ -604,9 +605,13 @@ async fn record_turn_end(
 fn current_model_id_from_opts(opts: &[SessionConfigOptionInfo]) -> Option<String> {
     opts.iter()
         .find(|o| o.category.as_deref() == Some("model"))
-        .map(|o| {
-            let SessionConfigKindInfo::Select(sel) = &o.kind;
-            sel.current_value.clone()
+        .and_then(|o| {
+            // A model selector is always a `select`; any other kind carries no
+            // model id to report.
+            let SessionConfigKindInfo::Select(sel) = &o.kind else {
+                return None;
+            };
+            Some(sel.current_value.clone())
         })
         .filter(|m| !m.is_empty())
 }
@@ -1565,8 +1570,63 @@ fn map_session_config_option(option: &SessionConfigOption) -> Option<SessionConf
                 }),
             })
         }
+        SessionConfigKind::Boolean(toggle) => Some(SessionConfigOptionInfo {
+            id: option.id.to_string(),
+            name: option.name.clone(),
+            description: option.description.clone(),
+            category: option.category.as_ref().map(map_session_config_category),
+            kind: SessionConfigKindInfo::Boolean(SessionConfigBooleanInfo {
+                current_value: toggle.current_value,
+            }),
+        }),
         _ => None,
     }
+}
+
+/// The `type` discriminators codeg's schema build can decode. Anything else on
+/// the wire is stripped by [`strip_unknown_config_options`] before the typed
+/// parse, because `SessionConfigOption::kind` is a required flattened field:
+/// one unrecognized option would otherwise fail the WHOLE response and take the
+/// agent down with it (exactly what cline 3.0.50's `type: "boolean"` did before
+/// `unstable_boolean_config` was enabled).
+const KNOWN_CONFIG_OPTION_KINDS: &[&str] = &["select", "boolean"];
+
+/// Drop `configOptions[]` entries whose `type` this build cannot decode, in
+/// place, on a raw session response.
+///
+/// ACP's `SessionConfigKind` is a `#[serde(tag = "type")]` enum with no
+/// catch-all variant, so an option kind added upstream after codeg's schema pin
+/// is a hard deserialization failure rather than an ignorable unknown. Stripping
+/// unknown kinds here downgrades "this agent is completely unusable" to "this
+/// one selector is missing", which is the correct failure mode for a selector.
+///
+/// Entries missing a `type`, or shaped unexpectedly, are left untouched — serde
+/// gives a better error for those than a silent drop would.
+fn strip_unknown_config_options(raw: &mut serde_json::Value, method: &str) {
+    let Some(options) = raw
+        .get_mut("configOptions")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    options.retain(|option| {
+        let Some(kind) = option.get("type").and_then(serde_json::Value::as_str) else {
+            return true;
+        };
+        if KNOWN_CONFIG_OPTION_KINDS.contains(&kind) {
+            return true;
+        }
+        tracing::warn!(
+            "[ACP] {method}: dropping config option '{}' — unsupported kind '{kind}'; \
+             codeg's ACP schema knows {:?}. The selector will not be shown.",
+            option
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<no id>"),
+            KNOWN_CONFIG_OPTION_KINDS,
+        );
+        false
+    });
 }
 
 fn map_session_config_options(
@@ -2116,15 +2176,22 @@ async fn apply_grok_preferred_options(
             .iter()
             .find(|o| o.id == GROK_MODEL_OPTION_ID)
             .is_some_and(|o| {
-                let SessionConfigKindInfo::Select(sel) = &o.kind;
+                // Grok's selectors are synthesized as selects; any other kind
+                // has no model value to compare against.
+                let SessionConfigKindInfo::Select(sel) = &o.kind else {
+                    return false;
+                };
                 // Skip if already current, or the saved model is no longer offered.
                 sel.current_value != pref && sel.options.iter().any(|x| x.value == pref)
             });
         if eligible {
             match set_grok_model(cx, session_id, pref.clone(), None).await {
                 Ok(()) => {
-                    if let Some(o) = opts.iter_mut().find(|o| o.id == GROK_MODEL_OPTION_ID) {
-                        let SessionConfigKindInfo::Select(sel) = &mut o.kind;
+                    if let Some(SessionConfigKindInfo::Select(sel)) = opts
+                        .iter_mut()
+                        .find(|o| o.id == GROK_MODEL_OPTION_ID)
+                        .map(|o| &mut o.kind)
+                    {
                         sel.current_value = pref.clone();
                     }
                     if !specs.is_empty() {
@@ -2142,8 +2209,11 @@ async fn apply_grok_preferred_options(
     // unsupported model (no selector) or an unoffered value is skipped here.
     if let Some(pref) = preferred_config_values.get(GROK_EFFORT_OPTION_ID) {
         let model_id = current_grok_model_id_from_opts(opts);
-        if let Some(effort_opt) = opts.iter_mut().find(|o| o.id == GROK_EFFORT_OPTION_ID) {
-            let SessionConfigKindInfo::Select(sel) = &mut effort_opt.kind;
+        if let Some(SessionConfigKindInfo::Select(sel)) = opts
+            .iter_mut()
+            .find(|o| o.id == GROK_EFFORT_OPTION_ID)
+            .map(|o| &mut o.kind)
+        {
             if &sel.current_value != pref && sel.options.iter().any(|o| &o.value == pref) {
                 if let Some(model_id) = model_id {
                     match set_grok_model(cx, session_id, model_id, Some(pref.clone())).await {
@@ -2160,10 +2230,14 @@ async fn apply_grok_preferred_options(
 
 /// The Grok model selector's current value, read from an in-memory options list.
 fn current_grok_model_id_from_opts(opts: &[SessionConfigOptionInfo]) -> Option<String> {
-    opts.iter().find(|o| o.id == GROK_MODEL_OPTION_ID).map(|o| {
-        let SessionConfigKindInfo::Select(sel) = &o.kind;
-        sel.current_value.clone()
-    })
+    opts.iter()
+        .find(|o| o.id == GROK_MODEL_OPTION_ID)
+        .and_then(|o| {
+            let SessionConfigKindInfo::Select(sel) = &o.kind else {
+                return None;
+            };
+            Some(sel.current_value.clone())
+        })
 }
 
 /// The Grok model selector's current value, read from the authoritative
@@ -2219,8 +2293,11 @@ async fn set_grok_config_option(
                 (g.config_options.clone(), g.grok_effort_specs.clone())
             };
             if let Some(mut opts) = current {
-                if let Some(o) = opts.iter_mut().find(|o| o.id == config_id) {
-                    let SessionConfigKindInfo::Select(sel) = &mut o.kind;
+                if let Some(SessionConfigKindInfo::Select(sel)) = opts
+                    .iter_mut()
+                    .find(|o| o.id == config_id)
+                    .map(|o| &mut o.kind)
+                {
                     sel.current_value = value_id.clone();
                 }
                 // A MODEL switch must re-point the effort selector at the new
@@ -2498,42 +2575,70 @@ async fn send_resume_session(
         sacp::util::internal_error(format!("Failed to build resume request: {e}"))
     })?;
 
-    let raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    let mut raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
     // Capture the raw top-level `models` (per-model reasoning-effort data) BEFORE
     // deserializing into the typed response, which drops it (Grok only — the
     // field survives serde as an ignored unknown for other agents).
     let models = raw_response.get("models").cloned();
+    strip_unknown_config_options(&mut raw_response, "session/resume");
     let resp = serde_json::from_value(raw_response).map_err(|e| {
         sacp::util::internal_error(format!("Failed to parse resume response: {e}"))
     })?;
     Ok((resp, models))
 }
 
-/// Send `session/new`. For Grok, send it UNTYPED so the raw top-level `models`
-/// (per-model reasoning-effort data — dropped by the typed `NewSessionResponse`
-/// because the `unstable_session_model` feature is off) can be captured before
-/// deserialization. Every other agent keeps the exact typed send, byte-for-byte,
-/// and gets `None`.
+/// Send `session/new` UNTYPED, so the raw response can be inspected before it is
+/// deserialized.
+///
+/// Two things need the raw JSON. For Grok, the top-level `models` (per-model
+/// reasoning-effort data) is dropped by the typed `NewSessionResponse` because
+/// the `unstable_session_model` feature is off, so it is captured here and
+/// returned; every other agent gets `None`. For *all* agents,
+/// [`strip_unknown_config_options`] runs first so an option kind newer than
+/// codeg's schema pin cannot fail the whole response.
+///
+/// The request bytes are identical to the typed send — `UntypedMessage::new`
+/// serializes the very same `NewSessionRequest` — and `attach_session` only
+/// consumes `session_id` / `modes` / `meta` off the result. Literal method
+/// string because the schema's `SESSION_NEW_METHOD_NAME` is `pub(crate)` and
+/// sacp ships no `JsonRpcRequest` for a raw new-session; this mirrors the
+/// `session/resume` / `session/fork` untyped sends.
 async fn send_new_session_capturing_models(
     cx: &ConnectionTo<Agent>,
     agent_type: AgentType,
     req: NewSessionRequest,
 ) -> Result<(NewSessionResponse, Option<serde_json::Value>), sacp::Error> {
-    if agent_type != AgentType::Grok {
-        return Ok((cx.send_request_to(Agent, req).block_task().await?, None));
-    }
-    // Literal method string: the schema's `SESSION_NEW_METHOD_NAME` is
-    // `pub(crate)`, and sacp ships no `JsonRpcRequest` for a raw new-session, so
-    // this mirrors the `session/resume` / `session/fork` untyped sends.
     let untyped_req = UntypedMessage::new("session/new", req).map_err(|e| {
         sacp::util::internal_error(format!("Failed to build new_session request: {e}"))
     })?;
-    let raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
-    let models = raw_response.get("models").cloned();
+    let mut raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    let models = (agent_type == AgentType::Grok)
+        .then(|| raw_response.get("models").cloned())
+        .flatten();
+    strip_unknown_config_options(&mut raw_response, "session/new");
     let resp = serde_json::from_value(raw_response).map_err(|e| {
         sacp::util::internal_error(format!("Failed to parse new_session response: {e}"))
     })?;
     Ok((resp, models))
+}
+
+/// Send `session/load` UNTYPED for the same reason as
+/// [`send_new_session_capturing_models`]: the raw response must pass through
+/// [`strip_unknown_config_options`] before the typed parse. Request bytes and
+/// the `Err(sacp::Error)` a JSON-RPC failure yields (`.code` / `.to_string()`
+/// intact) are unchanged, so the caller's error ladder reads identically.
+async fn send_load_session(
+    cx: &ConnectionTo<Agent>,
+    req: LoadSessionRequest,
+) -> Result<LoadSessionResponse, sacp::Error> {
+    let untyped_req = UntypedMessage::new("session/load", req).map_err(|e| {
+        sacp::util::internal_error(format!("Failed to build load_session request: {e}"))
+    })?;
+    let mut raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    strip_unknown_config_options(&mut raw_response, "session/load");
+    serde_json::from_value(raw_response).map_err(|e| {
+        sacp::util::internal_error(format!("Failed to parse load_session response: {e}"))
+    })
 }
 
 /// Whether MCP servers forwarded over the ACP wire (`session/new.mcpServers`)
@@ -3708,7 +3813,7 @@ async fn run_connection(
                         &cwd,
                         mcp_servers.clone(),
                     );
-                    cx.send_request_to(Agent, load_req).block_task().await
+                    send_load_session(&cx, load_req).await
                 } else {
                     Err(sacp::Error::method_not_found()
                         .data("agent does not advertise the loadSession capability"))
@@ -4747,9 +4852,48 @@ async fn set_session_config_option(
     config_id: String,
     value_id: String,
 ) -> Result<(), sacp::Error> {
-    let updated = set_session_config_option_inner(cx, session_id, config_id, value_id).await?;
+    // The whole selector transport carries values as opaque strings; only here,
+    // at the wire, does the option's advertised kind decide how to encode it.
+    let is_boolean = state
+        .read()
+        .await
+        .config_options
+        .as_ref()
+        .and_then(|opts| opts.iter().find(|o| o.id == config_id))
+        .is_some_and(|o| matches!(o.kind, SessionConfigKindInfo::Boolean(_)));
+    let value = encode_config_option_value(is_boolean, &value_id);
+    let updated = set_session_config_option_inner(cx, session_id, config_id, value).await?;
     emit_session_config_options_values(state, emitter, agent_type, updated).await;
     Ok(())
+}
+
+/// Encode a selector value for `session/set_config_option`.
+///
+/// codeg keeps config values as opaque `String`s end to end (Tauri command, web
+/// handler, and the per-agent preference store all use `Record<string, string>`
+/// semantics), so the boolean round-trip is `"true"` ⇄ `true` and happens only
+/// here. A `select` value stays a bare `{"value": "…"}`, byte-for-byte what
+/// codeg sent before boolean options existed — every non-cline agent's wire
+/// traffic is unchanged.
+fn encode_config_option_value(is_boolean: bool, value: &str) -> SessionConfigOptionValue {
+    if is_boolean {
+        SessionConfigOptionValue::boolean(value == "true")
+    } else {
+        SessionConfigOptionValue::value_id(value.to_string())
+    }
+}
+
+/// Whether an advertised option already holds `value`, so applying a saved
+/// preference at connect can skip the round-trip. Reads the same `"true"` ⇄
+/// `true` encoding [`encode_config_option_value`] writes; an option kind this
+/// build cannot interpret is treated as "does not match" so the agent, not
+/// codeg, decides.
+fn config_option_already_holds(option: &SessionConfigOption, value: &str) -> bool {
+    match &option.kind {
+        SessionConfigKind::Select(s) => s.current_value.to_string() == value,
+        SessionConfigKind::Boolean(b) => b.current_value == (value == "true"),
+        _ => false,
+    }
 }
 
 /// Wire-level half of `set_session_config_option`: send the JSON-RPC request and
@@ -4761,14 +4905,15 @@ async fn set_session_config_option_inner(
     cx: &ConnectionTo<Agent>,
     session_id: &SessionId,
     config_id: String,
-    value_id: String,
+    value: SessionConfigOptionValue,
 ) -> Result<Vec<SessionConfigOption>, sacp::Error> {
-    let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value_id);
+    let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value);
     let untyped_req = UntypedMessage::new("session/set_config_option", req).map_err(|e| {
         sacp::util::internal_error(format!("Failed to build config option request: {e}"))
     })?;
 
-    let raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    let mut raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    strip_unknown_config_options(&mut raw_response, "session/set_config_option");
     let response: SetSessionConfigOptionResponse =
         serde_json::from_value(raw_response).map_err(|e| {
             sacp::util::internal_error(format!("Failed to parse config option response: {e}"))
@@ -4860,19 +5005,19 @@ async fn apply_preferred_session_options(
         // requested config_id is absent from the advertised options — older or
         // edge-case builds accept `set_config_option` for an unadvertised "mode"
         // (see `ensure_codex_mode_option`), so let the agent decide.
-        let already_matches = options.iter().any(|o| {
-            o.id.to_string() == *config_id
-                && matches!(
-                    &o.kind,
-                    SessionConfigKind::Select(s) if s.current_value.to_string() == *value_id
-                )
-        });
+        let advertised = options.iter().find(|o| o.id.to_string() == *config_id);
+        let already_matches =
+            advertised.is_some_and(|o| config_option_already_holds(o, value_id.as_str()));
         if already_matches {
             continue;
         }
-        match set_session_config_option_inner(cx, &session_id, config_id.clone(), value_id.clone())
-            .await
-        {
+        // Encode against what the agent advertised for this id. An id the agent
+        // never advertised falls back to the select form — the same value shape
+        // codeg has always sent (see the note above on unadvertised "mode").
+        let is_boolean =
+            advertised.is_some_and(|o| matches!(o.kind, SessionConfigKind::Boolean(_)));
+        let value = encode_config_option_value(is_boolean, value_id);
+        match set_session_config_option_inner(cx, &session_id, config_id.clone(), value).await {
             Ok(updated) => options = updated,
             Err(e) => tracing::error!(
                 "[ACP] failed to apply preferred config '{config_id}'='{value_id}' \
@@ -8786,7 +8931,19 @@ async fn emit_conversation_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sacp::schema::Diff;
+    use sacp::schema::{Diff, SessionConfigId};
+
+    /// Unwrap a select selector. The Grok synthesizers below only ever build
+    /// selects, so any other kind is a test failure rather than a branch to
+    /// handle — this keeps the assertions as terse as the irrefutable `let`
+    /// they replaced (which stopped compiling once `SessionConfigKindInfo`
+    /// gained its `Boolean` variant).
+    fn expect_select(kind: &SessionConfigKindInfo) -> &SessionConfigSelectInfo {
+        match kind {
+            SessionConfigKindInfo::Select(sel) => sel,
+            other => panic!("expected a select config option, got {other:?}"),
+        }
+    }
 
     #[test]
     fn grok_ask_ext_request_routes_and_parses_captured_wire_shape() {
@@ -10399,7 +10556,7 @@ mod tests {
         let model = &opts[0];
         assert_eq!(model.id, GROK_MODEL_OPTION_ID);
         assert_eq!(model.category.as_deref(), Some("model"));
-        let SessionConfigKindInfo::Select(model_sel) = &model.kind;
+        let model_sel = expect_select(&model.kind);
         // Both models appear (agent-type filtering is deliberately NOT applied —
         // cross-type switches are handled gracefully at set time instead).
         assert_eq!(model_sel.options.len(), 2);
@@ -10409,7 +10566,7 @@ mod tests {
         let effort = &opts[1];
         assert_eq!(effort.id, GROK_EFFORT_OPTION_ID);
         assert_eq!(effort.category.as_deref(), Some("mode"));
-        let SessionConfigKindInfo::Select(effort_sel) = &effort.kind;
+        let effort_sel = expect_select(&effort.kind);
         assert_eq!(effort_sel.options.len(), 2);
         assert_eq!(effort_sel.current_value, "high", "the `selected` effort is current");
         assert!(effort_sel.options.iter().any(|o| o.value == "low"));
@@ -10522,7 +10679,7 @@ mod tests {
         // switchable list), current = xhigh, with canonical labels.
         let effort = build_grok_effort_option("grok-4.5", &specs).expect("has effort");
         assert_eq!(effort.id, GROK_EFFORT_OPTION_ID);
-        let SessionConfigKindInfo::Select(sel) = &effort.kind;
+        let sel = expect_select(&effort.kind);
         assert_eq!(sel.current_value, "xhigh");
         assert_eq!(sel.options.len(), 4, "high/medium/low + injected xhigh");
         assert_eq!(sel.options[0].value, "xhigh");
@@ -10565,7 +10722,7 @@ mod tests {
             .iter()
             .find(|o| o.id == GROK_EFFORT_OPTION_ID)
             .expect("effort selector");
-        let SessionConfigKindInfo::Select(sel) = &effort.kind;
+        let sel = expect_select(&effort.kind);
         assert_eq!(sel.current_value, "xhigh", "grok-4.5's real default");
         assert!(sel.options.iter().any(|o| o.value == "xhigh" && o.name == "Max"));
     }
@@ -10606,7 +10763,7 @@ mod tests {
             .iter()
             .find(|o| o.id == GROK_EFFORT_OPTION_ID)
             .expect("re-added");
-        let SessionConfigKindInfo::Select(sel) = &effort.kind;
+        let sel = expect_select(&effort.kind);
         assert_eq!(sel.current_value, "xhigh");
     }
 
@@ -10666,7 +10823,7 @@ mod tests {
 
         // The optimistic pick is reverted: the authoritative model is unchanged.
         let opts = guard.config_options.as_ref().expect("options preserved");
-        let SessionConfigKindInfo::Select(sel) = &opts[0].kind;
+        let sel = expect_select(&opts[0].kind);
         assert_eq!(sel.current_value, "grok-4.5");
 
         // Event ordering: the authoritative options (revert) precede the coded
@@ -10684,7 +10841,7 @@ mod tests {
 
         // The reverted options carry the original model.
         if let AcpEvent::SessionConfigOptions { config_options } = &events[cfg_idx].payload {
-            let SessionConfigKindInfo::Select(sel) = &config_options[0].kind;
+            let sel = expect_select(&config_options[0].kind);
             assert_eq!(sel.current_value, "grok-4.5");
         }
 
@@ -12205,5 +12362,196 @@ mod tests {
             }),
             Some("delegation,feedback,ask,sessions,tasks,automations,taskboard".to_string())
         );
+    }
+
+    // ── Boolean config options (cline 3.0.50 `auto_approve`) ──
+
+    /// The exact `configOptions` entry cline 3.0.50 ships. Before
+    /// `unstable_boolean_config` was enabled this failed to deserialize with
+    /// `unknown variant 'boolean', expected 'select'` — and because
+    /// `SessionConfigOption::kind` is a required flattened field, that one entry
+    /// failed the WHOLE `session/new` response and left cline unusable.
+    fn cline_auto_approve_json() -> serde_json::Value {
+        serde_json::json!({
+            "type": "boolean",
+            "id": "auto_approve",
+            "name": "Auto-approve tools",
+            "description": "Automatically approve all tool calls without asking for permission",
+            "currentValue": false
+        })
+    }
+
+    #[test]
+    fn cline_boolean_config_option_maps_to_a_toggle() {
+        let option: SessionConfigOption =
+            serde_json::from_value(cline_auto_approve_json()).expect("boolean kind must parse");
+
+        let mapped = map_session_config_option(&option).expect("boolean options are surfaced");
+        assert_eq!(mapped.id, "auto_approve");
+        assert_eq!(mapped.name, "Auto-approve tools");
+        match mapped.kind {
+            SessionConfigKindInfo::Boolean(toggle) => assert!(!toggle.current_value),
+            other => panic!("expected a boolean kind, got {other:?}"),
+        }
+    }
+
+    /// The whole point of the fix: one boolean option must not take the session
+    /// down with it.
+    #[test]
+    fn new_session_response_with_a_boolean_option_parses() {
+        let raw = serde_json::json!({
+            "sessionId": "sess-1",
+            "configOptions": [
+                {
+                    "type": "select",
+                    "id": "model",
+                    "name": "Model",
+                    "currentValue": "anthropic/claude-sonnet-5",
+                    "options": [{"value": "anthropic/claude-sonnet-5", "name": "Claude Sonnet 5"}]
+                },
+                cline_auto_approve_json(),
+            ]
+        });
+        let resp: NewSessionResponse = serde_json::from_value(raw).expect("must parse");
+        assert_eq!(resp.config_options.map(|o| o.len()), Some(2));
+    }
+
+    #[test]
+    fn select_values_keep_their_pre_boolean_wire_shape() {
+        // Regression guard for every agent that is NOT cline: enabling
+        // `unstable_boolean_config` changed `SetSessionConfigOptionRequest.value`
+        // from a plain `SessionConfigValueId` to a flattened enum. The untagged
+        // `ValueId` variant must still serialize to a bare `"value"` string, or
+        // codex / claude / opencode model switching silently breaks.
+        let req = SetSessionConfigOptionRequest::new(
+            SessionId::new("sess-1"),
+            SessionConfigId::new("model"),
+            encode_config_option_value(false, "anthropic/claude-sonnet-5"),
+        );
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            serde_json::json!({
+                "sessionId": "sess-1",
+                "configId": "model",
+                "value": "anthropic/claude-sonnet-5"
+            })
+        );
+    }
+
+    #[test]
+    fn boolean_values_carry_a_type_discriminator() {
+        let on = SetSessionConfigOptionRequest::new(
+            SessionId::new("sess-1"),
+            SessionConfigId::new("auto_approve"),
+            encode_config_option_value(true, "true"),
+        );
+        assert_eq!(
+            serde_json::to_value(&on).unwrap(),
+            serde_json::json!({
+                "sessionId": "sess-1",
+                "configId": "auto_approve",
+                "type": "boolean",
+                "value": true
+            })
+        );
+        // Anything that is not the literal "true" is off — the selector only
+        // ever emits "true"/"false".
+        assert_eq!(
+            encode_config_option_value(true, "false").as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn unknown_config_option_kinds_are_stripped_not_fatal() {
+        let mut raw = serde_json::json!({
+            "sessionId": "sess-1",
+            "modes": null,
+            "configOptions": [
+                {
+                    "type": "select",
+                    "id": "model",
+                    "name": "Model",
+                    "currentValue": "m1",
+                    "options": [{"value": "m1", "name": "M1"}]
+                },
+                cline_auto_approve_json(),
+                // A kind newer than codeg's schema pin — today this is what
+                // `boolean` was yesterday.
+                {"type": "radio", "id": "future", "name": "Future", "currentValue": "a"},
+            ]
+        });
+        strip_unknown_config_options(&mut raw, "session/new");
+
+        let ids: Vec<&str> = raw["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["model", "auto_approve"], "only `radio` is dropped");
+        // Untouched siblings survive, and the response still parses.
+        assert_eq!(raw["sessionId"], "sess-1");
+        serde_json::from_value::<NewSessionResponse>(raw).expect("parses after stripping");
+    }
+
+    /// `session/new` and `session/load` are now sent as `UntypedMessage`s for
+    /// EVERY agent (so the raw response can be sanitized first), which means the
+    /// literal method strings are load-bearing for all of them rather than just
+    /// Grok. The schema's own constants are `pub(crate)`, but it re-exports them
+    /// through `AGENT_METHOD_NAMES` — pin against that so a rename upstream is a
+    /// failing test, not every agent silently getting "method not found".
+    #[test]
+    fn untyped_session_method_names_match_the_schema() {
+        use sacp::schema::AGENT_METHOD_NAMES;
+        assert_eq!(AGENT_METHOD_NAMES.session_new, "session/new");
+        assert_eq!(AGENT_METHOD_NAMES.session_load, "session/load");
+        assert_eq!(
+            AGENT_METHOD_NAMES.session_set_config_option,
+            "session/set_config_option"
+        );
+    }
+
+    /// The untyped send must put the same params on the wire the typed send did
+    /// — `UntypedMessage::new` runs the very same `serde_json::to_value` on the
+    /// request, so this pins the payload rather than the mechanism.
+    #[test]
+    fn untyped_new_session_carries_the_typed_request_payload() {
+        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let req = build_new_session_request(AgentType::Cline, &cwd, Vec::new());
+        let expected = serde_json::to_value(&req).unwrap();
+
+        let untyped = UntypedMessage::new("session/new", req).expect("builds");
+        assert_eq!(untyped.method(), "session/new");
+        assert_eq!(untyped.params(), &expected);
+    }
+
+    #[test]
+    fn saved_boolean_preference_skips_the_redundant_round_trip() {
+        let off: SessionConfigOption =
+            serde_json::from_value(cline_auto_approve_json()).expect("parses");
+        assert!(config_option_already_holds(&off, "false"));
+        assert!(!config_option_already_holds(&off, "true"));
+
+        let mut on_json = cline_auto_approve_json();
+        on_json["currentValue"] = serde_json::json!(true);
+        let on: SessionConfigOption = serde_json::from_value(on_json).expect("parses");
+        assert!(config_option_already_holds(&on, "true"));
+        assert!(!config_option_already_holds(&on, "false"));
+    }
+
+    #[test]
+    fn strip_leaves_responses_without_config_options_alone() {
+        // `session/new` responses from agents that publish no selectors at all,
+        // and entries with no `type`, must pass through untouched — serde gives
+        // a better error for a malformed entry than a silent drop would.
+        let mut none = serde_json::json!({"sessionId": "sess-1"});
+        let before = none.clone();
+        strip_unknown_config_options(&mut none, "session/new");
+        assert_eq!(none, before);
+
+        let mut untyped = serde_json::json!({"configOptions": [{"id": "weird"}]});
+        strip_unknown_config_options(&mut untyped, "session/new");
+        assert_eq!(untyped["configOptions"].as_array().unwrap().len(), 1);
     }
 }

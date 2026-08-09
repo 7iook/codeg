@@ -2568,6 +2568,8 @@
         "loadingSettings": "Chargement des paramètres...",
         "loadingMode": "Chargement du mode...",
         "modeLabel": "Mode",
+        "toggleOn": "Activé",
+        "toggleOff": "Désactivé",
         "agentSettings": "Paramètres de l'agent",
         "searchModel": "Rechercher des modèles...",
         "searchModelAria": "Rechercher des modèles",

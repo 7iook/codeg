@@ -2568,6 +2568,8 @@
         "loadingSettings": "Einstellungen werden geladen...",
         "loadingMode": "Modus wird geladen...",
         "modeLabel": "Modus",
+        "toggleOn": "Ein",
+        "toggleOff": "Aus",
         "agentSettings": "Agent-Einstellungen",
         "searchModel": "Modelle suchen...",
         "searchModelAria": "Modelle suchen",
