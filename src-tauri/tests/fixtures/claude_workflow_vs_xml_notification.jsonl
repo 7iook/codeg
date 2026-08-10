@@ -1,0 +1,2 @@
+{"type":"system","subtype":"task_notification","task_id":"wf-streamjson","task_type":"local_workflow","status":"completed","sessionId":"s","timestamp":"2026-08-07T10:00:00.000Z"}
+{"type":"user","message":{"role":"user","content":"<task-notification><task-id>xml-task-999</task-id><status>completed</status><summary>xml sub-agent</summary></task-notification>"},"uuid":"xml-1","sessionId":"s","timestamp":"2026-08-07T10:00:01.000Z"}

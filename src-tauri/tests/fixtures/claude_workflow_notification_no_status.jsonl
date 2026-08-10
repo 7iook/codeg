@@ -1,0 +1,2 @@
+{"type":"system","subtype":"task_started","task_type":"local_workflow","task_id":"wf-nostatus","workflow_name":"nostatus","sessionId":"s","timestamp":"2026-08-07T10:00:00.000Z"}
+{"type":"system","subtype":"task_notification","task_id":"wf-nostatus","output_file":"/tmp/x.md","sessionId":"s","timestamp":"2026-08-07T10:00:05.000Z"}

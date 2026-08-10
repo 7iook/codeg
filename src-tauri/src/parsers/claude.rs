@@ -12,6 +12,11 @@ use crate::parsers::{
     ParseError,
 };
 
+// Claude Code DW + Stop-hook event-stream adaptation. Detail sinks into these
+// submodules; claude.rs only dispatches the two new top-level cases (T2).
+pub mod hook;
+pub mod workflow;
+
 /// Regex that matches Claude Code system-injected XML tags and their content.
 /// These tags are internal metadata and should not be displayed to users.
 /// Note: Rust regex doesn't support backreferences, so each tag is listed explicitly.
@@ -48,6 +53,55 @@ pub(crate) const BACKGROUND_TASK_MARKER: &str = "[[codeg-background-task]]";
 /// `settled` event, so the live-flipped card matches the cold-parse cap and an
 /// oversized report can't blow the event-stream size budget.
 pub(crate) const BACKGROUND_RESULT_MAX_CHARS: usize = 16_000;
+
+/// Append a standalone event block (hook lifecycle / workflow snapshot) to the
+/// message stream as its own `System` line.
+///
+/// Deliberately NOT folded into the preceding assistant message: these are
+/// out-of-turn facts about the session, and an assistant line carries usage,
+/// duration and completion bookkeeping that a hook or workflow card has no
+/// business perturbing.
+fn push_event_block(
+    messages: &mut Vec<UnifiedMessage>,
+    block: ContentBlock,
+    timestamp: DateTime<Utc>,
+) {
+    let id = match &block {
+        ContentBlock::HookLifecycle { event } => {
+            format!(
+                "claude-hook-{}-{}",
+                event.hook_name.to_lowercase(),
+                messages.len()
+            )
+        }
+        ContentBlock::WorkflowRun { event } => {
+            format!("claude-workflow-{}", event.task_id)
+        }
+        _ => format!("claude-event-{}", messages.len()),
+    };
+
+    // A workflow emits a snapshot per event; keep exactly one line per
+    // `task_id` and overwrite it, so a long run does not stack N cards.
+    if let ContentBlock::WorkflowRun { .. } = &block {
+        if let Some(existing) = messages.iter_mut().find(|m| m.id == id) {
+            existing.content = vec![block];
+            existing.timestamp = timestamp;
+            existing.completed_at = Some(timestamp);
+            return;
+        }
+    }
+
+    messages.push(UnifiedMessage {
+        id,
+        role: MessageRole::System,
+        content: vec![block],
+        timestamp,
+        usage: None,
+        duration_ms: None,
+        model: None,
+        completed_at: Some(timestamp),
+    });
+}
 
 /// Latest `<task-notification>` observed for a background task id.
 struct BackgroundNotification {
@@ -774,6 +828,12 @@ pub(crate) struct ClaudeRecordAccumulator {
     /// API call's usage. See [`Self::claim_assistant_usage`] for why only one
     /// line of a group may carry it.
     usage_owner_by_message_id: std::collections::HashMap<String, usize>,
+    /// Pairs the two sibling `attachment` records of one Stop-hook trigger
+    /// into a single card. Drained by `flush_event_aggregators` at EOF.
+    hook_aggregator: hook::HookAggregator,
+    /// Folds `system/task_*` Dynamic Workflow events into a per-`task_id`
+    /// snapshot. Drained by `flush_event_aggregators` at EOF.
+    workflow_reducer: workflow::WorkflowReducer,
 }
 
 impl ClaudeRecordAccumulator {
@@ -793,6 +853,31 @@ impl ClaudeRecordAccumulator {
             background_acks: std::collections::HashMap::new(),
             background_notifications: std::collections::HashMap::new(),
             usage_owner_by_message_id: std::collections::HashMap::new(),
+            hook_aggregator: hook::HookAggregator::default(),
+            workflow_reducer: workflow::WorkflowReducer::default(),
+        }
+    }
+
+    /// Drain both event aggregators at end of stream: a hook whose sibling
+    /// never arrived still gets its card, and a workflow that never reached a
+    /// terminal notification lands as `Unknown` rather than vanishing
+    /// (decision-card §1.3 EOF flush).
+    pub(crate) fn flush_event_aggregators(&mut self) {
+        let last_seen = self.last_timestamp.unwrap_or_else(Utc::now);
+        for event in self.hook_aggregator.flush() {
+            let timestamp = event.timestamp;
+            push_event_block(
+                &mut self.messages,
+                ContentBlock::HookLifecycle { event },
+                timestamp,
+            );
+        }
+        for event in self.workflow_reducer.flush() {
+            push_event_block(
+                &mut self.messages,
+                ContentBlock::WorkflowRun { event },
+                last_seen,
+            );
         }
     }
 
@@ -890,6 +975,8 @@ impl ClaudeRecordAccumulator {
             background_acks,
             background_notifications,
             usage_owner_by_message_id,
+            hook_aggregator,
+            workflow_reducer,
         } = self;
 
         let msg_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -1158,6 +1245,19 @@ impl ClaudeRecordAccumulator {
                     completed_at: Some(timestamp),
                 });
             }
+            // A Stop-hook trigger (and every other hook lifecycle record)
+            // arrives as a top-level `attachment`. Detail lives in
+            // `claude::hook`; this branch only routes and, when the aggregator
+            // completes a pair, pushes the merged card into the stream.
+            "attachment" => {
+                if let Some(event) = hook_aggregator.ingest(&value) {
+                    push_event_block(
+                        messages,
+                        ContentBlock::HookLifecycle { event },
+                        parse_timestamp(&value).unwrap_or_else(Utc::now),
+                    );
+                }
+            }
             "system" => {
                 let subtype = value.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
                 if subtype == "turn_duration" {
@@ -1171,6 +1271,19 @@ impl ClaudeRecordAccumulator {
                             last.duration_ms = Some(duration);
                         }
                     }
+                } else if workflow::is_workflow_subtype(subtype) {
+                    // Dynamic Workflows ride `system/task_*`. The reducer owns
+                    // the state machine (cumulative progress replacement, EOF
+                    // flush); the parser just emits the latest snapshot.
+                    if let Some(event) = workflow_reducer.ingest(&value) {
+                        push_event_block(
+                            messages,
+                            ContentBlock::WorkflowRun { event },
+                            parse_timestamp(&value).unwrap_or_else(Utc::now),
+                        );
+                    }
+                } else if !subtype.is_empty() {
+                    tracing::debug!("[claude] skipping unhandled system subtype={subtype:?}");
                 }
             }
             "tool_use" => {
@@ -1418,6 +1531,7 @@ impl ClaudeParser {
             acc.feed_line(line);
         }
         acc.finalize_background_lifecycle();
+        acc.flush_event_aggregators();
 
         let ClaudeRecordAccumulator {
             messages,
@@ -3755,5 +3869,235 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    // ── DW + Stop-hook adaptation (T1 Red · decision-card §4.1) ──────────────
+    //
+    // Fixtures live in `src-tauri/tests/fixtures/`; loaded via include_str!
+    // and split into per-line `serde_json::Value` records (JSONL). These
+    // drive the submodule aggregators directly (unit level) — the top-level
+    // dispatch wiring at claude.rs:971 is T2's job, not tested here.
+
+    use super::hook::{aggregate_hook_events, HookOutcome};
+    use super::workflow::{reduce_workflow_events, WorkflowProgressNode, WorkflowStatus};
+
+    /// Parse a JSONL fixture body into one `Value` per non-empty line.
+    fn jsonl_records(body: &str) -> Vec<serde_json::Value> {
+        body.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("fixture line is valid JSON"))
+            .collect()
+    }
+
+    /// Keep only `type == "attachment"` records (the hook channel).
+    fn attachment_records(recs: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        recs.iter()
+            .filter(|r| r.get("type").and_then(|t| t.as_str()) == Some("attachment"))
+            .cloned()
+            .collect()
+    }
+
+    /// Keep only `type == "system"` records (the workflow channel).
+    fn system_records(recs: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        recs.iter()
+            .filter(|r| r.get("type").and_then(|t| t.as_str()) == Some("system"))
+            .cloned()
+            .collect()
+    }
+
+    /// §4.1(1) · A real Stop-hook trigger emits two sibling attachment
+    /// records (`hook_success` + `hook_additional_context`); they must merge
+    /// into exactly ONE lifecycle event with the additionalContext folded in.
+    #[test]
+    fn test_parse_hook_success_and_additional_context_merge_into_lifecycle_event() {
+        let recs = jsonl_records(include_str!(
+            "../../tests/fixtures/claude_hook_stop_softcontext.jsonl"
+        ));
+        let events = aggregate_hook_events(&attachment_records(&recs));
+
+        assert_eq!(events.len(), 1, "two siblings must merge into one card");
+        let ev = &events[0];
+        assert_eq!(ev.hook_name, "Stop");
+        assert_eq!(ev.exit_code, 0);
+        assert_eq!(ev.outcome, HookOutcome::SoftContext);
+        assert_eq!(
+            ev.additional_context.len(),
+            1,
+            "the single additionalContext entry is folded in"
+        );
+        assert!(
+            ev.additional_context[0].starts_with("[P1 stop-gate]"),
+            "got: {:?}",
+            ev.additional_context[0]
+        );
+        // A6: command reduced to a basename, absolute path stripped.
+        assert_eq!(
+            ev.command_display.as_deref(),
+            Some("claude-stop-orchestrator.ps1")
+        );
+    }
+
+    /// §4.1(2) · A4 single contract: an unrecognized `attachment.type`
+    /// produces NO event (no placeholder UI), does not panic, and does not
+    /// disturb sibling records — only the one known hook here survives.
+    #[test]
+    fn test_parse_unknown_attachment_type_is_silently_skipped_with_debug_log() {
+        let recs = jsonl_records(include_str!(
+            "../../tests/fixtures/claude_hook_unknown_attachment.jsonl"
+        ));
+        let events = aggregate_hook_events(&attachment_records(&recs));
+
+        assert_eq!(
+            events.len(),
+            1,
+            "the unknown attachment yields no event; only the known hook does"
+        );
+        assert_eq!(events[0].hook_name, "Stop");
+        assert_eq!(events[0].outcome, HookOutcome::Pass);
+    }
+
+    /// §4.1(3) · A `task_started`/`task_progress`/`task_notification` triple
+    /// reduces to one workflow snapshot with the progress array and terminal
+    /// status captured.
+    #[test]
+    fn test_parse_workflow_task_started_and_progress_and_notification() {
+        let recs = jsonl_records(include_str!(
+            "../../tests/fixtures/claude_workflow_lifecycle.jsonl"
+        ));
+        let events = reduce_workflow_events(&system_records(&recs));
+
+        assert_eq!(events.len(), 1, "one task_id → one snapshot");
+        let wf = &events[0];
+        assert_eq!(wf.task_id, "wbk63ch2d");
+        assert_eq!(wf.workflow_name.as_deref(), Some("demo-workflow"));
+        assert_eq!(wf.status, WorkflowStatus::Completed);
+        assert_eq!(wf.output_file.as_deref(), Some("/tmp/out.md"));
+        assert_eq!(
+            wf.workflow_progress.len(),
+            2,
+            "the phase + agent nodes from the progress event are present"
+        );
+    }
+
+    /// §4.1(4) · workflow_progress[] is cumulative (recon R7): the second
+    /// progress event REPLACES the array wholesale (2 agents), never appends
+    /// (which would wrongly yield 3).
+    #[test]
+    fn test_workflow_progress_is_replaced_not_appended() {
+        let recs = jsonl_records(include_str!(
+            "../../tests/fixtures/claude_workflow_progress_cumulative.jsonl"
+        ));
+        let events = reduce_workflow_events(&system_records(&recs));
+
+        assert_eq!(events.len(), 1);
+        let wf = &events[0];
+        assert_eq!(
+            wf.workflow_progress.len(),
+            2,
+            "cumulative replace → 2 agents from the last event, not 3 appended"
+        );
+        // The two nodes are agents index 1 (success) and 2 (running).
+        let indices: Vec<u32> = wf
+            .workflow_progress
+            .iter()
+            .filter_map(|n| match n {
+                WorkflowProgressNode::WorkflowAgent { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(indices, vec![1, 2]);
+    }
+
+    /// §4.1(5) · The stream-json `system/subtype:"task_notification"` and the
+    /// codeg `<task-notification>` XML (in a user message) are isolated: the
+    /// workflow reducer consumes only the system record and never the XML
+    /// user record (recon R6 — same word, different wire).
+    #[test]
+    fn test_task_notification_stream_json_vs_task_notification_xml_are_isolated() {
+        let recs = jsonl_records(include_str!(
+            "../../tests/fixtures/claude_workflow_vs_xml_notification.jsonl"
+        ));
+        let events = reduce_workflow_events(&system_records(&recs));
+
+        assert_eq!(
+            events.len(),
+            1,
+            "only the stream-json system record enters the workflow reducer"
+        );
+        assert_eq!(events[0].task_id, "wf-streamjson");
+        // The XML user record must NOT leak into the workflow channel.
+        assert!(
+            events.iter().all(|e| e.task_id != "xml-task-999"),
+            "the <task-notification> XML must not be parsed as a workflow"
+        );
+    }
+
+    /// §S5 T8 门1 · REAL-MACHINE sampling gate. Unlike the modeled workflow
+    /// fixtures, this pair of records is a verbatim sample lifted from a live
+    /// worktree session's JSONL (CLI 2.1.220 · a `PreToolUse` hook fired by
+    /// this repo's own search-gate). It exercises the exact same wire family
+    /// as w1-report §二's Stop-hook sample — same attachment field set,
+    /// same `hook_success` + `hook_additional_context` sibling pairing keyed
+    /// on `toolUseID`, same `.055Z` co-timestamp (0ms << 500ms window) — while
+    /// covering a *different* `hookEvent` (PreToolUse vs Stop), proving the
+    /// hookName-first classification design holds on real bytes the parser was
+    /// never tuned against. Sample provenance + wire diff: w6-sampling-report.md.
+    #[test]
+    fn test_real_worktree_pretooluse_hook_pair_merges_into_one_event() {
+        let recs = jsonl_records(include_str!(
+            "../../tests/fixtures/w6_hook_pretooluse_real_worktree.jsonl"
+        ));
+        let events = aggregate_hook_events(&attachment_records(&recs));
+
+        assert_eq!(
+            events.len(),
+            1,
+            "the two real sibling attachments merge into exactly one card"
+        );
+        let ev = &events[0];
+        // Real wire: hookName carries the full "PreToolUse:<tool>" form; the
+        // hookEvent lifecycle tag is the plain "PreToolUse".
+        assert_eq!(ev.hook_event, "PreToolUse");
+        assert!(
+            ev.hook_name.starts_with("PreToolUse"),
+            "got: {:?}",
+            ev.hook_name
+        );
+        assert_eq!(ev.exit_code, 0);
+        // exit 0 + a populated additionalContext = SoftContext, same class as
+        // the Stop sample in w1-report §二.
+        assert_eq!(ev.outcome, HookOutcome::SoftContext);
+        assert_eq!(
+            ev.additional_context.len(),
+            1,
+            "the single additionalContext entry is folded in"
+        );
+        // A6: command reduced to a basename, absolute path stripped.
+        assert_eq!(
+            ev.command_display.as_deref(),
+            Some("claude-search-order-gate.ps1")
+        );
+    }
+
+    /// Reviewer I-4 (honesty) · A `task_notification` whose `status` field is
+    /// absent must fall back to `Unknown`, NEVER `Completed` — a real failure
+    /// with a dropped status field must not be silently reported as success.
+    /// (The T8 real-machine finding is that 2.1.226 never emits this stream
+    /// event at all — see workflow.rs:task_notification comment — so this
+    /// guards the modeled path defensively rather than a hot path.)
+    #[test]
+    fn test_workflow_task_notification_without_status_falls_back_to_unknown() {
+        let recs = jsonl_records(include_str!(
+            "../../tests/fixtures/claude_workflow_notification_no_status.jsonl"
+        ));
+        let events = reduce_workflow_events(&system_records(&recs));
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].task_id, "wf-nostatus");
+        assert_eq!(
+            events[0].status,
+            WorkflowStatus::Unknown,
+            "missing terminal status must be Unknown, not an optimistic Completed"
+        );
     }
 }

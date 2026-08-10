@@ -538,6 +538,57 @@ fn content_block_size(block: &crate::models::message::ContentBlock) -> usize {
                     })
                     .sum::<usize>()
         }
+        // One merged Stop-hook card: the fixed keys (`type`, outcome tag,
+        // `exit_code`, `duration_ms`, RFC3339 timestamp) plus every
+        // variable-length field. The `*_raw` fields are `serde(skip)` unless
+        // the `claude-hook-debug` feature is on, so they are sized only when
+        // they can actually reach the wire.
+        CB::HookLifecycle { event } => {
+            let raw_size = if cfg!(feature = "claude-hook-debug") {
+                opt_str_size(&event.command_raw)
+                    + opt_str_size(&event.stdout_raw)
+                    + opt_str_size(&event.stderr_raw)
+                    + 96
+            } else {
+                0
+            };
+            256 + json_str_len(&event.hook_name)
+                + json_str_len(&event.hook_event)
+                + opt_str_size(&event.tool_use_id)
+                + opt_str_size(&event.outcome_reason)
+                + opt_str_size(&event.command_display)
+                + event
+                    .additional_context
+                    .iter()
+                    .map(|entry| 8 + json_str_len(entry))
+                    .sum::<usize>()
+                + opt_json_size(&event.hook_specific_output)
+                + raw_size
+        }
+        // One workflow snapshot: fixed keys plus the cumulative progress
+        // array, each node sized by its own optional fields.
+        CB::WorkflowRun { event } => {
+            use crate::parsers::claude::workflow::WorkflowProgressNode as Node;
+            256 + json_str_len(&event.task_id)
+                + opt_str_size(&event.workflow_name)
+                + json_str_len(&event.task_type)
+                + opt_str_size(&event.prompt)
+                + opt_str_size(&event.tool_use_id)
+                + opt_str_size(&event.session_id)
+                + opt_str_size(&event.output_file)
+                // `usage` = two u64 fields with keys.
+                + event.usage.as_ref().map_or(0, |_| 96)
+                + event
+                    .workflow_progress
+                    .iter()
+                    .map(|node| match node {
+                        Node::WorkflowPhase { name, .. } => 128 + opt_str_size(name),
+                        Node::WorkflowAgent { state, prompt, .. } => {
+                            128 + opt_str_size(state) + opt_str_size(prompt)
+                        }
+                    })
+                    .sum::<usize>()
+        }
     }
 }
 

@@ -229,6 +229,103 @@ export type ContentBlock =
    * persistence/export switches over `ContentBlock` never receive it.
    */
   | { type: "plan"; entries: PlanEntryInfo[] }
+  /**
+   * One fully-aggregated Claude Code Stop-hook trigger. Mirror of Rust
+   * `ContentBlock::HookLifecycle` (parsers/claude/hook.rs). The two sibling
+   * `attachment` records are merged backend-side into ONE block, so the UI
+   * renders a single card. Only the frontend-visible fields are mirrored —
+   * the `command_raw` / `stdout_raw` / `stderr_raw` fields are `serde(skip)`
+   * unless the `claude-hook-debug` feature is on, so they never reach here
+   * (A6 data minimization).
+   */
+  | { type: "hook_lifecycle"; event: HookLifecyclePayload }
+  /**
+   * A snapshot of one Claude Code Dynamic Workflow run. Mirror of Rust
+   * `ContentBlock::WorkflowRun` (parsers/claude/workflow.rs). Keyed by
+   * `task_id`; the backend owns the state machine and emits a cumulative
+   * snapshot, so the frontend replaces its stored value rather than rebuilding
+   * state. NOT the `<task-notification>` XML async sub-agent path.
+   */
+  | { type: "workflow_run"; event: WorkflowRunPayload }
+
+/**
+ * Stop outcome, classified once backend-side (single source of truth). The UI
+ * never rebuilds it from `exit_code` + stdout. Mirror of Rust `HookOutcome`
+ * (serde `snake_case`).
+ */
+export type HookOutcome = "pass" | "soft_context" | "hard_block" | "error"
+
+/**
+ * Frontend-visible fields of a merged Stop-hook lifecycle. Mirror of Rust
+ * `HookLifecycleEvent` MINUS the `*_raw` debug-only fields (A6).
+ */
+export interface HookLifecyclePayload {
+  hook_name: string
+  hook_event: string
+  tool_use_id?: string | null
+  outcome: HookOutcome
+  outcome_reason?: string | null
+  exit_code: number
+  duration_ms: number
+  /** Basename only (absolute path stripped backend-side), ≤128 chars. */
+  command_display?: string | null
+  /** Each entry ≤4KB (truncated backend-side). Empty when the hook fed none. */
+  additional_context?: string[]
+  /** Structured `hookSpecificOutput` JSON (never the raw stdout string). */
+  hook_specific_output?: unknown
+  /** RFC3339 timestamp. */
+  timestamp: string
+}
+
+/** Lifecycle status of a workflow run. Mirror of Rust `WorkflowStatus`. */
+export type WorkflowStatus =
+  | "started"
+  | "running"
+  | "completed"
+  | "failed"
+  | "killed"
+  | "stopped"
+  | "unknown"
+
+/** Aggregate token / wall-clock usage. Mirror of Rust `WorkflowUsage`. */
+export interface WorkflowUsage {
+  total_tokens: number
+  duration_ms: number
+}
+
+/**
+ * One node of the cumulative `workflow_progress[]` array. Mirror of Rust
+ * `WorkflowProgressNode` (serde `tag = "type"`, `snake_case`).
+ */
+export type WorkflowProgressNode =
+  | {
+      type: "workflow_phase"
+      name?: string | null
+      elapsed_ms?: number | null
+      agent_count?: number | null
+    }
+  | {
+      type: "workflow_agent"
+      index: number
+      state?: string | null
+      prompt?: string | null
+      tool_calls?: number | null
+    }
+
+/** Frontend-visible snapshot of one workflow run. Mirror of Rust `WorkflowRunEvent`. */
+export interface WorkflowRunPayload {
+  task_id: string
+  workflow_name?: string | null
+  task_type: string
+  status: WorkflowStatus
+  /** Cumulative full-replacement (recon R7) — never appended client-side. */
+  workflow_progress?: WorkflowProgressNode[]
+  prompt?: string | null
+  tool_use_id?: string | null
+  session_id?: string | null
+  output_file?: string | null
+  usage?: WorkflowUsage | null
+}
 
 export type TurnRole = "user" | "assistant" | "system"
 
