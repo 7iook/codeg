@@ -1512,6 +1512,48 @@ fn cap_completed_text(text: &str) -> String {
     truncate_on_char_boundary(text, COMPLETED_TEXT_CAP)
 }
 
+/// Enforce the per-call model precedence contract at the two-channel junction.
+///
+/// A delegation sees two independent paths to the child CLI's model knob:
+///
+/// 1. `preferred_config_values["model"]` — the panel's "delegation defaults >
+///    Model" field, delivered over ACP `session/new.configValues`. This is
+///    the CLI's "user-configured session model" surface.
+/// 2. `LaunchOption::Model(id)` — the per-call `req.model`, merged into the
+///    child's runtime env as `ANTHROPIC_MODEL` / `KIRO_MODEL` / etc. (see
+///    `commands::acp::per_call_model_env_key`). This is the CLI's "env
+///    default model" surface.
+///
+/// For Claude Code and the other CLIs codeg targets, channel 1 (explicit ACP
+/// config) wins over channel 2 (env fallback) — sensible in isolation, but
+/// combined with codeg leaving both populated it made a panel selection
+/// silently override every per-call model. That is the exact opposite of the
+/// tool_schema.json promise: *"the id you pass is delivered to the child
+/// process for this delegation only ... It overrides, for this call alone,
+/// whatever the user configured for that agent"*.
+///
+/// This helper resolves the fight at the composition layer: when a per-call
+/// model is nominated, the panel's `model` slot is dropped from
+/// `preferred_config_values`, so only the launch-knob channel reaches the
+/// child. Deliberately narrow — the optionId `"model"` is the frontend's
+/// canonical model slot (see `isModelConfigOption` in
+/// `src/lib/model-config-groups.ts`); every other key (mode / effort / any
+/// future config option the CLI advertises) is kept, since per-call has no
+/// way to nominate them and the panel's choice remains authoritative there.
+///
+/// A future per-call knob (e.g. `req.effort`) would extend this by dropping
+/// its own optionId under the same condition — a single conditional per knob
+/// at this junction, no cross-cutting rewrites needed.
+fn strip_panel_model_when_per_call_present(
+    mut values: BTreeMap<String, String>,
+    per_call_model: Option<&str>,
+) -> BTreeMap<String, String> {
+    if per_call_model.is_some() {
+        values.remove("model");
+    }
+    values
+}
+
 /// Build the bounded inline preview carried by the `DelegationCompleted` event
 /// and terminal meta. `None` for empty text.
 fn build_text_preview(text: &str) -> Option<String> {
@@ -3045,6 +3087,70 @@ impl DelegationBroker {
             // are in flight.
             bucket.pending.remove(pos).map(|p| p.tool_call_id)
         } else {
+            // No exact 4-tuple match. Before giving up and letting the caller
+            // fall back to a synthetic `delegation-<uuid>` — which downstream
+            // treats as "no live UI binding", so every `emit_completed_if_real`
+            // / `emit_started_if_real` / `write_meta_if_real` skips and the
+            // card is stuck on "running" forever — try one narrow degrade:
+            //
+            // **3-tuple degrade**, gated on being provably unambiguous. When
+            // the ACP-side entry lost its nonce (host mirrored `raw_input`
+            // without preserving the `⟦corr:<nonce>⟧\n` task prefix — verified
+            // in the wild for Claude Code CLI on this feat/kiro-agent branch
+            // after 87e1eaa3), the entry's `match_key.nonce = None` while the
+            // MCP-side round-trip carries `key.nonce = Some(...)`. The 4-tuple
+            // eq check above then never fires and the entry orphans.
+            //
+            // Degrade to 3-tuple (agent_type, task, working_dir) equality if
+            // and only if EXACTLY ONE pending entry matches the triple AND its
+            // nonce is None. The uniqueness guard is what preserves 87e1eaa3's
+            // same-triple crosstalk protection: with two or more same-triple
+            // pending entries the ambiguity that motivated the nonce is real,
+            // so refuse the degrade and let the caller synthesize. With zero
+            // triple matches there is nothing to claim. With exactly one, the
+            // claim is deterministic: no sibling to mis-bind against.
+            //
+            // Sibling MCP entries with `key.nonce = Some(...)` register on
+            // different ternary triples only if the LLM sent different
+            // task/working_dir; a same-triple sibling would be the ambiguity
+            // guard's job to refuse. So a single triple match is always the
+            // right delegation for `key`.
+            let triple_matches: Vec<usize> = bucket
+                .pending
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, p)| {
+                    let k = p.match_key.as_ref()?;
+                    if k.nonce.is_none()
+                        && k.agent_type == key.agent_type
+                        && k.task == key.task
+                        && k.working_dir == key.working_dir
+                    {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if triple_matches.len() == 1 {
+                let pos = triple_matches[0];
+                let recovered = bucket.pending.remove(pos).map(|p| p.tool_call_id);
+                if let Some(id) = &recovered {
+                    tracing::info!(
+                        target: "delegation::match",
+                        parent = %parent_connection_id,
+                        tool_call_id = %id,
+                        "take_matching_tool_call: 4-tuple miss, degraded to unambiguous 3-tuple (nonce absent on ACP side)"
+                    );
+                }
+                bucket
+                    .consumed
+                    .push_back((recovered.clone().unwrap_or_default(), now));
+                if bucket.pending.is_empty() && bucket.consumed.is_empty() {
+                    map.remove(parent_connection_id);
+                }
+                return recovered;
+            }
             // No exact key match. We deliberately do NOT claim an unkeyed entry
             // here — not even the oldest, not even the only one. An unkeyed
             // pending entry may belong to a DIFFERENT parallel delegation whose
@@ -3595,6 +3701,21 @@ impl DelegationBroker {
             .get(&req.agent_type)
             .map(|d: &AgentDelegationDefaults| (d.mode_id.clone(), d.config_values.clone()))
             .unwrap_or((None, BTreeMap::new()));
+        // Two-channel resolution: `preferred_config_values["model"]` (the
+        // panel's "delegation defaults > Model" field, delivered via ACP
+        // `session/new.configValues`) and `LaunchOption::Model` (per-call
+        // `req.model`, delivered via env `ANTHROPIC_MODEL` / `--model` argv)
+        // are independent paths to the same CLI knob. Claude Code and similar
+        // CLIs prioritise the ACP configValues path over env, so leaving both
+        // populated makes the panel silently override per-call — violating the
+        // tool_schema contract ("It overrides, for this call alone, whatever
+        // the user configured for that agent"). Drop the panel's `model` slot
+        // when a per-call model is present, so only the launch-knob channel
+        // reaches the child. Other keys (mode / effort / …) are kept — per-call
+        // has no way to nominate them, so the panel's choice is authoritative.
+        // Pinned by `broker_persona.rs::per_call_model_strips_panel_model_*`.
+        let preferred_config_values =
+            strip_panel_model_when_per_call_present(preferred_config_values, req.model.as_deref());
 
         // --- [stage-4 T4.1 / stage-5 T5.3] Persona translation -----------------
         // Dispatch to the per-agent PersonaCapability provider and compute the

@@ -184,6 +184,7 @@ async fn launch_options_for_wire_input(input: serde_json::Value) -> Option<Vec<L
         parent_connection_id: "parent-conn".into(),
         parent_tool_use_id: "pt-1".into(),
         external_handle: None,
+        correlation_nonce: None,
         input,
     });
     write_frame(&mut client, &msg).await.expect("write frame");

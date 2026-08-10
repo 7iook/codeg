@@ -88,6 +88,7 @@ fn request_with(
         external_handle: None,
         subagent_type: subagent_type.map(str::to_string),
         model: model.map(str::to_string),
+        correlation_nonce: None,
     }
 }
 
@@ -746,5 +747,320 @@ async fn concurrent_calls_report_their_own_requested_model() {
         ack_b.requested_model.as_deref(),
         Some("model-beta"),
         "the second call's model must not be overwritten by the first"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-call MODEL vs panel-delegation-defaults MODEL — precedence at the
+// two-channel junction. Panel `AgentDelegationDefaults.config_values["model"]`
+// travels via ACP `session/new.configValues` (channel A); per-call `req.model`
+// travels via `LaunchOption::Model` → env (channel B). tool_schema promises
+// per-call overrides the panel; the broker enforces it by dropping the panel's
+// `"model"` slot when a per-call model is present. Pinned by
+// `strip_panel_model_when_per_call_present` in `broker.rs`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use codeg_lib::acp::delegation::types::AgentDelegationDefaults;
+use std::collections::BTreeMap;
+
+/// Build an enabled broker seeded with panel delegation defaults for a
+/// specific agent — the equivalent of the settings panel writing a Model
+/// / mode / effort selection under "派发子智能体 → <agent>".
+async fn broker_with_agent_defaults(
+    agent_type: AgentType,
+    mode_id: Option<&str>,
+    config_values: BTreeMap<String, String>,
+) -> (DelegationBroker, Arc<MockSpawner>) {
+    let mock = Arc::new(MockSpawner::new());
+    let broker = DelegationBroker::new(
+        mock.clone() as Arc<dyn ConnectionSpawner>,
+        Arc::new(RootDepth) as Arc<dyn ConversationDepthLookup>,
+    );
+    let mut agent_defaults = BTreeMap::new();
+    agent_defaults.insert(
+        agent_type,
+        AgentDelegationDefaults {
+            mode_id: mode_id.map(str::to_string),
+            config_values,
+        },
+    );
+    broker
+        .set_config(DelegationConfig {
+            enabled: true,
+            agent_defaults,
+            ..DelegationConfig::default()
+        })
+        .await;
+    (broker, mock)
+}
+
+/// The core regression: with the panel pinning a model AND a per-call `model`
+/// arriving on the request, the panel's `"model"` slot must not reach the
+/// spawner. Otherwise ACP `session/new.configValues["model"]` beats the env
+/// channel inside Claude Code and the per-call is silently overridden.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn per_call_model_strips_panel_model_from_config_values__ClaudeCode() {
+    let mut panel = BTreeMap::new();
+    panel.insert("model".into(), "claude-opus-4-8[1m]".into());
+    // Non-model options are kept — per-call has no way to nominate them.
+    panel.insert("effort".into(), "high".into());
+    let (broker, mock) =
+        broker_with_agent_defaults(AgentType::ClaudeCode, Some("plan"), panel).await;
+
+    let report = settle(
+        &broker,
+        &mock,
+        "c-clash",
+        200,
+        request_with(AgentType::ClaudeCode, "pt-clash", None, Some("gpt-5.6-sol")),
+    )
+    .await;
+    assert_eq!(report.status, TaskStatus::Completed);
+
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(args.len(), 1);
+    let call = &args[0];
+
+    // Panel's `"model"` slot is dropped so it can't win over the per-call env.
+    assert!(
+        !call.preferred_config_values.contains_key("model"),
+        "preferred_config_values must NOT carry the panel's model when a per-call model is present, got {:?}",
+        call.preferred_config_values
+    );
+    // Panel's other selections survive — the strip is narrow.
+    assert_eq!(call.preferred_mode_id.as_deref(), Some("plan"));
+    assert_eq!(
+        call.preferred_config_values
+            .get("effort")
+            .map(String::as_str),
+        Some("high"),
+        "non-model config options must survive the strip"
+    );
+    // And the per-call model reaches the launch-knob channel.
+    assert!(
+        call.launch_options
+            .iter()
+            .any(|o| matches!(o, LaunchOption::Model(id) if id == "gpt-5.6-sol")),
+        "per-call model must arrive as LaunchOption::Model, got {:?}",
+        call.launch_options
+    );
+}
+
+/// The strip is gated on `req.model`: with no per-call model the panel's
+/// `"model"` slot stays put and reaches the child unchanged. Pre-existing
+/// behaviour (panel picks the model when the caller doesn't specify one)
+/// must not regress.
+#[tokio::test]
+async fn no_per_call_model_keeps_panel_model_intact() {
+    let mut panel = BTreeMap::new();
+    panel.insert("model".into(), "claude-opus-4-8[1m]".into());
+    let (broker, mock) =
+        broker_with_agent_defaults(AgentType::ClaudeCode, None, panel.clone()).await;
+
+    let report = settle(
+        &broker,
+        &mock,
+        "c-panelonly",
+        201,
+        // req.model deliberately absent.
+        request_with(AgentType::ClaudeCode, "pt-panelonly", None, None),
+    )
+    .await;
+    assert_eq!(report.status, TaskStatus::Completed);
+
+    let args = mock.spawn_args.lock().await;
+    assert_eq!(args.len(), 1);
+    let call = &args[0];
+    assert_eq!(
+        call.preferred_config_values, panel,
+        "without a per-call model the panel's config_values reach the spawner verbatim"
+    );
+    assert!(
+        !call
+            .launch_options
+            .iter()
+            .any(|o| matches!(o, LaunchOption::Model(_))),
+        "no per-call model → no LaunchOption::Model in launch_options, got {:?}",
+        call.launch_options
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Two-channel 4-tuple ↔ 3-tuple fallback — regression for the RCA-2026-08-10
+// synthetic-fallback bug.
+//
+// Root shape (recap):
+//   * MCP `tools/call` round-trip carries `correlation_nonce = Some(...)`.
+//   * ACP `session/update(tool_call).raw_input.task` should carry the same
+//     nonce as the `⟦corr:<nonce>⟧\n` prefix so `extract_delegation_match_key`
+//     recovers it. On some hosts (Claude Code CLI on feat/kiro-agent, verified
+//     via SQLite conversation.parent_tool_use_id being 100% `delegation-<uuid>`
+//     after 87e1eaa3), the prefix is lost / stripped / normalized and the
+//     ACP-side match_key ends up with `nonce = None`.
+//   * The pre-fix 4-tuple exact-equal check then never fires and the entry
+//     orphans to a synthetic id, which skips DelegationCompleted / Started /
+//     meta writes downstream — the whole card is stuck on "running".
+//
+// Fix (broker.rs::take_matching_tool_call_at): when the strict 4-tuple match
+// fails, look for EXACTLY ONE pending entry whose triple
+// `(agent_type, task, working_dir)` equals the request AND whose
+// `match_key.nonce = None`. Claim it. Ambiguity (2+ same-triple entries) or a
+// pending entry that itself carries a different nonce refuse the degrade —
+// so 87e1eaa3's same-triple crosstalk protection is preserved for the case
+// that actually motivated it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use codeg_lib::acp::delegation::broker::DelegationMatchKey;
+
+fn triple_key(task: &str) -> DelegationMatchKey {
+    DelegationMatchKey {
+        agent_type: AgentType::ClaudeCode,
+        task: task.to_string(),
+        working_dir: None,
+        nonce: None,
+    }
+}
+
+fn nonced_key(task: &str, nonce: &str) -> DelegationMatchKey {
+    DelegationMatchKey {
+        agent_type: AgentType::ClaudeCode,
+        task: task.to_string(),
+        working_dir: None,
+        nonce: Some(nonce.to_string()),
+    }
+}
+
+/// **The core recovery.** ACP side lost the nonce (pending entry has
+/// `nonce = None`) but MCP side carries it (`key.nonce = Some(...)`). The
+/// 4-tuple eq check misses; the degrade recovers the id.
+#[tokio::test]
+async fn unambiguous_triple_fallback_recovers_when_acp_dropped_nonce() {
+    let mock = Arc::new(MockSpawner::new());
+    let broker = DelegationBroker::new(
+        mock.clone() as Arc<dyn ConnectionSpawner>,
+        Arc::new(RootDepth) as Arc<dyn ConversationDepthLookup>,
+    );
+    // ACP-side registered its `raw_input`-derived key WITHOUT the nonce
+    // (the `⟦corr:<nonce>⟧\n` prefix was stripped/lost on the wire).
+    broker
+        .register_pending_tool_call_with_key(
+            "parent-conn",
+            "tc-real-acp-id".into(),
+            Some(triple_key("do the thing")),
+        )
+        .await;
+    // MCP-side asks with the correct 4-tuple including nonce; strict 4-tuple
+    // miss falls back to unambiguous 3-tuple degrade.
+    let claimed = broker
+        .take_matching_tool_call("parent-conn", &nonced_key("do the thing", "abc123"))
+        .await;
+    assert_eq!(
+        claimed.as_deref(),
+        Some("tc-real-acp-id"),
+        "unambiguous 3-tuple triple must recover the ACP tool_call_id when the nonce dropped on the wire"
+    );
+    // Second claim by same key finds nothing (single-shot).
+    assert!(broker
+        .take_matching_tool_call("parent-conn", &nonced_key("do the thing", "abc123"))
+        .await
+        .is_none());
+}
+
+/// **Ambiguity guard: two same-triple pending entries, both nonce=None.**
+/// The uniqueness precondition fails so the degrade refuses. Preserves
+/// 87e1eaa3's guarantee that same-task fan-out can NEVER cross-bind.
+#[tokio::test]
+async fn ambiguous_triple_fallback_refuses_when_multiple_same_triple_pending() {
+    let mock = Arc::new(MockSpawner::new());
+    let broker = DelegationBroker::new(
+        mock.clone() as Arc<dyn ConnectionSpawner>,
+        Arc::new(RootDepth) as Arc<dyn ConversationDepthLookup>,
+    );
+    broker
+        .register_pending_tool_call_with_key(
+            "parent-conn",
+            "tc-A".into(),
+            Some(triple_key("do the thing")),
+        )
+        .await;
+    broker
+        .register_pending_tool_call_with_key(
+            "parent-conn",
+            "tc-B".into(),
+            Some(triple_key("do the thing")),
+        )
+        .await;
+    // Both are same-triple + no nonce. A MCP-side claim with any nonce must
+    // refuse the degrade — two candidates is precisely the ambiguity 87e1eaa3
+    // introduced the nonce to disambiguate.
+    let claimed = broker
+        .take_matching_tool_call("parent-conn", &nonced_key("do the thing", "aaa"))
+        .await;
+    assert!(
+        claimed.is_none(),
+        "multiple same-triple pending entries must refuse the 3-tuple degrade to avoid arrival-order crosstalk"
+    );
+}
+
+/// **Ambiguity guard II: pending entry itself carries a different nonce.**
+/// This is the 87e1eaa3 case: two siblings each keyed with their own nonce.
+/// The degrade refuses because the pending entry's `nonce` is not None.
+#[tokio::test]
+async fn triple_fallback_refuses_when_pending_carries_a_different_nonce() {
+    let mock = Arc::new(MockSpawner::new());
+    let broker = DelegationBroker::new(
+        mock.clone() as Arc<dyn ConnectionSpawner>,
+        Arc::new(RootDepth) as Arc<dyn ConversationDepthLookup>,
+    );
+    // Pending is registered WITH its own nonce (well-behaved host).
+    broker
+        .register_pending_tool_call_with_key(
+            "parent-conn",
+            "tc-real".into(),
+            Some(nonced_key("do the thing", "other-nonce")),
+        )
+        .await;
+    // MCP-side asks with a DIFFERENT nonce. Strict eq misses; degrade must
+    // refuse (pending's nonce is Some, not None), so this doesn't claim.
+    let claimed = broker
+        .take_matching_tool_call("parent-conn", &nonced_key("do the thing", "my-nonce"))
+        .await;
+    assert!(
+        claimed.is_none(),
+        "pending entries with an existing nonce must not be recoverable by 3-tuple degrade — 87e1eaa3's crosstalk guard"
+    );
+}
+
+/// **Non-regression: two pending, one same-triple + nonce=None, one different
+/// task.** Uniqueness holds (still exactly one triple match), degrade recovers.
+#[tokio::test]
+async fn triple_fallback_recovers_when_sibling_is_a_different_task() {
+    let mock = Arc::new(MockSpawner::new());
+    let broker = DelegationBroker::new(
+        mock.clone() as Arc<dyn ConnectionSpawner>,
+        Arc::new(RootDepth) as Arc<dyn ConversationDepthLookup>,
+    );
+    broker
+        .register_pending_tool_call_with_key(
+            "parent-conn",
+            "tc-mine".into(),
+            Some(triple_key("task A")),
+        )
+        .await;
+    broker
+        .register_pending_tool_call_with_key(
+            "parent-conn",
+            "tc-sibling".into(),
+            Some(triple_key("task B")),
+        )
+        .await;
+    let claimed = broker
+        .take_matching_tool_call("parent-conn", &nonced_key("task A", "n1"))
+        .await;
+    assert_eq!(
+        claimed.as_deref(),
+        Some("tc-mine"),
+        "sibling on a different task doesn't count against uniqueness; degrade still recovers"
     );
 }
