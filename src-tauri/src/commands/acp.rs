@@ -2104,12 +2104,50 @@ const NPM_FOREGROUND_SCRIPTS: &str = "--foreground-scripts";
 /// user's global script policy.
 const NPM_RUN_SCRIPTS_OVERRIDE: &str = "--ignore-scripts=false";
 
+/// Env var that makes Node's own `fetch` read `HTTP_PROXY`/`HTTPS_PROXY`/
+/// `NO_PROXY` (Node ≥24; earlier runtimes ignore an unknown variable).
+///
+/// Node's `fetch` (undici) is the one hop of an install that ignores the proxy
+/// environment — npm, git and uv all read it. hermes-agent's postinstall
+/// downloads its pinned uv binary with `fetch`, so behind a proxy the whole
+/// bootstrap dies on `Downloading uv ...` with a bare `fetch failed` while
+/// every other step of it would have gone through. Set only when the
+/// environment doesn't already carry the variable, so a user who set it (either
+/// way) still decides.
+const NODE_ENV_PROXY_VAR: &str = "NODE_USE_ENV_PROXY";
+
 /// Whether an npm package's lifecycle scripts are load-bearing for the
 /// install (skipping them yields a broken command). Only the hermes-agent
 /// community bridge today: its postinstall bootstraps the entire Python
 /// runtime the `hermes` bin execs into.
 fn npm_package_requires_scripts(package: &str) -> bool {
     package_name_from_spec(package) == "hermes-agent"
+}
+
+/// Name the proxy when a bootstrap package's install died inside the wrapper's
+/// own downloads. `NODE_ENV_PROXY_VAR` covers Node ≥24; what remains is a
+/// proxied machine on an older Node, where nothing codeg can pass makes that
+/// `fetch` go through — worth spelling out, because npm reports it as a bare
+/// `fetch failed` that says nothing about a proxy.
+fn annotate_npm_bootstrap_failure(package: &str, err: AcpError) -> AcpError {
+    if !npm_package_requires_scripts(package) {
+        return err;
+    }
+    let AcpError::Protocol(message) = &err else {
+        return err;
+    };
+    let download_failed = message.contains("fetch failed")
+        || message.contains("Failed to download")
+        || message.contains("aborted due to timeout");
+    if !download_failed {
+        return err;
+    }
+    AcpError::Protocol(format!(
+        "{message}\n\nThe bootstrap downloads its runtime from github.com with Node's own \
+         fetch, which reads HTTP(S)_PROXY only on Node 24+. Behind a proxy on an older \
+         Node, upgrade Node or run the official installer — codeg picks up a `hermes` \
+         on PATH."
+    ))
 }
 
 /// Run an npm command with piped stdout/stderr, streaming each line as a log event.
@@ -2124,6 +2162,9 @@ async fn run_npm_streaming(
     let mut cmd = crate::process::tokio_command("npm");
     for arg in args {
         cmd.arg(arg);
+    }
+    if std::env::var_os(NODE_ENV_PROXY_VAR).is_none() {
+        cmd.env(NODE_ENV_PROXY_VAR, "1");
     }
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -10441,7 +10482,9 @@ pub(crate) async fn acp_prepare_npx_agent_core(
                 AgentInstallEventKind::Log,
                 format!("Installing {} ({install_spec})", meta.name),
             );
-            install_npm_global_package_streaming(&install_spec, &task_id, emitter).await?;
+            install_npm_global_package_streaming(&install_spec, &task_id, emitter)
+                .await
+                .map_err(|e| annotate_npm_bootstrap_failure(&install_spec, e))?;
 
             // For a bootstrap-wrapper package (hermes-agent), npm metadata
             // existing does NOT mean the agent can run: a skipped or broken
@@ -15266,5 +15309,32 @@ model = "gpt"
         std::fs::write(&path, r#"{"access_token":"real-oauth-abc"}"#).unwrap();
         remove_kimi_synthetic_credential_if_ours_at(&path).expect("remove");
         assert!(path.exists(), "a real login token must not be removed");
+    }
+
+    #[test]
+    fn npm_bootstrap_failure_names_the_proxy_only_for_a_wrapper_download() {
+        let download = || {
+            AcpError::Protocol(
+                "failed to install npm package globally: Installation failed: fetch failed"
+                    .to_string(),
+            )
+        };
+
+        let annotated = annotate_npm_bootstrap_failure("hermes-agent@0.20.0", download());
+        let text = annotated.to_string();
+        assert!(text.contains("fetch failed"), "keeps the original error");
+        assert!(text.contains("HTTP(S)_PROXY"), "adds the proxy hint");
+
+        // A package whose install runs no bootstrap can't fail this way, so the
+        // hint would be noise even on a matching message.
+        let other = annotate_npm_bootstrap_failure("@zed-industries/claude-code-acp", download());
+        assert!(!other.to_string().contains("HTTP(S)_PROXY"));
+
+        // A hermes failure that isn't a download stays untouched.
+        let permissions = annotate_npm_bootstrap_failure(
+            "hermes-agent@0.20.0",
+            AcpError::Protocol("failed to install npm package globally: EACCES".to_string()),
+        );
+        assert!(!permissions.to_string().contains("HTTP(S)_PROXY"));
     }
 }
