@@ -402,6 +402,53 @@ export interface BackgroundTaskRow {
   command: string | null
   /** Number of polls collapsed into this row (the `×N` hint). */
   pollCount: number
+  /** This row is a Grok SUB-AGENT, not a background shell command. Its output is
+   *  a prose report (Markdown), so the card renders it as such instead of
+   *  routing it through the ANSI terminal panel. */
+  isSubagent: boolean
+}
+
+/** `[subagent:<type>] <description>` — the pseudo-command Grok 0.2.9x gives a
+ *  sub-agent's `TaskOutput.Result`, and the label 0.2.11x's flat
+ *  `SubagentCompleted` is mapped onto (`grokSubagentCompletedToEnvelope`). */
+const GROK_SUBAGENT_COMMAND_PREFIX = "[subagent:"
+
+/**
+ * Whether a row describes a sub-agent rather than a background shell command.
+ * `taskType` is the direct signal (set by the `SubagentCompleted` mapping); the
+ * command prefix covers the `TaskOutput.Result` era, which carries no type.
+ */
+function isSubagentRow(
+  taskType: string | null,
+  command: string | null
+): boolean {
+  if (taskType === "subagent") return true
+  return command?.trimStart().startsWith(GROK_SUBAGENT_COMMAND_PREFIX) === true
+}
+
+/**
+ * Drop the machine-facing scaffolding Grok appends to a POLLED sub-agent
+ * result: `<subagent_meta>id=…, tool_calls=1, …</subagent_meta>` and
+ * `<subagent_result>subagent_id: …\nTo continue this subagent's conversation,
+ * use resume_from="…"</subagent_result>`. Both are addressed to the parent
+ * model (the numbers are already on the Agent capsule, and `resume_from` is a
+ * tool argument), and neither appears in the `subagent_finished` notification's
+ * own `output` — so leaving them in only leaks prompt plumbing into the UI.
+ *
+ * Anything the tags don't cover is returned verbatim, so an output that never
+ * had them (every non-Grok background task) is untouched.
+ */
+export function stripGrokSubagentScaffolding(
+  output: string | null
+): string | null {
+  if (!output) return output
+  const stripped = output
+    .replace(/<subagent_meta>[\s\S]*?<\/subagent_meta>/gi, "")
+    .replace(/<subagent_result>[\s\S]*?<\/subagent_result>/gi, "")
+  if (stripped === output) return output
+  // Collapse the blank lines the removal leaves behind, then trim the trailing
+  // gap — the tags always sit at the end of the report.
+  return stripped.replace(/\n{3,}/g, "\n\n").trimEnd()
 }
 
 function inputTaskId(input: string | null | undefined): string | null {
@@ -527,6 +574,7 @@ export function buildBackgroundTaskRows(
       if (envelope?.command) command = envelope.command
       if (envelope?.taskType) taskType = envelope.taskType
     }
+    const isSubagent = isSubagentRow(taskType, command)
     return {
       key,
       taskId: entry.taskId,
@@ -535,9 +583,10 @@ export function buildBackgroundTaskRows(
       isInFlight:
         isInFlightState(latest.poll) && (env == null || env.output == null),
       exitCode: env?.exitCode ?? null,
-      output,
+      output: isSubagent ? stripGrokSubagentScaffolding(output) : output,
       command,
       pollCount: entry.entries.length,
+      isSubagent,
     }
   })
 }

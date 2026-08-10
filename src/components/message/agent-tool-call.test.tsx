@@ -355,3 +355,61 @@ describe("AgentToolCallPart grok live progress", () => {
     ).not.toBeInTheDocument()
   })
 })
+
+describe("AgentToolCallPart child session action", () => {
+  it("offers the child's session from the live spawn meta", () => {
+    // Grok forwards none of the child's work over ACP, so the action has to be
+    // there WHILE it runs — the meta stamp is what makes that possible.
+    renderCard({
+      ...basePart(
+        JSON.stringify({ subagent_type: "explore", description: "map repo" }),
+        "input-available"
+      ),
+      meta: {
+        grokSubagentSession: {
+          subagentId: "sub-1",
+          childSessionId: "019fe6bf-0bcb-70c2-a02d-e5c006dfc32a",
+        },
+      },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Running" }))
+    expect(
+      screen.getByRole("button", { name: "View sub-agent session" })
+    ).toBeInTheDocument()
+  })
+
+  it("offers it from the parsed stats on a settled historical card", () => {
+    renderCard({
+      ...basePart(
+        JSON.stringify({ subagent_type: "explore", description: "map repo" }),
+        "output-available"
+      ),
+      output: "final result",
+      agentStats: {
+        agent_type: "explore",
+        status: "completed",
+        child_session_id: "019fe6bf-0bcb-70c2-a02d-e5c006dfc32a",
+      },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Completed" }))
+    expect(
+      screen.getByRole("button", { name: "View sub-agent session" })
+    ).toBeInTheDocument()
+  })
+
+  it("stays hidden for a sub-agent with no session of its own", () => {
+    // Every other agent folds its child into the parent transcript — there is
+    // nothing to open.
+    renderCard({
+      ...basePart(
+        JSON.stringify({ subagent_type: "Explore", description: "map repo" }),
+        "output-available"
+      ),
+      output: "final result",
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Completed" }))
+    expect(
+      screen.queryByRole("button", { name: "View sub-agent session" })
+    ).not.toBeInTheDocument()
+  })
+})

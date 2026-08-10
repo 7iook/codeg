@@ -8086,6 +8086,16 @@ struct CodeBuddyLiveState {
     /// Routes `subagent_progress` ticks (live meta on the Agent card) and the
     /// `subagent_finished` settle; the entry is dropped at finish.
     grok_subagent_to_call: HashMap<String, String>,
+    /// spawn tool_call id → the child's OWN session id (`child_session_id`, or
+    /// the subagent id it always equals in practice). Grok runs each sub-agent
+    /// as a standalone session that writes its transcript to disk while it
+    /// works, so this is what lets the live Agent card offer "open the child's
+    /// session" — the only way to watch a blocking child, whose launch call
+    /// carries no output until it finishes. Kept in state (not just emitted
+    /// once) because `upsert_tool_call` REPLACES a block's meta: every later
+    /// progress tick must re-send it or the id would be dropped. Entry dropped
+    /// at finish, alongside `grok_subagent_to_call`.
+    grok_call_child_session: HashMap<String, String>,
     /// Spawn calls that reached a terminal wire status. A `subagent_finished`
     /// for one of these is a BACKGROUND child settling after its launch ack —
     /// the case whose result would otherwise never reach the card live; a
@@ -8453,7 +8463,21 @@ fn map_grok_subagent_notification(
     agent_type: AgentType,
     turn_active: bool,
     cb_state: &mut CodeBuddyLiveState,
-) -> Option<AcpEvent> {
+) -> Vec<AcpEvent> {
+    map_grok_subagent_notification_inner(notification, agent_type, turn_active, cb_state)
+        .unwrap_or_default()
+}
+
+/// The body of [`map_grok_subagent_notification`], written with `?` on the many
+/// "this notification isn't one of ours / is malformed" checks. A spawn can
+/// produce TWO events (the card's session stamp plus the background-activity
+/// report), hence the list.
+fn map_grok_subagent_notification_inner(
+    notification: &UntypedMessage,
+    agent_type: AgentType,
+    turn_active: bool,
+    cb_state: &mut CodeBuddyLiveState,
+) -> Option<Vec<AcpEvent>> {
     if !matches!(agent_type, AgentType::Grok) {
         return None;
     }
@@ -8506,13 +8530,64 @@ fn map_grok_subagent_notification(
             cb_state
                 .grok_subagent_to_call
                 .insert(subagent_id.to_string(), call_id.clone());
+            // The child's own session id — `child_session_id` when the wire
+            // carries it, else the subagent id (they are the same value in
+            // every capture). Remembered so later progress ticks can re-send it
+            // (`upsert_tool_call` replaces meta wholesale, so every tick must
+            // carry it again).
+            //
+            // Gated by the same `is_safe_subagent_id` the history parser applies
+            // to this field: the value is handed to the frontend, which asks
+            // `get_conversation` to resolve a session directory by it, so both
+            // paths have to reject a traversal-shaped id — not just the one that
+            // reads from disk itself. Failing the gate simply leaves the card
+            // without a session to open.
+            let child_session_id = update
+                .get("child_session_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(subagent_id);
+            let child_session_id = crate::parsers::is_safe_subagent_id(child_session_id)
+                .then(|| child_session_id.to_string());
+            if let Some(child) = &child_session_id {
+                cb_state
+                    .grok_call_child_session
+                    .insert(call_id.clone(), child.clone());
+            }
+
+            let mut events = Vec::new();
+            // Stamp the child's session onto the launching Agent card so it can
+            // offer to open the child's transcript WHILE it runs — for a
+            // blocking spawn that is the only live window into the child, since
+            // its call produces no output until the very end. Gated exactly like
+            // a progress tick: out of turn, the `SessionState` apply arm would
+            // lazily recreate `live_message` and strand a ghost card in every
+            // later snapshot.
+            if turn_active && cb_state.grok_progress_eligible.contains(&call_id) {
+                events.push(AcpEvent::ToolCallUpdate {
+                    tool_call_id: call_id.clone(),
+                    title: None,
+                    status: None,
+                    content: None,
+                    raw_input: None,
+                    raw_output: None,
+                    raw_output_append: None,
+                    locations: None,
+                    meta: Some(grok_subagent_meta(
+                        subagent_id,
+                        child_session_id.as_deref(),
+                        None,
+                    )),
+                    images: None,
+                });
+            }
             // A background launch's call settles before/around the pairing;
             // surface the outstanding count so the connection is exempt from
-            // idle sweeps while the child works. Nothing to emit for a
+            // idle sweeps while the child works. Nothing to add for a
             // blocking spawn (its turn is open — nothing can sweep it).
             if cb_state.grok_settled_spawn_ids.contains(&call_id) {
                 let session_id = params.get("sessionId").and_then(|v| v.as_str())?;
-                return Some(AcpEvent::BackgroundActivity {
+                events.push(AcpEvent::BackgroundActivity {
                     session_id: session_id.to_string(),
                     turns: Vec::new(),
                     outstanding: outstanding(cb_state),
@@ -8520,7 +8595,7 @@ fn map_grok_subagent_notification(
                     watermark: 0,
                 });
             }
-            None
+            Some(events)
         }
         "subagent_progress" => {
             if !turn_active {
@@ -8548,7 +8623,11 @@ fn map_grok_subagent_notification(
             if progress.is_empty() {
                 return None;
             }
-            Some(AcpEvent::ToolCallUpdate {
+            // Carry the session stamp along: `upsert_tool_call` replaces the
+            // block's meta wholesale, so a progress-only payload would drop the
+            // "open the child's session" affordance mid-run.
+            let child_session_id = cb_state.grok_call_child_session.get(&call_id).cloned();
+            Some(vec![AcpEvent::ToolCallUpdate {
                 tool_call_id: call_id,
                 title: None,
                 status: None,
@@ -8557,12 +8636,17 @@ fn map_grok_subagent_notification(
                 raw_output: None,
                 raw_output_append: None,
                 locations: None,
-                meta: Some(serde_json::json!({ "grokSubagentProgress": progress })),
+                meta: Some(grok_subagent_meta(
+                    subagent_id,
+                    child_session_id.as_deref(),
+                    Some(serde_json::Value::Object(progress)),
+                )),
                 images: None,
-            })
+            }])
         }
         "subagent_finished" => {
             let call_id = cb_state.grok_subagent_to_call.remove(subagent_id)?;
+            cb_state.grok_call_child_session.remove(&call_id);
             if !cb_state.grok_settled_spawn_ids.contains(&call_id) {
                 // Blocking spawn: the child's output arrives on the call's own
                 // completion frame; the settle channel would double-render it.
@@ -8578,7 +8662,7 @@ fn map_grok_subagent_notification(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| crate::parsers::truncate_str(s, crate::parsers::claude::BACKGROUND_RESULT_MAX_CHARS));
-            Some(AcpEvent::BackgroundActivity {
+            Some(vec![AcpEvent::BackgroundActivity {
                 session_id: session_id.to_string(),
                 turns: Vec::new(),
                 outstanding: outstanding(cb_state),
@@ -8593,10 +8677,36 @@ fn map_grok_subagent_notification(
                     wire_visible: true,
                 }],
                 watermark: 0,
-            })
+            }])
         }
         _ => None,
     }
+}
+
+/// The `meta` payload a Grok sub-agent's launching Agent card carries:
+/// `grokSubagentSession` (ids — lets the card open the child's transcript) and,
+/// while it runs, `grokSubagentProgress` (the live "N tools · M turns · ctx%"
+/// line). Built in one place because `upsert_tool_call` REPLACES a block's
+/// meta: every emission has to carry the whole picture, not just its own half.
+fn grok_subagent_meta(
+    subagent_id: &str,
+    child_session_id: Option<&str>,
+    progress: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut session = serde_json::Map::new();
+    session.insert("subagentId".to_string(), subagent_id.into());
+    if let Some(child) = child_session_id {
+        session.insert("childSessionId".to_string(), child.into());
+    }
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "grokSubagentSession".to_string(),
+        serde_json::Value::Object(session),
+    );
+    if let Some(progress) = progress {
+        meta.insert("grokSubagentProgress".to_string(), progress);
+    }
+    serde_json::Value::Object(meta)
 }
 
 /// Whether a dispatch is a grok ext notification that
@@ -8673,8 +8783,16 @@ async fn maybe_emit_ext_notification(
     // so a stray notification the active-turn loop drains AFTER the status
     // already flipped back is still classified as out-of-turn.
     let turn_active = state.read().await.status == ConnectionStatus::Prompting;
-    if let Some(event) = map_claude_sdk_ext_notification(&notification)
-        .or_else(|| map_grok_subagent_notification(&notification, agent_type, turn_active, cb_state))
+    // A grok `subagent_spawned` can yield TWO events (the card's session stamp
+    // and the background-activity report), so this mapper hands back a list; an
+    // empty one means "not mine", and the chain continues as before.
+    let grok_subagent_events =
+        map_grok_subagent_notification(&notification, agent_type, turn_active, cb_state);
+    if !grok_subagent_events.is_empty() {
+        for event in grok_subagent_events {
+            emit_with_state(state, emitter, event).await;
+        }
+    } else if let Some(event) = map_claude_sdk_ext_notification(&notification)
         .or_else(|| map_grok_ext_notification(&notification, agent_type))
     {
         emit_with_state(state, emitter, event).await;
@@ -10303,7 +10421,7 @@ mod tests {
             "subagent_type": "explore"
         }));
         assert!(
-            map_grok_subagent_notification(&stale, AgentType::Grok, true, &mut cb).is_none(),
+            map_grok_subagent_notification(&stale, AgentType::Grok, true, &mut cb).is_empty(),
             "a mismatched spawned must pair nothing"
         );
         assert_eq!(cb.grok_pending_spawn_ids.len(), 1, "B keeps its slot");
@@ -10316,7 +10434,8 @@ mod tests {
             "subagent_type": "plan"
         }));
         assert!(
-            map_grok_subagent_notification(&stale_bare, AgentType::Grok, true, &mut cb).is_none(),
+            map_grok_subagent_notification(&stale_bare, AgentType::Grok, true, &mut cb)
+                .is_empty(),
             "an event missing a captured field must not match"
         );
         assert_eq!(cb.grok_pending_spawn_ids.len(), 1, "B still keeps its slot");
@@ -10365,18 +10484,26 @@ mod tests {
         // background child is now outstanding (idle-sweep exemption). Passed
         // with turn_active=false: the BackgroundActivity channel is
         // out-of-turn-safe by design and must not be gated.
-        match map_grok_subagent_notification(&spawned, AgentType::Grok, false, &mut cb) {
-            Some(AcpEvent::BackgroundActivity {
+        match map_grok_subagent_notification(&spawned, AgentType::Grok, false, &mut cb).as_slice() {
+            // Out of turn there is no session stamp (it would resurrect a ghost
+            // live_message) — only the background report.
+            [AcpEvent::BackgroundActivity {
                 outstanding,
                 settled,
                 ..
-            }) => {
-                assert_eq!(outstanding, 1);
+            }] => {
+                assert_eq!(*outstanding, 1);
                 assert!(settled.is_empty());
             }
-            other => panic!("expected BackgroundActivity, got {other:?}"),
+            other => panic!("expected one BackgroundActivity, got {other:?}"),
         }
         assert!(cb.grok_pending_spawn_ids.is_empty());
+        // The child's session id is remembered for the card, whether or not it
+        // was emitted this time.
+        assert_eq!(
+            cb.grok_call_child_session.get("call-1").map(String::as_str),
+            Some("sub-1")
+        );
 
         let progress = grok_subagent_notif(serde_json::json!({
             "sessionUpdate": "subagent_progress",
@@ -10392,7 +10519,7 @@ mod tests {
         // (the apply arm lazily creates it), while the frontend diverts it out
         // of the transcript anyway.
         assert!(
-            map_grok_subagent_notification(&progress, AgentType::Grok, false, &mut cb).is_none(),
+            map_grok_subagent_notification(&progress, AgentType::Grok, false, &mut cb).is_empty(),
             "progress must not emit outside an active turn"
         );
         // Cross-turn tick: the launch turn ended and a LATER turn is Prompting
@@ -10402,19 +10529,19 @@ mod tests {
         let eligibility_backup = cb.grok_progress_eligible.clone();
         cb.grok_progress_eligible.clear();
         assert!(
-            map_grok_subagent_notification(&progress, AgentType::Grok, true, &mut cb).is_none(),
+            map_grok_subagent_notification(&progress, AgentType::Grok, true, &mut cb).is_empty(),
             "a prior turn's background child must not tick into a later turn"
         );
         cb.grok_progress_eligible = eligibility_backup;
-        match map_grok_subagent_notification(&progress, AgentType::Grok, true, &mut cb) {
-            Some(AcpEvent::ToolCallUpdate {
+        match map_grok_subagent_notification(&progress, AgentType::Grok, true, &mut cb).as_slice() {
+            [AcpEvent::ToolCallUpdate {
                 tool_call_id,
                 status,
                 meta,
                 ..
-            }) => {
+            }] => {
                 assert_eq!(tool_call_id, "call-1");
-                assert_eq!(status, None, "progress must not touch the status");
+                assert_eq!(*status, None, "progress must not touch the status");
                 let progress = meta
                     .as_ref()
                     .and_then(|m| m.get("grokSubagentProgress"))
@@ -10425,8 +10552,18 @@ mod tests {
                     progress.get("contextUsagePct").and_then(|v| v.as_f64()),
                     Some(12.5)
                 );
+                // Meta is REPLACED on apply, so every tick must re-send the
+                // session ids or the "open child session" affordance vanishes
+                // the moment the first progress tick lands.
+                assert_eq!(
+                    meta.as_ref()
+                        .and_then(|m| m.get("grokSubagentSession"))
+                        .and_then(|s| s.get("childSessionId"))
+                        .and_then(|v| v.as_str()),
+                    Some("sub-1")
+                );
             }
-            other => panic!("expected ToolCallUpdate, got {other:?}"),
+            other => panic!("expected one ToolCallUpdate, got {other:?}"),
         }
 
         let finished = grok_subagent_notif(serde_json::json!({
@@ -10440,15 +10577,15 @@ mod tests {
         }));
         // The settle is likewise out-of-turn-safe (a background child usually
         // finishes after its launch turn ended).
-        match map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb) {
-            Some(AcpEvent::BackgroundActivity {
+        match map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb).as_slice() {
+            [AcpEvent::BackgroundActivity {
                 session_id,
                 outstanding,
                 settled,
                 ..
-            }) => {
+            }] => {
                 assert_eq!(session_id, "sess-1");
-                assert_eq!(outstanding, 0, "the settled child leaves the count");
+                assert_eq!(*outstanding, 0, "the settled child leaves the count");
                 assert_eq!(settled.len(), 1);
                 let s = &settled[0];
                 assert_eq!(s.task_id, "sub-1");
@@ -10460,7 +10597,8 @@ mod tests {
             other => panic!("expected BackgroundActivity, got {other:?}"),
         }
         // Lifecycle over: a duplicate finished no longer routes anywhere.
-        assert!(map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb).is_none());
+        assert!(map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb)
+            .is_empty());
     }
 
     /// A BLOCKING spawn (call not yet settled when the child finishes) must NOT
@@ -10474,8 +10612,27 @@ mod tests {
             "sessionUpdate": "subagent_spawned",
             "subagent_id": "sub-1"
         }));
-        // Blocking: call still in_progress at pairing time → no event at all.
-        assert!(map_grok_subagent_notification(&spawned, AgentType::Grok, true, &mut cb).is_none());
+        // Blocking: the call is still in_progress at pairing time, so there is
+        // no background report — only the session stamp, which is exactly what
+        // lets the user open a blocking child's transcript while it runs (its
+        // launch call stays output-less until the very end).
+        match map_grok_subagent_notification(&spawned, AgentType::Grok, true, &mut cb).as_slice() {
+            [AcpEvent::ToolCallUpdate {
+                tool_call_id, meta, ..
+            }] => {
+                assert_eq!(tool_call_id, "call-1");
+                // No `child_session_id` on this wire shape → fall back to the
+                // subagent id, which is the same value in every capture.
+                assert_eq!(
+                    meta.as_ref()
+                        .and_then(|m| m.get("grokSubagentSession"))
+                        .and_then(|s| s.get("childSessionId"))
+                        .and_then(|v| v.as_str()),
+                    Some("sub-1")
+                );
+            }
+            other => panic!("expected one ToolCallUpdate, got {other:?}"),
+        }
         let finished = grok_subagent_notif(serde_json::json!({
             "sessionUpdate": "subagent_finished",
             "subagent_id": "sub-1",
@@ -10483,7 +10640,7 @@ mod tests {
             "output": "done"
         }));
         assert!(
-            map_grok_subagent_notification(&finished, AgentType::Grok, true, &mut cb).is_none(),
+            map_grok_subagent_notification(&finished, AgentType::Grok, true, &mut cb).is_empty(),
             "blocking spawn settles via its own completion frame"
         );
 
@@ -10496,9 +10653,46 @@ mod tests {
             "subagent_id": "sub-9"
         }));
         assert!(
-            map_grok_subagent_notification(&spawned2, AgentType::Codex, true, &mut cb2).is_none()
+            map_grok_subagent_notification(&spawned2, AgentType::Codex, true, &mut cb2).is_empty()
         );
         assert_eq!(cb2.grok_pending_spawn_ids.len(), 1);
+    }
+
+    /// A traversal-shaped `child_session_id` must not reach the card: the
+    /// frontend hands that value to `get_conversation`, which resolves a session
+    /// directory by it, so the live path applies the same `is_safe_subagent_id`
+    /// gate the history parser (`grok::subagent_stats`) does. The stamp still
+    /// carries the subagent id — the run is identified, there is just no session
+    /// offered to open.
+    #[test]
+    fn map_grok_subagent_notification_rejects_unsafe_child_session_id() {
+        let mut cb = CodeBuddyLiveState::default();
+        track_grok_spawn_call(&mut cb, true, Some("pending"), "call-1", &None);
+        let spawned = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sub-1",
+            "child_session_id": "../../../etc/passwd"
+        }));
+        match map_grok_subagent_notification(&spawned, AgentType::Grok, true, &mut cb).as_slice() {
+            [AcpEvent::ToolCallUpdate { meta, .. }] => {
+                let session = meta
+                    .as_ref()
+                    .and_then(|m| m.get("grokSubagentSession"))
+                    .expect("session meta");
+                assert_eq!(
+                    session.get("subagentId").and_then(|v| v.as_str()),
+                    Some("sub-1")
+                );
+                assert!(
+                    session.get("childSessionId").is_none(),
+                    "a traversal-shaped child id must not reach the viewer"
+                );
+            }
+            other => panic!("expected one ToolCallUpdate, got {other:?}"),
+        }
+        // Nothing memorized either — a later progress tick has nothing to
+        // re-send, so the rejection holds for the whole run.
+        assert!(cb.grok_call_child_session.is_empty());
     }
 
     /// The turn-loop consults this to keep a compaction-only `/compact` turn

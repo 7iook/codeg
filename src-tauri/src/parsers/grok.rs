@@ -395,6 +395,12 @@ impl GrokParser {
             lines_removed: None,
             other_tool_count: None,
             tool_calls,
+            // Grok runs every sub-agent as a full session of its own, so the
+            // card can offer to open the child's transcript. Only hand over an
+            // id that passed the path-traversal guard — it is used to look up a
+            // session directory. `get_conversation` resolves it even though
+            // `build_summary` keeps sub-agent sessions out of the sidebar.
+            child_session_id: is_safe_subagent_id(child_id).then(|| child_id.to_string()),
         })
     }
 }
@@ -2461,6 +2467,11 @@ mod tests {
         assert!(!stats.tool_calls[0].is_error);
         assert_eq!(stats.tool_calls[1].tool_name, "read_file");
         assert!(stats.tool_calls[1].is_error);
+        // The child's own session travels with the stats so the Agent card can
+        // offer to open its transcript (grok runs every child as a full
+        // session; `get_conversation` resolves it despite the sidebar hiding
+        // `session_kind: "subagent"`).
+        assert_eq!(stats.child_session_id.as_deref(), Some(CHILD_ID));
     }
 
     /// The 0.2.11x subagent poll (`rawOutput.type == "SubagentCompleted"`)
@@ -2572,6 +2583,10 @@ mod tests {
         };
         assert!(stats.tool_calls.is_empty(), "no transcript may load from a hostile id");
         assert_eq!(stats.total_duration_ms, Some(5));
+        // …and the id is not handed to the frontend either: the card's "open
+        // the child's session" action would feed it straight back into a
+        // session-directory lookup.
+        assert_eq!(stats.child_session_id, None);
     }
 
     /// An errored spawn (depth limit, config) consumes no lifecycle, so a

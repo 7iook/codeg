@@ -543,6 +543,10 @@ impl OpenCodeParser {
                             lines_removed: None,
                             other_tool_count: None,
                             tool_calls,
+                            // OpenCode's sub-agent transcript is already folded
+                            // into this stats block; there is no separate
+                            // session for the card to open.
+                            child_session_id: None,
                         });
 
                         let has_error_field = state.and_then(|s| s.get("error")).is_some();
