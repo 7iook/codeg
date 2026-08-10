@@ -46,6 +46,7 @@ import {
 } from "@/lib/custom-agents"
 import { AgentIcon } from "@/components/agent-icon"
 import { AddCustomAgentDialog } from "@/components/settings/add-custom-agent-dialog"
+import { SettingCard, SettingRow } from "@/components/shared/setting-card"
 import { CustomAgentMcpToggle } from "@/components/settings/custom-agent-mcp-toggle"
 import { CustomAgentSkillsToggle } from "@/components/settings/custom-agent-skills-toggle"
 import {
@@ -10655,59 +10656,67 @@ supports_websockets = true`}
                   // channel that works for every agent, so they are the whole
                   // surface — plus the skills declaration and removing the
                   // agent.
+                  // All four blocks share the settings-card vocabulary
+                  // (`SettingCard` / `SettingRow`, as in the task settings
+                  // dialog) so the panel reads as one stack of settings rather
+                  // than four differently-shaped boxes.
                   <>
-                    <div className="space-y-3 rounded-md border bg-muted/10 p-3">
-                      <div>
-                        <label className="text-xs font-medium">
-                          {t("customAgentEdit")}
-                        </label>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          {t("customAgentEditHint")}
-                        </p>
-                      </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          setEditCustomAgentId(
-                            customAgentId(selectedAgent.agent_type)
-                          )
+                    <SettingCard>
+                      <SettingRow
+                        icon={Pencil}
+                        title={t("customAgentEdit")}
+                        description={t("customAgentEditHint")}
+                        control={
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              setEditCustomAgentId(
+                                customAgentId(selectedAgent.agent_type)
+                              )
+                            }
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            {t("customAgentEdit")}
+                          </Button>
                         }
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        {t("customAgentEdit")}
-                      </Button>
-                    </div>
+                      />
+                    </SettingCard>
                     <CustomAgentSkillsToggle
                       registryId={customAgentId(selectedAgent.agent_type) ?? ""}
                     />
                     <CustomAgentMcpToggle
                       registryId={customAgentId(selectedAgent.agent_type) ?? ""}
                     />
-                    <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                      <div>
-                        <label className="text-xs font-medium text-destructive">
-                          {t("customAgentRemove")}
-                        </label>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          {t("customAgentRemoveHint")}
-                        </p>
-                      </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-destructive hover:text-destructive"
-                        disabled={removingCustomAgent}
-                        onClick={() => setRemoveConfirmAgent(selectedAgent)}
-                      >
-                        {removingCustomAgent ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-3.5 w-3.5" />
-                        )}
-                        {t("customAgentRemove")}
-                      </Button>
-                    </div>
+                    {/* The one destructive action keeps its own tinting — the
+                        card shape is shared, the color is the warning. */}
+                    <SettingCard className="border-destructive/30 bg-destructive/5">
+                      <SettingRow
+                        icon={Trash2}
+                        title={
+                          <span className="text-destructive">
+                            {t("customAgentRemove")}
+                          </span>
+                        }
+                        description={t("customAgentRemoveHint")}
+                        control={
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            disabled={removingCustomAgent}
+                            onClick={() => setRemoveConfirmAgent(selectedAgent)}
+                          >
+                            {removingCustomAgent ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                            {t("customAgentRemove")}
+                          </Button>
+                        }
+                      />
+                    </SettingCard>
                   </>
                 ) : (
                   <div className="space-y-3 rounded-md border bg-muted/10 p-3">

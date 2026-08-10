@@ -37,7 +37,7 @@ import {
   SettingCard,
   SettingNote,
   SettingRow,
-} from "@/components/tasks/setting-card"
+} from "@/components/shared/setting-card"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,

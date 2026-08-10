@@ -19,14 +19,18 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
+import { Plug } from "lucide-react"
 import { toast } from "sonner"
 
+import { SettingCard, SettingRow } from "@/components/shared/setting-card"
 import { Switch } from "@/components/ui/switch"
 import {
   acpListCustomAgents,
   acpPatchCustomAgent,
   type CustomAgentInfo,
 } from "@/lib/api"
+
+const MCP_SWITCH_ID = "custom-agent-mcp-supported"
 
 interface CustomAgentMcpToggleProps {
   registryId: string
@@ -83,22 +87,21 @@ export function CustomAgentMcpToggle({
   if (!info) return null
 
   return (
-    <div className="space-y-3 rounded-md border bg-muted/10 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <label className="text-xs font-medium">
-            {t("customAgentMcpLabel")}
-          </label>
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            {t("customAgentMcpHint")}
-          </p>
-        </div>
-        <Switch
-          checked={info.supportsMcp}
-          disabled={saving}
-          onCheckedChange={(v) => void handleToggle(v)}
-        />
-      </div>
-    </div>
+    <SettingCard>
+      <SettingRow
+        icon={Plug}
+        title={t("customAgentMcpLabel")}
+        description={t("customAgentMcpHint")}
+        htmlFor={MCP_SWITCH_ID}
+        control={
+          <Switch
+            id={MCP_SWITCH_ID}
+            checked={info.supportsMcp}
+            disabled={saving}
+            onCheckedChange={(v) => void handleToggle(v)}
+          />
+        }
+      />
+    </SettingCard>
   )
 }

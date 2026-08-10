@@ -17,9 +17,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
-import { Loader2 } from "lucide-react"
+import { FolderCog, Loader2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 
+import { SettingCard, SettingRow } from "@/components/shared/setting-card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -28,6 +29,9 @@ import {
   acpPatchCustomAgent,
   type CustomAgentInfo,
 } from "@/lib/api"
+
+const SHARED_STORE_SWITCH_ID = "custom-agent-skills-shared-store"
+const SKILLS_DIR_INPUT_ID = "custom-agent-skills-dir"
 
 interface CustomAgentSkillsToggleProps {
   registryId: string
@@ -119,57 +123,54 @@ export function CustomAgentSkillsToggle({
 
   const dirDirty = dirDraft.trim() !== (info.skillsDir ?? "")
 
+  // The two declarations are one decision ("where does this agent read skills
+  // from"), so they share a card and the hairline between them, rather than
+  // reading as two unrelated settings.
   return (
-    <div className="space-y-3 rounded-md border bg-muted/10 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <label className="text-xs font-medium">
-            {t("customAgentSkillsLabel")}
-          </label>
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            {t("customAgentSkillsHint")}
-          </p>
-        </div>
-        <Switch
-          checked={info.skillsSharedStore}
-          disabled={saving}
-          onCheckedChange={(v) => void handleToggle(v)}
-        />
-      </div>
-
-      <div className="space-y-1">
-        <label
-          className="text-xs font-medium"
-          htmlFor="custom-agent-skills-dir"
-        >
-          {t("customAgentSkillsDirLabel")}
-        </label>
+    <SettingCard>
+      <SettingRow
+        icon={Sparkles}
+        title={t("customAgentSkillsLabel")}
+        description={t("customAgentSkillsHint")}
+        htmlFor={SHARED_STORE_SWITCH_ID}
+        control={
+          <Switch
+            id={SHARED_STORE_SWITCH_ID}
+            checked={info.skillsSharedStore}
+            disabled={saving}
+            onCheckedChange={(v) => void handleToggle(v)}
+          />
+        }
+      />
+      <SettingRow
+        icon={FolderCog}
+        title={t("customAgentSkillsDirLabel")}
+        description={t("customAgentSkillsDirHint")}
+        htmlFor={SKILLS_DIR_INPUT_ID}
+      >
         <div className="flex items-center gap-2">
           <Input
-            id="custom-agent-skills-dir"
+            id={SKILLS_DIR_INPUT_ID}
             value={dirDraft}
             disabled={saving}
             onChange={(e) => setDirDraft(e.target.value)}
             placeholder="~/.my-agent/skills"
-            className="h-8 text-xs font-mono"
+            className="h-8 font-mono text-xs"
           />
           {dirDirty && (
             <Button
               size="sm"
               variant="secondary"
-              className="h-8 text-xs shrink-0"
+              className="h-8 shrink-0 text-xs"
               disabled={saving}
               onClick={() => void handleSaveDir()}
             >
-              {saving && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
+              {saving && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
               {t("customAgentSaveChanges")}
             </Button>
           )}
         </div>
-        <p className="text-[11px] text-muted-foreground">
-          {t("customAgentSkillsDirHint")}
-        </p>
-      </div>
-    </div>
+      </SettingRow>
+    </SettingCard>
   )
 }
