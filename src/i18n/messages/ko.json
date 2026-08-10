@@ -3254,6 +3254,37 @@
       "proposedPlan": {
         "title": "제안된 계획",
         "planning": "계획 중…"
+      },
+      "workflowCard": {
+        "untitledWorkflow": "워크플로",
+        "defaultPhase": "단계 {index}",
+        "agentCount": "{count, plural, other {에이전트 #개}}",
+        "toolCalls": "{count, plural, other {도구 호출 #회}}",
+        "totalTokens": "{count, plural, other {토큰 #개}}",
+        "noAgents": "이 단계에는 아직 에이전트가 없습니다.",
+        "noProgress": "아직 진행 상황이 보고되지 않았습니다.",
+        "status": {
+          "started": "시작됨",
+          "running": "실행 중",
+          "completed": "완료됨",
+          "failed": "실패함",
+          "killed": "강제 종료됨",
+          "stopped": "중지됨",
+          "unknown": "알 수 없음"
+        }
+      },
+      "hookLifecycle": {
+        "hookTitle": "{hook} 훅",
+        "passedLine": "{hook} 훅 통과됨",
+        "detailsToggle": "세부 정보",
+        "commandLabel": "명령:",
+        "exitCode": "종료 코드 {code}",
+        "outcome": {
+          "pass": "통과됨",
+          "soft_context": "컨텍스트 추가됨",
+          "hard_block": "차단됨",
+          "error": "오류"
+        }
       }
     },
     "diffPreview": {

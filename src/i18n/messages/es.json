@@ -3254,6 +3254,37 @@
       "proposedPlan": {
         "title": "Plan propuesto",
         "planning": "Planificando…"
+      },
+      "workflowCard": {
+        "untitledWorkflow": "Flujo de trabajo",
+        "defaultPhase": "Fase {index}",
+        "agentCount": "{count, plural, one {# agente} other {# agentes}}",
+        "toolCalls": "{count, plural, one {# llamada a herramienta} other {# llamadas a herramientas}}",
+        "totalTokens": "{count, plural, one {# token} other {# tokens}}",
+        "noAgents": "Aún no hay agentes en esta fase.",
+        "noProgress": "Aún no se ha informado de progreso.",
+        "status": {
+          "started": "Iniciado",
+          "running": "En ejecución",
+          "completed": "Completado",
+          "failed": "Fallido",
+          "killed": "Terminado",
+          "stopped": "Detenido",
+          "unknown": "Desconocido"
+        }
+      },
+      "hookLifecycle": {
+        "hookTitle": "Hook {hook}",
+        "passedLine": "El hook {hook} pasó",
+        "detailsToggle": "Detalles",
+        "commandLabel": "Comando:",
+        "exitCode": "salida {code}",
+        "outcome": {
+          "pass": "Aprobado",
+          "soft_context": "Contexto añadido",
+          "hard_block": "Bloqueado",
+          "error": "Error"
+        }
       }
     },
     "diffPreview": {

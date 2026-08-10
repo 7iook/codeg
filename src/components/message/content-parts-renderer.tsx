@@ -76,6 +76,8 @@ import { GoalRunPart, GoalToolCallPart } from "./goal-tool-call"
 import { PlanCard, PlanEntriesList } from "./plan-card"
 import { PlanModeCard } from "./plan-mode-card"
 import { PlainTextWithBadges } from "./plain-text-with-badges"
+import { WorkflowCard } from "./workflow-card"
+import { HookLifecycleCard } from "./hook-lifecycle-card"
 import {
   FileTextIcon,
   FilePenLineIcon,
@@ -102,6 +104,17 @@ import {
 } from "lucide-react"
 
 // ── helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Compile-time exhaustiveness guard for the content-part renderer. `part` is
+ * narrowed to `never` once every kind is handled; an unhandled new kind fails
+ * to type-check here. At runtime it degrades to `null` (A4: skip, never a
+ * generic placeholder card).
+ */
+function assertNeverPart(part: never): null {
+  void (part satisfies never)
+  return null
+}
 
 /** Try JSON.parse; return null on failure. */
 export function tryParseJson(s: string): Record<string, unknown> | null {
@@ -3074,7 +3087,19 @@ export const ContentPartsRenderer = memo(function ContentPartsRenderer({
       )
     }
 
-    return null
+    if (part.type === "workflow-progress") {
+      return <WorkflowCard key={`workflow-${keyId}`} data={part.data} />
+    }
+
+    if (part.type === "hook-lifecycle") {
+      return <HookLifecycleCard key={`hook-${keyId}`} data={part.data} />
+    }
+
+    // Exhaustiveness guard: every `AdaptedContentPart` kind is handled above,
+    // so `part` is `never` here. A new kind added without a branch becomes a
+    // compile error — it cannot slip through to the `return null` unnoticed
+    // (decision-card §3.3 hop 8: force the registration, don't fallback).
+    return assertNeverPart(part)
   }
 
   return (

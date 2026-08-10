@@ -1,0 +1,4 @@
+{"type":"started","key":"v2:9171c1c24fc1211b1fede623a9f4d4487329a30fe29adbcfa3f5494f3a6288c5","agentId":"aa9f496671af7171d"}
+{"type":"started","key":"v2:cec16e826e312f27b181b1b9c233d103f7820715e1ad69618e32e8da2ccfa1a0","agentId":"a31b2a757448056fd"}
+{"type":"result","key":"v2:cec16e826e312f27b181b1b9c233d103f7820715e1ad69618e32e8da2ccfa1a0","agentId":"a31b2a757448056fd","result":"pong"}
+{"type":"result","key":"v2:9171c1c24fc1211b1fede623a9f4d4487329a30fe29adbcfa3f5494f3a6288c5","agentId":"aa9f496671af7171d","result":"ping"}

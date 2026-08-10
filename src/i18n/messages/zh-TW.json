@@ -3254,6 +3254,37 @@
       "proposedPlan": {
         "title": "計劃提案",
         "planning": "規劃中…"
+      },
+      "workflowCard": {
+        "untitledWorkflow": "工作流程",
+        "defaultPhase": "階段 {index}",
+        "agentCount": "{count, plural, other {# 個智能體}}",
+        "toolCalls": "{count, plural, other {# 次工具呼叫}}",
+        "totalTokens": "{count, plural, other {# tokens}}",
+        "noAgents": "此階段尚無智能體。",
+        "noProgress": "尚無進度回報。",
+        "status": {
+          "started": "已啟動",
+          "running": "執行中",
+          "completed": "已完成",
+          "failed": "已失敗",
+          "killed": "已終止",
+          "stopped": "已停止",
+          "unknown": "未知"
+        }
+      },
+      "hookLifecycle": {
+        "hookTitle": "{hook} 掛鉤",
+        "passedLine": "{hook} 掛鉤已放行",
+        "detailsToggle": "詳情",
+        "commandLabel": "命令：",
+        "exitCode": "結束碼 {code}",
+        "outcome": {
+          "pass": "已放行",
+          "soft_context": "已補充上下文",
+          "hard_block": "已攔截",
+          "error": "發生錯誤"
+        }
       }
     },
     "diffPreview": {

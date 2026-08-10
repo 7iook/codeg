@@ -1,0 +1,3 @@
+{"type":"system","subtype":"task_started","task_type":"local_workflow","task_id":"wf-cum","workflow_name":"cum","sessionId":"s","timestamp":"2026-08-07T10:00:00.000Z"}
+{"type":"system","subtype":"task_progress","task_id":"wf-cum","workflow_progress":[{"type":"workflow_agent","index":1,"state":"running"}],"sessionId":"s","timestamp":"2026-08-07T10:00:01.000Z"}
+{"type":"system","subtype":"task_progress","task_id":"wf-cum","workflow_progress":[{"type":"workflow_agent","index":1,"state":"success"},{"type":"workflow_agent","index":2,"state":"running"}],"sessionId":"s","timestamp":"2026-08-07T10:00:02.000Z"}

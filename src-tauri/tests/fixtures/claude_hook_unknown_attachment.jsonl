@@ -1,0 +1,2 @@
+{"attachment":{"type":"hook_success","hookName":"Stop","toolUseID":"tuid-known","hookEvent":"Stop","content":"","stdout":"","stderr":"","exitCode":0,"command":"pwsh -File noop.ps1","durationMs":100},"type":"attachment","uuid":"known-1","timestamp":"2026-08-07T10:00:00.000Z","sessionId":"s","version":"2.1.220"}
+{"attachment":{"type":"unknown_new_type","hookName":"Mystery","toolUseID":"tuid-x"},"type":"attachment","uuid":"unk-1","timestamp":"2026-08-07T10:00:01.000Z","sessionId":"s","version":"2.1.220"}

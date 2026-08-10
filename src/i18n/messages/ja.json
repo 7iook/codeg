@@ -3254,6 +3254,37 @@
       "proposedPlan": {
         "title": "提案された計画",
         "planning": "計画中…"
+      },
+      "workflowCard": {
+        "untitledWorkflow": "ワークフロー",
+        "defaultPhase": "フェーズ {index}",
+        "agentCount": "{count, plural, other {# 個のエージェント}}",
+        "toolCalls": "{count, plural, other {# 回のツール呼び出し}}",
+        "totalTokens": "{count, plural, other {# トークン}}",
+        "noAgents": "このフェーズにはまだエージェントがいません。",
+        "noProgress": "進捗の報告はまだありません。",
+        "status": {
+          "started": "開始",
+          "running": "実行中",
+          "completed": "完了",
+          "failed": "失敗",
+          "killed": "強制終了",
+          "stopped": "停止",
+          "unknown": "不明"
+        }
+      },
+      "hookLifecycle": {
+        "hookTitle": "{hook} フック",
+        "passedLine": "{hook} フックは通過しました",
+        "detailsToggle": "詳細",
+        "commandLabel": "コマンド:",
+        "exitCode": "終了コード {code}",
+        "outcome": {
+          "pass": "通過",
+          "soft_context": "コンテキスト追加",
+          "hard_block": "ブロック",
+          "error": "エラー"
+        }
       }
     },
     "diffPreview": {

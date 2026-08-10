@@ -1556,3 +1556,116 @@ describe("adaptMessageTurn — user reference resources", () => {
     expect(joined).toContain("[foo.ts](file:///x/foo.ts)")
   })
 })
+
+// ── Claude Code DW + Stop-hook content parts (T3 · decision-card §4.1) ──────
+//
+// These feed the adapter a block shaped EXACTLY as the Rust parser serializes
+// `ContentBlock::HookLifecycle` / `ContentBlock::WorkflowRun` (serde
+// `tag="type"`, snake_case). If the backend model renames a field, the TS
+// `ContentBlock` type stops accepting this literal and the test fails to
+// compile — so this doubles as the model↔UI drift guard (§3.3 hop 7), without
+// standing up a second zod schema the repo does not otherwise use.
+describe("hook + workflow content parts", () => {
+  const msgText = {
+    attachedResources: "Attached resources",
+    toolCallFailed: "Tool failed",
+  }
+
+  // §4.1 test 6: a merged Stop-hook lifecycle block → one `hook-lifecycle`
+  // part carrying the already-classified outcome verbatim.
+  it("translates a HookLifecycle block to a hook-lifecycle content part", () => {
+    const adapted = adaptMessageTurn(
+      {
+        id: "hook-turn",
+        role: "system",
+        timestamp: "2026-08-07T10:11:03.440Z",
+        blocks: [
+          {
+            type: "hook_lifecycle",
+            event: {
+              hook_name: "Stop",
+              hook_event: "Stop",
+              tool_use_id: "e36bffa1-3acc-4549-84a5-fec0e2501ce6",
+              outcome: "soft_context",
+              outcome_reason: "[P1 stop-gate] cleanup still pending",
+              exit_code: 0,
+              duration_ms: 14714,
+              command_display: "claude-stop-orchestrator.ps1",
+              additional_context: ["[P1 stop-gate] cleanup still pending"],
+              hook_specific_output: { hookEventName: "Stop" },
+              timestamp: "2026-08-07T10:11:03.440Z",
+            },
+          },
+        ],
+      },
+      msgText
+    )
+
+    expect(adapted.content).toHaveLength(1)
+    const part = adapted.content[0]
+    if (part.type !== "hook-lifecycle") {
+      throw new Error(`expected hook-lifecycle, got ${part.type}`)
+    }
+    expect(part.data.hook_name).toBe("Stop")
+    expect(part.data.outcome).toBe("soft_context")
+    expect(part.data.exit_code).toBe(0)
+    expect(part.data.duration_ms).toBe(14714)
+    expect(part.data.command_display).toBe("claude-stop-orchestrator.ps1")
+    expect(part.data.additional_context).toEqual([
+      "[P1 stop-gate] cleanup still pending",
+    ])
+    // A6: no raw command / stdout / stderr fields on the payload at all.
+    expect(part.data).not.toHaveProperty("command_raw")
+    expect(part.data).not.toHaveProperty("stdout_raw")
+    expect(part.data).not.toHaveProperty("stderr_raw")
+  })
+
+  // A WorkflowRun block → one `workflow-progress` part carrying the cumulative
+  // snapshot verbatim (the phase/agent list the backend already reduced).
+  it("translates a WorkflowRun block to a workflow-progress content part", () => {
+    const adapted = adaptMessageTurn(
+      {
+        id: "wf-turn",
+        role: "system",
+        timestamp: "2026-08-07T10:00:05.280Z",
+        blocks: [
+          {
+            type: "workflow_run",
+            event: {
+              task_id: "wbk63ch2d",
+              workflow_name: "demo-workflow",
+              task_type: "local_workflow",
+              status: "completed",
+              workflow_progress: [
+                { type: "workflow_phase", name: "Scan", agent_count: 1 },
+                { type: "workflow_agent", index: 1, state: "success" },
+              ],
+              output_file: "/tmp/out.md",
+              usage: { total_tokens: 9000, duration_ms: 5280 },
+            },
+          },
+        ],
+      },
+      msgText
+    )
+
+    expect(adapted.content).toHaveLength(1)
+    const part = adapted.content[0]
+    if (part.type !== "workflow-progress") {
+      throw new Error(`expected workflow-progress, got ${part.type}`)
+    }
+    expect(part.data.task_id).toBe("wbk63ch2d")
+    expect(part.data.status).toBe("completed")
+    expect(part.data.workflow_progress).toHaveLength(2)
+    // Cumulative snapshot preserved as-is (recon R7 — never re-accumulated).
+    expect(part.data.workflow_progress?.[0]).toMatchObject({
+      type: "workflow_phase",
+      name: "Scan",
+    })
+    expect(part.data.workflow_progress?.[1]).toMatchObject({
+      type: "workflow_agent",
+      index: 1,
+      state: "success",
+    })
+  })
+})

@@ -17,6 +17,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = ["tauri-runtime"]
+# Serializes the raw Stop-hook command / stdout / stderr to the frontend.
+# OFF by default (A6 data minimization): the raw command carries absolute
+# paths and the raw streams can carry anything the hook printed, so only a
+# controlled debug build ships them. Production sees `command_display`
+# (basename) + the merged `additional_context` instead.
+claude-hook-debug = []
 tauri-runtime = [
     "dep:tauri",
     "dep:tauri-plugin-opener",

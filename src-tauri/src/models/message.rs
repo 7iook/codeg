@@ -136,6 +136,22 @@ pub enum ContentBlock {
     Thinking {
         text: String,
     },
+    /// One fully-aggregated Claude Code Stop-hook trigger. The parser merges
+    /// the two sibling `attachment` records (execution fact + the
+    /// `additionalContext` fed back to Claude) into a single block so the UI
+    /// renders one card, not two.
+    HookLifecycle {
+        event: crate::parsers::claude::hook::HookLifecycleEvent,
+    },
+    /// A snapshot of one Claude Code Dynamic Workflow run, keyed by `task_id`.
+    /// The backend owns the state machine; the frontend replaces its stored
+    /// snapshot for that `task_id` rather than rebuilding it.
+    ///
+    /// ⚠️ Unrelated to the `<task-notification>` XML that the built-in Task
+    /// tool injects for async sub-agents — same vocabulary, different wire.
+    WorkflowRun {
+        event: crate::parsers::claude::workflow::WorkflowRunEvent,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

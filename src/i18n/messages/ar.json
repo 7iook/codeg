@@ -3254,6 +3254,37 @@
       "proposedPlan": {
         "title": "الخطة المقترحة",
         "planning": "جارٍ التخطيط…"
+      },
+      "workflowCard": {
+        "untitledWorkflow": "سير العمل",
+        "defaultPhase": "المرحلة {index}",
+        "agentCount": "{count, plural, other {# وكيل}}",
+        "toolCalls": "{count, plural, other {# استدعاء أداة}}",
+        "totalTokens": "{count, plural, other {# رمز}}",
+        "noAgents": "لا توجد وكلاء في هذه المرحلة بعد.",
+        "noProgress": "لم يتم الإبلاغ عن أي تقدم بعد.",
+        "status": {
+          "started": "بدأ",
+          "running": "قيد التشغيل",
+          "completed": "اكتمل",
+          "failed": "فشل",
+          "killed": "أُنهي",
+          "stopped": "متوقف",
+          "unknown": "غير معروف"
+        }
+      },
+      "hookLifecycle": {
+        "hookTitle": "خطاف {hook}",
+        "passedLine": "تم السماح بخطاف {hook}",
+        "detailsToggle": "التفاصيل",
+        "commandLabel": "الأمر:",
+        "exitCode": "رمز الخروج {code}",
+        "outcome": {
+          "pass": "مسموح",
+          "soft_context": "تمت إضافة سياق",
+          "hard_block": "محظور",
+          "error": "خطأ"
+        }
       }
     },
     "diffPreview": {

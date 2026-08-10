@@ -8,6 +8,8 @@ import type {
   ToolCallStatus,
   PlanEntryInfo,
   ImageData,
+  HookLifecyclePayload,
+  WorkflowRunPayload,
 } from "@/lib/types"
 import {
   isAgentLikeToolName,
@@ -174,6 +176,18 @@ export type AdaptedContentPart =
   | AdaptedGeneratedImagePart
   | AdaptedPlanPart
   | AdaptedProposedPlanPart
+  /**
+   * A merged Claude Code Stop-hook lifecycle card. Carries the backend
+   * payload verbatim — the outcome is already classified (single source of
+   * truth), so the renderer only picks visuals per `data.outcome`.
+   */
+  | { type: "hook-lifecycle"; data: HookLifecyclePayload }
+  /**
+   * A Claude Code Dynamic Workflow snapshot card (phase / agent folded list).
+   * The backend snapshot is cumulative and keyed by `task_id`; the renderer
+   * displays the latest state, it does not accumulate.
+   */
+  | { type: "workflow-progress"; data: WorkflowRunPayload }
 
 export interface UserResourceDisplay {
   name: string
@@ -1083,9 +1097,43 @@ function adaptContentBlock(
         isStreaming,
       }
 
-    default:
+    case "image":
+      // A user-attached image is surfaced at the message level by
+      // `extractUserImagesFromBlocks` (→ `userImages`), never as an inline
+      // content part. Skipping here is deliberate, not a gap — made explicit
+      // so the exhaustiveness guard below stays honest.
       return null
+
+    case "hook_lifecycle":
+      return {
+        type: "hook-lifecycle",
+        data: block.event,
+      }
+
+    case "workflow_run":
+      return {
+        type: "workflow-progress",
+        data: block.event,
+      }
+
+    default:
+      // Exhaustiveness guard: every `ContentBlock` variant above returns, so
+      // `block` is `never` here. Adding a new variant without a case makes
+      // this assignment a compile error — the new kind cannot be silently
+      // swallowed (the T2 `content_block_size` pattern, on the frontend).
+      return assertNeverContentBlock(block)
   }
+}
+
+/**
+ * Compile-time exhaustiveness check for {@link adaptContentBlock}. At runtime
+ * an unmapped block (e.g. an older frontend meeting a newer backend variant)
+ * degrades to `null` rather than throwing — A4 single contract: skip, do not
+ * fabricate a placeholder card.
+ */
+function assertNeverContentBlock(block: never): null {
+  void (block satisfies never)
+  return null
 }
 
 function deriveImageNameFromImageData(img: {
