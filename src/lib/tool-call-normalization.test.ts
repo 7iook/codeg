@@ -1,12 +1,67 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  aliasToolInputKeys,
   claudeCodeMarksSubagent,
   codexMarksPlanReview,
   extractClaudeCodeMetaTitle,
   inferLiveToolName,
   normalizeToolName,
 } from "./tool-call-normalization"
+
+describe("aliasToolInputKeys", () => {
+  it("fills the canonical names OpenCode spells in camelCase", () => {
+    // The live wire shape of an OpenCode `write` / `edit` call: its ACP adapter
+    // forwards the tool's own camelCase arguments, so the Write card found no
+    // `file_path` and rendered "unknown" under a header naming the file.
+    expect(
+      aliasToolInputKeys({
+        filePath: "src/app/minimal/page.tsx",
+        content: "export const A = 1\n",
+      })
+    ).toEqual({
+      filePath: "src/app/minimal/page.tsx",
+      file_path: "src/app/minimal/page.tsx",
+      content: "export const A = 1\n",
+    })
+
+    expect(
+      aliasToolInputKeys({
+        filePath: "src/app.ts",
+        oldString: "a",
+        newString: "b",
+        replaceAll: true,
+      })
+    ).toMatchObject({
+      file_path: "src/app.ts",
+      old_string: "a",
+      new_string: "b",
+      replace_all: true,
+    })
+  })
+
+  it("never overrides what the agent actually sent", () => {
+    const input = { filePath: "camel.ts", file_path: "snake.ts" }
+    expect(aliasToolInputKeys(input)).toBe(input)
+  })
+
+  it("is a no-op (same reference) on already-canonical and unrelated input", () => {
+    // History is normalized in Rust, and snake_case agents never trip this —
+    // returning the same object keeps `useMemo` consumers from re-rendering.
+    const canonical = { file_path: "a.ts", old_string: "x", new_string: "y" }
+    expect(aliasToolInputKeys(canonical)).toBe(canonical)
+
+    const unrelated = { command: "pnpm test" }
+    expect(aliasToolInputKeys(unrelated)).toBe(unrelated)
+
+    expect(aliasToolInputKeys(null)).toBeNull()
+  })
+
+  it("ignores an alias whose value is null", () => {
+    const input = { filePath: null, content: "x" }
+    expect(aliasToolInputKeys(input)).toBe(input)
+  })
+})
 
 describe("inferLiveToolName meta.claudeCode.toolName override", () => {
   it("returns memory_recall for synthesized recall events without rawInput", () => {

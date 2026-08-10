@@ -238,6 +238,53 @@ function hasAnyKey(obj: Record<string, unknown>, keys: string[]): boolean {
   )
 }
 
+/**
+ * Wire spellings that mean the same argument as one of the canonical
+ * (snake_case) keys every tool card reads. OpenCode names its tool arguments in
+ * camelCase and its ACP adapter forwards them verbatim, so the LIVE stream
+ * carries `filePath` / `oldString` where the history parser has already
+ * rewritten them (`parsers/opencode.rs::normalize_tool_call`) — the renderers
+ * only ever learned the canonical names, so a live Write card lost its path and
+ * a live Edit card lost its diff. `include` → `glob` is the same one-sided
+ * rename the history parser applies to OpenCode's grep filter.
+ */
+const TOOL_INPUT_KEY_ALIASES: ReadonlyArray<readonly [string, string]> = [
+  ["filePath", "file_path"],
+  ["notebookPath", "notebook_path"],
+  ["oldString", "old_string"],
+  ["newString", "new_string"],
+  ["newSource", "new_source"],
+  ["replaceAll", "replace_all"],
+  ["editMode", "edit_mode"],
+  ["cellType", "cell_type"],
+  ["include", "glob"],
+]
+
+/**
+ * Fill in canonical argument names an agent spelled differently on the wire.
+ *
+ * Only writes a canonical key that is ABSENT (or null/undefined) on the input,
+ * so it can never override what an agent actually sent — which makes it a
+ * no-op on every payload that was already normalized in Rust (all history) and
+ * on every agent that speaks snake_case natively. Returns the SAME object when
+ * nothing had to be added, so `useMemo` consumers keep their reference.
+ */
+export function aliasToolInputKeys(
+  parsed: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  if (!parsed) return parsed
+  let out: Record<string, unknown> | null = null
+  for (const [alias, canonical] of TOOL_INPUT_KEY_ALIASES) {
+    const value = parsed[alias]
+    if (value === undefined || value === null) continue
+    const existing = parsed[canonical]
+    if (existing !== undefined && existing !== null) continue
+    out ??= { ...parsed }
+    out[canonical] = value
+  }
+  return out ?? parsed
+}
+
 function inferFromInput(
   rawInput: string | null | undefined,
   kind: string | null | undefined,
