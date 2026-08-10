@@ -332,8 +332,12 @@ export function TaskMessageComposer({
         onExternalMenuKeyDown={invocations.onKeyDown}
         className={editorClassName}
       />
-      <div className="flex items-end justify-between gap-1 px-2 pb-2">
-        <div className="flex min-w-0 items-end gap-1">
+      {/* Centered, not bottom-aligned: the bar mixes a 24px icon button with
+          whatever the config section is currently showing (a one-line spinner
+          while probing, chips once it lands), and only centering keeps the "+"
+          on the same axis as all of them. */}
+      <div className="flex items-center justify-between gap-1 px-2 pb-2">
+        <div className="flex min-w-0 items-center gap-1">
           <ComposerAddMenu
             attachments={attach}
             shortcuts={shortcuts}
