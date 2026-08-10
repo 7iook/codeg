@@ -957,6 +957,71 @@ describe("buildRows — Recent section", () => {
       []
     )
   })
+
+  describe("paging", () => {
+    const many = Array.from({ length: 5 }, (_, i) => conv(i + 1, 10))
+
+    it("stops at recentLimit and appends a show-more row with the remainder", () => {
+      const rows = buildRows({
+        ...baseArgs,
+        byFolder: new Map([[10, many]]),
+        folderTotalCounts: new Map([[10, many.length]]),
+        recentConversations: many,
+        showRecent: true,
+        recentLimit: 2,
+      })
+      expect(
+        rows.filter((r) => r.kind === "conversation" && r.recent).length
+      ).toBe(2)
+      expect(rows).toContainEqual({ kind: "recent-more", remaining: 3 })
+      // The header keeps reporting the TOTAL, not the visible slice.
+      expect(rows).toContainEqual({
+        kind: "section",
+        section: "recent",
+        expanded: true,
+        count: 5,
+      })
+    })
+
+    it("omits the show-more row once the limit covers everything", () => {
+      const rows = buildRows({
+        ...baseArgs,
+        byFolder: new Map([[10, many]]),
+        folderTotalCounts: new Map([[10, many.length]]),
+        recentConversations: many,
+        showRecent: true,
+        recentLimit: 5,
+      })
+      expect(rows.some((r) => r.kind === "recent-more")).toBe(false)
+    })
+
+    it("emits every conversation when no limit is given", () => {
+      const rows = buildRows({
+        ...baseArgs,
+        byFolder: new Map([[10, many]]),
+        folderTotalCounts: new Map([[10, many.length]]),
+        recentConversations: many,
+        showRecent: true,
+      })
+      expect(
+        rows.filter((r) => r.kind === "conversation" && r.recent).length
+      ).toBe(5)
+      expect(rows.some((r) => r.kind === "recent-more")).toBe(false)
+    })
+
+    it("does not page a collapsed section", () => {
+      const rows = buildRows({
+        ...baseArgs,
+        byFolder: new Map([[10, many]]),
+        folderTotalCounts: new Map([[10, many.length]]),
+        recentConversations: many,
+        recentExpanded: false,
+        showRecent: true,
+        recentLimit: 2,
+      })
+      expect(rows.some((r) => r.kind === "recent-more")).toBe(false)
+    })
+  })
 })
 
 describe("buildRows — Show worktrees container tree", () => {

@@ -455,6 +455,17 @@ export interface RecentEmptyRow {
 }
 
 /**
+ * The "show more" footer of a truncated "Recent" section. Recent re-lists every
+ * reachable conversation, so an untruncated one buries the sections below it;
+ * the list shows a page at a time and this row reveals the next one. Carries
+ * how many rows are still hidden so the label can say it.
+ */
+export interface RecentMoreRow {
+  kind: "recent-more"
+  remaining: number
+}
+
+/**
  * A collapsible section heading. Four exist: "pinned" (always on top, shown only
  * when there are pinned conversations) plus the three user-reorderable ones —
  * "folders" (wraps the whole folder list), "chats" (a flat list of folderless
@@ -497,6 +508,7 @@ export type SidebarRow =
   | ChatsEmptyRow
   | FoldersEmptyRow
   | RecentEmptyRow
+  | RecentMoreRow
   | SubsessionLoadingRow
 
 const MAX_RENDER_DEPTH = 32
@@ -663,6 +675,10 @@ export function buildRows(args: {
    *  matching the pre-Recent row model. The app passes it explicitly; its
    *  product default is ON. */
   showRecent?: boolean
+  /** How many Recent conversations to emit before stopping and appending a
+   *  {@link RecentMoreRow}. Optional — omitted means no limit (the historical
+   *  behavior, kept for tests). The app raises it a page at a time. */
+  recentLimit?: number
   /** Vertical order of the Folders / Chat / Recent sections. The Pinned section
    *  (when present) always stays on top regardless. Normalized defensively, so
    *  a partial or repeated list still renders each section exactly once.
@@ -706,6 +722,7 @@ export function buildRows(args: {
     recentConversations = EMPTY_CONVERSATIONS,
     recentExpanded = true,
     showRecent = false,
+    recentLimit,
     sectionOrder = DEFAULT_SECTION_ORDER,
     conversationExpanded = EMPTY_EXPANDED,
     childrenByParent = EMPTY_CHILDREN,
@@ -848,7 +865,15 @@ export function buildRows(args: {
       rows.push({ kind: "recent-empty" })
       return
     }
-    for (const conv of recentConversations) {
+    // Recent re-lists everything the other sections already show, so it is
+    // paged: only the first `recentLimit` land, and a "show more" row offers
+    // the rest. No limit given (tests, and the section's original behavior) =
+    // the whole bucket. The header's own count always reports the total.
+    const shown =
+      recentLimit == null
+        ? recentConversations
+        : recentConversations.slice(0, Math.max(0, recentLimit))
+    for (const conv of shown) {
       pushConversationRow(
         rows,
         conv,
@@ -859,6 +884,8 @@ export function buildRows(args: {
         true
       )
     }
+    const remaining = recentConversations.length - shown.length
+    if (remaining > 0) rows.push({ kind: "recent-more", remaining })
   }
 
   // Normalized (not consumed raw) so a truncated / repeated / unknown-entry

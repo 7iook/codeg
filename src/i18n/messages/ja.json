@@ -1572,6 +1572,7 @@
       "sectionRecent": "最近",
       "noChats": "チャットがありません",
       "noRecent": "最近の会話はありません",
+      "showMoreRecent": "さらに表示（{count}）",
       "noFolders": "開いているフォルダがありません",
       "newChatAction": "新しいチャット",
       "automations": "オートメーション",

@@ -1572,6 +1572,7 @@
       "sectionRecent": "الأحدث",
       "noChats": "لا توجد محادثات",
       "noRecent": "لا توجد محادثات حديثة",
+      "showMoreRecent": "عرض المزيد ({count})",
       "noFolders": "لا توجد مجلدات مفتوحة",
       "newChatAction": "محادثة جديدة",
       "automations": "الأتمتة",

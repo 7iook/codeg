@@ -40,11 +40,12 @@ export const SidebarSectionHeader = memo(function SidebarSectionHeader({
   expanded: boolean
   onToggle: (section: SidebarSectionKey) => void
   /**
-   * When provided on the "chats" section, renders a New-chat action button at
-   * the row's right edge, revealed only while the row is hovered/focused (and
-   * always on touch, which has no hover). A sibling of — not nested in — the
-   * toggle button (nesting buttons is invalid HTML), so clicking it never
-   * toggles the section. Must be referentially stable to preserve the memo.
+   * When provided on the "chats" or "recent" section, renders a New-chat /
+   * New-conversation action button at the row's right edge, revealed only while
+   * the row is hovered/focused (and always on touch, which has no hover). A
+   * sibling of — not nested in — the toggle button (nesting buttons is invalid
+   * HTML), so clicking it never toggles the section. Must be referentially
+   * stable to preserve the memo.
    */
   onNewChat?: () => void
   /**
@@ -86,7 +87,14 @@ export const SidebarSectionHeader = memo(function SidebarSectionHeader({
         : section === "recent"
           ? t("sectionRecent")
           : t("sectionFolders")
-  const showNewChat = section === "chats" && onNewChat != null
+  // "Recent" gets the same right-edge affordance as "Chats": it is a section
+  // people scan to resume work, so "start a new one" belongs at its head too.
+  // The label differs — Chats starts a folderless chat, Recent starts a
+  // conversation in the active folder — but the geometry is shared.
+  const showNewChat =
+    (section === "chats" || section === "recent") && onNewChat != null
+  const newChatLabel =
+    section === "recent" ? t("newConversation") : t("newChatAction")
   // The folders section mirrors the chats section's right-edge affordance, but
   // with two buttons (Open Folder / Clone Repository) — the same "add a folder"
   // actions the top-of-page NewFolderDropdown offers.
@@ -166,8 +174,8 @@ export const SidebarSectionHeader = memo(function SidebarSectionHeader({
               e.stopPropagation()
               onNewChat?.()
             }}
-            title={t("newChatAction")}
-            aria-label={t("newChatAction")}
+            title={newChatLabel}
+            aria-label={newChatLabel}
             // Sized to match the folder rows' right-edge ⋯ action icon
             // (`h-[0.875rem]`, 14px) so the two affordances read as one family —
             // a hair smaller than the default `h-4` glyph.

@@ -1572,6 +1572,7 @@
       "sectionRecent": "Recent",
       "noChats": "No chats",
       "noRecent": "No recent conversations",
+      "showMoreRecent": "Show more ({count})",
       "noFolders": "No folders open",
       "newChatAction": "New chat",
       "automations": "Automations",

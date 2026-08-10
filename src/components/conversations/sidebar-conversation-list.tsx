@@ -18,6 +18,7 @@ import { Virtualizer, type VirtualizerHandle } from "virtua"
 import {
   Bot,
   Check,
+  ChevronDown,
   ChevronRight,
   Download,
   ExternalLink,
@@ -167,6 +168,12 @@ const EMPTY_CHILD_TO_PARENT: ReadonlyMap<number, number> = new Map()
 // `containerChildren` memo (and buildRows through it) doesn't churn.
 const EMPTY_CONTAINER_CHILDREN: ReadonlyMap<number, readonly number[]> =
   new Map()
+
+// How many conversations the "Recent" section shows before its "show more" row,
+// and how many each click adds. Recent deliberately re-lists what the Folders /
+// Chat sections already show, so an unbounded one pushes every section below it
+// off the screen — a page keeps it a glance-able "where was I" list.
+const RECENT_PAGE_SIZE = 15
 
 const FolderHeader = memo(function FolderHeader({
   folderId,
@@ -844,6 +851,14 @@ export function SidebarConversationList({
   const foldersExpanded = !sectionCollapsed.folders
   const chatsExpanded = !sectionCollapsed.chats
   const recentExpanded = !sectionCollapsed.recent
+  // How many Recent rows are currently revealed. Session-only (not persisted):
+  // "show me more of this list right now" is a reading gesture, not a setting —
+  // and a fresh sidebar should open short again.
+  const [recentLimit, setRecentLimit] = useState(RECENT_PAGE_SIZE)
+  const revealMoreRecent = useCallback(
+    () => setRecentLimit((n) => n + RECENT_PAGE_SIZE),
+    []
+  )
   // ── Per-conversation delegation sub-session expansion ───────────────────
   // Default COLLAPSED (unlike folders): only ids the user opened are tracked
   // and persisted. Hydrated from localStorage after mount. `childrenByParent`
@@ -1249,6 +1264,7 @@ export function SidebarConversationList({
         recentConversations,
         recentExpanded,
         showRecent,
+        recentLimit,
         sectionOrder,
         conversationExpanded,
         childrenByParent,
@@ -1269,6 +1285,7 @@ export function SidebarConversationList({
       recentConversations,
       recentExpanded,
       showRecent,
+      recentLimit,
       sectionOrder,
       conversationExpanded,
       childrenByParent,
@@ -1798,12 +1815,19 @@ export function SidebarConversationList({
   )
 
   const handleNewConversation = useCallback(() => {
-    if (!activeFolder) return
     // Starting a conversation returns to the conversation workspace if a
     // workbench route (e.g. Automations) was taking over the content region.
     openConversations()
+    // With no active folder (all folders closed, or a cold start that recovered
+    // to nothing) fall back to folderless chat mode rather than no-op — the
+    // same defense the sidebar's own "New chat" row takes, so neither entry
+    // point is ever a dead end.
+    if (!activeFolder) {
+      openChatModeTab()
+      return
+    }
     openNewConversationTab(activeFolder.id, activeFolder.path)
-  }, [activeFolder, openNewConversationTab, openConversations])
+  }, [activeFolder, openChatModeTab, openNewConversationTab, openConversations])
 
   const handleNewConversationForFolder = useCallback(
     (folderId: number) => {
@@ -2209,8 +2233,17 @@ export function SidebarConversationList({
           onToggle={toggleSection}
           // The chats section gets an always-visible New-chat button (its primary
           // entry point, reachable even when empty). `openChatModeTab` is a stable
-          // context callback, so the memo holds.
-          onNewChat={row.section === "chats" ? openChatModeTab : undefined}
+          // context callback, so the memo holds. Recent gets the same
+          // affordance, but starting a conversation in the ACTIVE FOLDER — the
+          // section spans folders and chats alike, and the folder is where a
+          // "continue where I left off" list lands you.
+          onNewChat={
+            row.section === "chats"
+              ? openChatModeTab
+              : row.section === "recent"
+                ? handleNewConversation
+                : undefined
+          }
           // The folders section gets two right-edge hover actions mirroring the
           // top-of-page NewFolderDropdown: Open Folder and Clone Repository.
           // Both handlers are stable, so the memo holds.
@@ -2323,6 +2356,43 @@ export function SidebarConversationList({
         </div>
       )
     }
+    if (row.kind === "recent-more") {
+      // Footer of the paged Recent section — a row, not a hint: each click
+      // reveals another page. Its geometry is the conversation card's, so the
+      // section reads as one column — the chevron sits ON the rail axis exactly
+      // where a card's agent icon does (same 0.75rem glyph in the same 0.875rem
+      // box, centred on the var), and the label starts at the card's title
+      // inset (`axis + 0.875rem`). Same row height and full rounding too, so
+      // its hover pill is the one the rows above it use.
+      return (
+        <div className="relative h-[2rem]">
+          <button
+            type="button"
+            onClick={revealMoreRecent}
+            className="relative flex h-[1.9375rem] w-full items-center rounded-full pr-[0.25rem] text-left text-[0.75rem] text-muted-foreground/80 outline-none transition-colors duration-[120ms] hover:bg-[color-mix(in_oklab,var(--sidebar-accent),var(--sidebar-foreground)_2%)] hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+            style={{
+              paddingLeft: "calc(var(--conv-rail-axis, 0.875rem) + 0.875rem)",
+            }}
+          >
+            <span
+              aria-hidden
+              className="pointer-events-none absolute top-1/2 flex items-center justify-center"
+              style={{
+                left: "var(--conv-rail-axis, 0.875rem)",
+                width: "0.875rem",
+                height: "0.875rem",
+                transform: "translate(-50%, -50%)",
+              }}
+            >
+              <ChevronDown className="h-[0.75rem] w-[0.75rem]" />
+            </span>
+            <span className="truncate">
+              {t("showMoreRecent", { count: row.remaining })}
+            </span>
+          </button>
+        </div>
+      )
+    }
     if (row.kind === "subsession-loading") {
       // Transient spinner at the child indent while children are fetched. The
       // left inset matches a depth-`row.depth` card's text start: rail axis
@@ -2390,6 +2460,7 @@ export function SidebarConversationList({
     if (row.kind === "chats-empty") return "chats-empty"
     if (row.kind === "folders-empty") return "folders-empty"
     if (row.kind === "recent-empty") return "recent-empty"
+    if (row.kind === "recent-more") return "recent-more"
     const prefix = row.recent ? "recent-" : ""
     if (row.kind === "subsession-loading") {
       return `${prefix}subloading-${row.parentId}`
