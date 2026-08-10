@@ -656,20 +656,31 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // (It couldn't live here anyway: the launch env is serialized as
             // leading `KEY=value` argv and sacp's `parse_env_var` only accepts
             // `[A-Za-z0-9_]` env names, which npm's `@scope:registry` key is not.)
+            //
+            // 1.0.0 changes ONE thing that reaches codeg without any code change
+            // here: its `initialize` now advertises `sessionCapabilities.resume`
+            // (0.2.118 advertised only `list`), so reconnecting to an existing
+            // Grok session takes `connect_agent`'s resume → load → new chain at
+            // the FIRST rung instead of the second. Verified live against the
+            // 1.0.0 binary: `session/resume` restores conversation context, its
+            // reply carries the `_meta["x.ai/sessionConfig"]` and per-model
+            // `models` that the composer's selectors and context ring read, and
+            // prompting straight after it works. It also skips `session/load`'s
+            // history replay, which codeg only drained to discard.
             distribution: AgentDistribution::Npx {
-                version: "0.2.118",
-                package: "@xai-official/grok@0.2.118",
+                version: "1.0.0",
+                package: "@xai-official/grok@1.0.0",
                 cmd: "grok",
                 // Only the ACP subcommand lives here. Grok's ROOT-level launch
                 // flags (`--no-auto-update` always, `--permission-mode <value>`
                 // only for a non-default permission mode) MUST precede this
-                // subcommand — `grok agent stdio` itself rejects them (verified
-                // against 0.2.94/0.2.99: it only accepts --debug/--debug-file/
+                // subcommand — `grok agent stdio` itself rejects them (re-verified
+                // against 1.0.0: it still only accepts --debug/--debug-file/
                 // --leader-socket) — so `build_agent` inserts them ahead of these
                 // args rather than appending after.
                 args: &["agent", "stdio"],
                 env: &[],
-                // `@xai-official/grok@0.2.118` declares `engines.node: ">=20"`;
+                // `@xai-official/grok@1.0.0` declares `engines.node: ">=20"`;
                 // surface that in preflight so Node 18 isn't silently accepted.
                 node_required: Some("20.0.0"),
             },
@@ -903,8 +914,8 @@ mod tests {
         assert_npx_version(AgentType::Pi, "0.0.33", "pi-acp@0.0.33", Some("22.0.0"));
         assert_npx_version(
             AgentType::Grok,
-            "0.2.118",
-            "@xai-official/grok@0.2.118",
+            "1.0.0",
+            "@xai-official/grok@1.0.0",
             Some("20.0.0"),
         );
         assert_binary_version(AgentType::OpenCode, "1.18.15", "/releases/download/v1.18.15/");

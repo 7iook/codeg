@@ -73,6 +73,64 @@ fn resolve_grok_home_from(grok_home_env: Option<OsString>, home_dir: Option<Path
         .unwrap_or_else(|| home_dir.unwrap_or_default().join(".grok"))
 }
 
+/// The context window Grok itself assigns to `model`, read from its own on-disk
+/// catalog — the authoritative number, and the same one the live ACP path gets
+/// from `availableModels[]._meta.totalContextTokens` (see
+/// `acp::connection::parse_grok_model_specs`).
+///
+/// Two sources, in precedence order:
+///   1. `$GROK_HOME/models_cache.json` — the catalog Grok fetches from its API
+///      and rewrites on every model refresh (`models.<id>.info.context_window`).
+///   2. `$GROK_HOME/config.toml` — a BYO endpoint's `[model.<id>].context_window`
+///      (see `commands::acp::apply_grok_custom_model`), which never appears in
+///      the fetched catalog.
+///
+/// `None` when neither names the model, and the caller falls back to
+/// [`infer_context_window_max_tokens`]'s name heuristic. Reading these beats
+/// guessing from the model id: a new Grok model, or a self-hosted one, gets its
+/// real window instead of the conservative default.
+///
+/// Shared with the live path (`acp::connection::grok_current_model_context_window`)
+/// so a session's ring reads the same denominator whether it comes from the wire
+/// or from re-parsed history.
+pub(crate) fn grok_catalog_context_window(home: &Path, model: &str) -> Option<u64> {
+    let read = |name: &str| fs::read_to_string(home.join(name)).ok();
+    read("models_cache.json")
+        .and_then(|raw| grok_context_window_from_models_cache(&raw, model))
+        .or_else(|| {
+            read("config.toml").and_then(|raw| grok_context_window_from_config_toml(&raw, model))
+        })
+}
+
+/// `models.<id>.info.context_window` from Grok's `models_cache.json`. Non-positive
+/// / missing / malformed → `None`.
+fn grok_context_window_from_models_cache(raw: &str, model: &str) -> Option<u64> {
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .get("models")?
+        .get(model)?
+        .get("info")?
+        .get("context_window")?
+        .as_u64()
+        .filter(|window| *window > 0)
+}
+
+/// `[model.<id>].context_window` from Grok's `config.toml` — a BYO endpoint's
+/// declared window. Mirrors the read `commands::acp::parse_grok_settings` does
+/// for the settings panel. Non-positive / missing / malformed → `None`.
+fn grok_context_window_from_config_toml(raw: &str, model: &str) -> Option<u64> {
+    raw.parse::<toml::Table>()
+        .ok()?
+        .get("model")?
+        .as_table()?
+        .get(model)?
+        .as_table()?
+        .get("context_window")?
+        .as_integer()
+        .filter(|window| *window > 0)
+        .map(|window| window as u64)
+}
+
 /// Grok Build (xAI) stores each conversation as a **directory-per-session**,
 /// grouped by the (percent-encoded) working directory:
 ///
@@ -146,6 +204,17 @@ impl GrokParser {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_base_dir(base_dir: PathBuf) -> Self {
         Self { base_dir }
+    }
+
+    /// Grok's data home — the parent of the `sessions/` tree this parser reads,
+    /// which is where its `models_cache.json` / `config.toml` live. Derived from
+    /// `base_dir` rather than re-resolving `GROK_HOME` so a fixture-scoped parser
+    /// stays inside its fixture instead of reading the host's real `~/.grok`.
+    fn grok_home(&self) -> PathBuf {
+        self.base_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.base_dir.clone())
     }
 
     fn build_summary(&self, session_dir: &Path, session_id: &str) -> Option<ConversationSummary> {
@@ -246,10 +315,17 @@ impl GrokParser {
         // (mirrors gemini/kimi/opencode — the bare `compute_session_stats` leaves
         // the context fields `None`).
         let session_model = meta.model.as_deref().or(parsed.model.as_deref());
+        // Grok publishes each model's real window in its own on-disk catalog, so
+        // read that first and keep the id-shaped guess only as the fallback for
+        // a model neither file names.
+        let context_window = session_model.and_then(|model| {
+            grok_catalog_context_window(&self.grok_home(), model)
+                .or_else(|| infer_context_window_max_tokens(Some(model)))
+        });
         let session_stats = merge_context_window_stats(
             compute_session_stats(&parsed.turns),
             latest_turn_total_usage_tokens(&parsed.turns),
-            infer_context_window_max_tokens(session_model),
+            context_window,
         );
         let summary = self.summary_from(session_id, &meta, &parsed);
 
@@ -1959,17 +2035,22 @@ mod tests {
         assert!(matches!(turns[1].role, TurnRole::Assistant));
     }
 
+    /// One turn whose stats live where Grok really puts them: model in
+    /// `update._meta.modelId`, cumulative `totalTokens` + timing in the OUTER
+    /// `params._meta`. Shared by the context-ring tests below.
+    const RING_UPDATES: &str = concat!(
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"},"_meta":{"modelId":"grok-4.5-fast","promptIndex":0}},"_meta":{"turnStartMs":1000,"totalTokens":100}},"timestamp":1783584019}"#, "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}},"_meta":{"totalTokens":500,"agentTimestampMs":3000}},"timestamp":1783584024}"#, "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"},"_meta":{"agentTimestampMs":5000}},"timestamp":1783584024}"#, "\n",
+    );
+
     #[test]
     fn assistant_turn_carries_model_tokens_and_duration() {
         // Grok reports the footer's stats in two sibling metadata places the
         // loop must fold in: model in `update._meta.modelId`, and token total +
         // timing in the OUTER `params._meta` (`totalTokens` cumulative,
         // `turnStartMs` → `agentTimestampMs`).
-        let updates = concat!(
-            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"},"_meta":{"modelId":"grok-4.5-fast","promptIndex":0}},"_meta":{"turnStartMs":1000,"totalTokens":100}},"timestamp":1783584019}"#, "\n",
-            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}},"_meta":{"totalTokens":500,"agentTimestampMs":3000}},"timestamp":1783584024}"#, "\n",
-            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"},"_meta":{"agentTimestampMs":5000}},"timestamp":1783584024}"#, "\n",
-        );
+        let updates = RING_UPDATES;
         let (_tmp, sessions) = fixture(SUMMARY, updates);
         let parser = GrokParser::with_base_dir(sessions);
         let detail = parser
@@ -1999,6 +2080,96 @@ mod tests {
             .context_window_usage_percent
             .expect("context window percent");
         assert!((pct - 0.1).abs() < 1e-6, "pct = {pct}");
+    }
+
+    /// Grok's own catalog outranks the id-shaped guess. The fixture's session
+    /// model (summary `current_model_id` = `grok-4.5`) would infer 500K from its
+    /// name, so a distinct cached window proves the ring read `models_cache.json`
+    /// and not the heuristic.
+    #[test]
+    fn context_window_prefers_groks_models_cache() {
+        let (tmp, sessions) = fixture(SUMMARY, RING_UPDATES);
+        write(
+            tmp.path(),
+            "models_cache.json",
+            r#"{"models":{"grok-4.5":{"info":{"context_window":314000}}}}"#,
+        );
+        let parser = GrokParser::with_base_dir(sessions);
+        let stats = parser
+            .get_conversation("019f45e3-e1ef-7690-a29f-fe2554382b49")
+            .unwrap()
+            .session_stats
+            .expect("session stats");
+        assert_eq!(stats.context_window_max_tokens, Some(314_000));
+    }
+
+    /// A BYO endpoint (`[model.<id>]` in `config.toml`) never appears in the
+    /// fetched catalog, so its declared window is the second source.
+    #[test]
+    fn context_window_falls_back_to_byo_config_toml() {
+        let (tmp, sessions) = fixture(SUMMARY, RING_UPDATES);
+        write(
+            tmp.path(),
+            "models_cache.json",
+            r#"{"models":{"some-other-model":{"info":{"context_window":999}}}}"#,
+        );
+        write(
+            tmp.path(),
+            "config.toml",
+            "[models]\ndefault = \"grok-4.5\"\n\n[model.\"grok-4.5\"]\nmodel = \"grok-4.5\"\ncontext_window = 123456\n",
+        );
+        let parser = GrokParser::with_base_dir(sessions);
+        let stats = parser
+            .get_conversation("019f45e3-e1ef-7690-a29f-fe2554382b49")
+            .unwrap()
+            .session_stats
+            .expect("session stats");
+        assert_eq!(stats.context_window_max_tokens, Some(123_456));
+    }
+
+    /// No catalog on disk (the common case for a machine that only ever ran
+    /// grok through codeg) → the name heuristic still supplies a window.
+    #[test]
+    fn context_window_falls_back_to_the_name_heuristic() {
+        let (_tmp, sessions) = fixture(SUMMARY, RING_UPDATES);
+        let parser = GrokParser::with_base_dir(sessions);
+        let stats = parser
+            .get_conversation("019f45e3-e1ef-7690-a29f-fe2554382b49")
+            .unwrap()
+            .session_stats
+            .expect("session stats");
+        assert_eq!(stats.context_window_max_tokens, Some(500_000));
+    }
+
+    #[test]
+    fn catalog_context_window_readers_reject_junk() {
+        // Real `models_cache.json` shape (trimmed) → the model's own window.
+        let cache = r#"{"grok_version":"1.0.0","models":{"grok-4.5":{"info":{
+            "id":"grok-4.5","context_window":500000,"agent_type":"grok-build-plan"},
+            "api_key":null}}}"#;
+        assert_eq!(
+            grok_context_window_from_models_cache(cache, "grok-4.5"),
+            Some(500_000)
+        );
+        // Unknown model / malformed JSON / non-positive window → no opinion.
+        assert_eq!(grok_context_window_from_models_cache(cache, "nope"), None);
+        assert_eq!(grok_context_window_from_models_cache("{oops", "grok-4.5"), None);
+        assert_eq!(
+            grok_context_window_from_models_cache(
+                r#"{"models":{"m":{"info":{"context_window":0}}}}"#,
+                "m"
+            ),
+            None
+        );
+        // Same for the BYO TOML block.
+        let toml = "[model.mine]\nmodel = \"mine\"\ncontext_window = 64000\n";
+        assert_eq!(grok_context_window_from_config_toml(toml, "mine"), Some(64_000));
+        assert_eq!(grok_context_window_from_config_toml(toml, "other"), None);
+        assert_eq!(grok_context_window_from_config_toml("[model", "mine"), None);
+        assert_eq!(
+            grok_context_window_from_config_toml("[model.mine]\ncontext_window = -1\n", "mine"),
+            None
+        );
     }
 
     #[test]
