@@ -8,7 +8,9 @@
 //! Scope of this first pass:
 //! - Authentication matrix on a representative protected endpoint
 //! - Public endpoint (`get_system_language_settings`) reachable without token
-//! - One DB-backed endpoint (`list_folders`) returns expected JSON shape
+//! - DB-backed endpoints (`load_folder_history`, `list_open_folders`) return
+//!   the expected JSON shape. `list_folders` is NOT one of them — it parses
+//!   the real home directory and ignores the test DB entirely.
 //!
 //! Not covered: WebSocket attach (separate concern), endpoints that touch the
 //! Tauri webview (those are gated behind `tauri-runtime`).
@@ -269,7 +271,11 @@ async fn build_test_server_with_state() -> (
 #[tokio::test]
 async fn json_api_is_gzip_compressed_when_client_accepts() {
     let (server, state, _data, _static) = build_test_server_with_state().await;
-    // Seed one folder so the JSON body clears the size-above threshold.
+    // Seed one folder so the JSON body clears the size-above threshold. The
+    // endpoint has to be a DB-backed one: `/api/list_folders` ignores this
+    // row and parses the *real* home directory instead, so it answers `[]`
+    // — 2 bytes, under the threshold — on a clean CI runner while returning
+    // a fat body on a developer machine.
     codeg_lib::db::service::folder_service::add_folder(
         &state.db.conn,
         "/tmp/codeg-compression-test-folder-with-a-reasonably-long-path",
@@ -277,8 +283,28 @@ async fn json_api_is_gzip_compressed_when_client_accepts() {
     .await
     .expect("seed folder");
 
+    // Control: the same body, uncompressed, is over `MIN_COMPRESS_BYTES` —
+    // that is what makes the gzip assertion below meaningful rather than an
+    // accident of how much the host happens to have on disk.
+    let plain = server
+        .post("/api/list_open_folders")
+        .add_header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .json(&json!({}))
+        .await;
+    assert_eq!(plain.status_code(), 200);
+    assert_eq!(
+        plain.json::<Value>().as_array().expect("array body").len(),
+        1,
+        "the seeded folder must be what this endpoint answers with"
+    );
+    assert!(
+        plain.text().len() >= 32,
+        "body must clear the size-above threshold, got {} bytes",
+        plain.text().len()
+    );
+
     let resp = server
-        .post("/api/list_folders")
+        .post("/api/list_open_folders")
         .add_header("authorization", format!("Bearer {TEST_TOKEN}"))
         .add_header("accept-encoding", "gzip")
         .json(&json!({}))

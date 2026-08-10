@@ -6484,6 +6484,19 @@ mod tests {
         ))
     }
 
+    /// Spell a path git printed and one we resolved ourselves the same way
+    /// before comparing them. git reports the fully resolved location (on
+    /// macOS `/var` is a symlink into `/private/var`) with `/` separators,
+    /// while `fs::canonicalize` on Windows hands back the verbatim
+    /// `\\?\C:\…` form of what git prints as `C:/…`. Resolve, drop the
+    /// verbatim prefix, settle on forward slashes.
+    fn comparable_path(path: &str) -> String {
+        let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        crate::paths::simplify_verbatim_path(&resolved)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
     /// The bug this command exists for: git flatly refuses to delete a branch a
     /// worktree has checked out, so the branch selector's "delete branch" could
     /// only ever report an error. Removing the checkout first is the fix.
@@ -6500,9 +6513,9 @@ mod tests {
             "expected git's worktree refusal, got: {refused:?}"
         );
 
-        // git reports the worktree's canonical path (on macOS /var is a symlink
-        // into /private/var) — resolve ours the same way while it still exists.
-        let canonical_wt = std::fs::canonicalize(&wt_path).expect("canonical worktree path");
+        // Resolve ours the way git resolves its own — while the directory is
+        // still there to resolve.
+        let canonical_wt = comparable_path(&wt_path);
 
         let removal = git_remove_worktree_core(
             &test_emitter(),
@@ -6517,8 +6530,8 @@ mod tests {
         .expect("worktree + branch removal");
 
         assert_eq!(
-            removal.worktree_path.as_deref(),
-            canonical_wt.to_str(),
+            removal.worktree_path.as_deref().map(comparable_path),
+            Some(canonical_wt),
             "reports the directory it removed"
         );
         assert!(removal.branch_deleted);

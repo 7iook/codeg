@@ -591,6 +591,12 @@ mod tests {
         std::fs::create_dir(&repo).expect("mkdir");
         let repo_path = repo.to_str().expect("utf-8 path");
         git_run(&repo, &["init", "-q", "-b", "main"]);
+        // `git_run` nulls the global/system config, but the checkout below is
+        // made by `worktree_add_existing_branch` — a production git call that
+        // inherits the host's. Git for Windows ships `core.autocrlf=true`, so
+        // without a repo-local pin the restored file comes back CRLF and the
+        // content assertion at the end reads as a data loss it isn't.
+        git_run(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("a.txt"), "one\n").expect("write");
         git_run(&repo, &["add", "-A"]);
         git_run(&repo, &["commit", "-q", "-m", "base"]);
