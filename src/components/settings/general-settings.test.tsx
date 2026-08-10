@@ -84,8 +84,8 @@ describe("GeneralSettings", () => {
       </NextIntlClientProvider>
     )
 
-    // Terminal section: the picker now has an accessible name.
-    const shell = await screen.findByLabelText("Default shell")
+    // Terminal section: the heading itself names the picker.
+    const shell = await screen.findByLabelText("Default Terminal")
     expect(shell).toBeInTheDocument()
     expect(screen.getByText("Currently using: /bin/zsh")).toBeInTheDocument()
 
@@ -98,27 +98,23 @@ describe("GeneralSettings", () => {
       expect(hwAccel).toHaveAttribute("data-state", "checked")
     )
 
-    // Every child section mounted.
+    // Every child section mounted. A section that is one option is titled by
+    // that option, so these double as the labels asserted above.
     for (const heading of [
       "Default Terminal",
-      "Rendering",
+      "Disable hardware acceleration",
       "Notification sounds",
       "Multi-Agent Collaboration",
-      "Live Feedback",
-      "Ask user question",
-      "Get session info",
-      "Create from chat",
+      "In-conversation tools",
     ]) {
       expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument()
     }
 
     // Sibling toggles keep their label association through SettingRow.
     expect(screen.getByLabelText("Enable delegation")).toBeInTheDocument()
-    expect(screen.getByLabelText("Enable live feedback")).toBeInTheDocument()
-    expect(
-      screen.getByLabelText("Enable ask user question")
-    ).toBeInTheDocument()
-    expect(screen.getByLabelText("Enable get session info")).toBeInTheDocument()
+    expect(screen.getByLabelText("Live Feedback")).toBeInTheDocument()
+    expect(screen.getByLabelText("Ask user question")).toBeInTheDocument()
+    expect(screen.getByLabelText("Get session info")).toBeInTheDocument()
     expect(screen.getByLabelText("Create automations")).toBeInTheDocument()
     expect(screen.getByLabelText("Create to-do tasks")).toBeInTheDocument()
   })

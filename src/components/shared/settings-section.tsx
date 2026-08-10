@@ -16,6 +16,7 @@ import type { LucideIcon } from "lucide-react"
 import { AlertCircle, Loader2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 
 interface SettingsSectionProps {
@@ -24,6 +25,14 @@ interface SettingsSectionProps {
   title: React.ReactNode
   /** What this group of options is for, under the heading. */
   description?: React.ReactNode
+  /**
+   * Compact control pinned to the right of the heading, for a section that
+   * *is* one option — a card holding a single row would only repeat the
+   * heading back at the reader.
+   */
+  control?: React.ReactNode
+  /** Ties the heading to the control it labels (`Switch`, `Select`, …). */
+  htmlFor?: string
   children?: React.ReactNode
   className?: string
 }
@@ -34,6 +43,12 @@ interface SettingsSectionProps {
  * and the content below is spaced at the same rhythm the cards use inside a
  * dialog — the whole page then has a single vertical cadence.
  *
+ * With `control`, the header doubles as the section's single {@link SettingRow}:
+ * the heading labels the control instead of a row title one line below saying
+ * the same thing. Whatever else the section holds still goes in cards below, so
+ * "master switch + the options it gates" reads as one block that collapses to a
+ * single line when the switch is off.
+ *
  * The bordered `bg-card` surface is deliberately the same shell the other
  * settings tabs use, so adopting this component changes the grammar *inside* a
  * section without making one tab look foreign next to its siblings.
@@ -42,28 +57,57 @@ export function SettingsSection({
   icon: Icon,
   title,
   description,
+  control,
+  htmlFor,
   children,
   className,
 }: SettingsSectionProps) {
+  const heading = (
+    <>
+      {Icon ? (
+        <Icon
+          className="size-4 shrink-0 text-muted-foreground"
+          aria-hidden="true"
+        />
+      ) : null}
+      {title}
+    </>
+  )
+
   return (
     <section
       className={cn("space-y-3 rounded-xl border bg-card p-4", className)}
     >
-      <div className="space-y-1">
-        <h2 className="flex items-center gap-2 text-sm font-semibold">
-          {Icon ? (
-            <Icon
-              className="size-4 shrink-0 text-muted-foreground"
-              aria-hidden="true"
-            />
+      {/* Same alignment rule as `SettingRow`: with an explanation the control
+          sits on the heading's line, without one the two center on each other. */}
+      <div
+        className={cn(
+          "flex justify-between gap-3",
+          description ? "items-start" : "items-center"
+        )}
+      >
+        <div className="min-w-0 space-y-1">
+          <h2 className="text-sm font-semibold">
+            {htmlFor ? (
+              // A `<label>` inside the heading, so clicking the title works the
+              // control and the heading is still a heading to both roles.
+              <Label
+                htmlFor={htmlFor}
+                className="gap-2 text-sm leading-normal font-semibold"
+              >
+                {heading}
+              </Label>
+            ) : (
+              <span className="flex items-center gap-2">{heading}</span>
+            )}
+          </h2>
+          {description ? (
+            <p className="text-xs leading-5 text-muted-foreground">
+              {description}
+            </p>
           ) : null}
-          {title}
-        </h2>
-        {description ? (
-          <p className="text-xs leading-5 text-muted-foreground">
-            {description}
-          </p>
-        ) : null}
+        </div>
+        {control ? <div className="shrink-0">{control}</div> : null}
       </div>
       {children}
     </section>

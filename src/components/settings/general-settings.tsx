@@ -5,10 +5,8 @@ import {
   Cpu,
   FolderCog,
   Loader2,
-  MonitorCog,
   RefreshCw,
   SquareTerminal,
-  Terminal,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
@@ -45,10 +43,7 @@ import { relaunchApp } from "@/lib/updater"
 import { toErrorMessage } from "@/lib/app-error"
 import { NotificationSoundSettingsSection } from "@/components/settings/notification-sound-settings"
 import { DelegationSettingsSection } from "@/components/settings/delegation-settings"
-import { SessionFeedbackSettingsSection } from "@/components/settings/session-feedback-settings"
-import { AskQuestionSettingsSection } from "@/components/settings/ask-question-settings"
-import { SessionInfoSettingsSection } from "@/components/settings/session-info-settings"
-import { ChatAuthoringSettingsSection } from "@/components/settings/chat-authoring-settings"
+import { AgentToolsSettingsSection } from "@/components/settings/agent-tools-settings"
 
 const TERMINAL_SHELL_OPTION_SYSTEM = "system"
 const TERMINAL_SHELL_OPTION_CUSTOM = "custom"
@@ -278,61 +273,60 @@ export function GeneralSettings() {
           </SettingsError>
         )}
 
+        {/* The section is the picker: heading, purpose and control on one line,
+            with what the shell currently resolves to under them. A card holding
+            a single row would only say the heading back one line lower. */}
         <SettingsSection
           icon={SquareTerminal}
           title={t("terminalTitle")}
-          description={t("terminalDescription")}
-        >
-          <SettingCard>
-            {/* What the shell resolves to belongs to the picker, not to a
-                stray line under it: as the row's description it stays attached
-                to the control that changes it. */}
-            <SettingRow
-              icon={Terminal}
-              title={t("defaultTerminalShell")}
-              description={
-                availableShells
-                  ? t("terminalCurrentShell", {
-                      path: availableShells.resolved_shell,
-                    })
-                  : undefined
-              }
-              htmlFor="terminal-default-shell"
-              control={
-                <Select
-                  value={selectedShellId}
-                  onValueChange={onShellSelectChange}
-                  disabled={savingTerminal || !availableShells}
-                >
-                  {/* `size` rather than a bare `h-8`: the trigger's height is
-                      gated on `data-size`, which outranks an ungated utility
-                      in the class list. */}
-                  <SelectTrigger
-                    id="terminal-default-shell"
-                    size="sm"
-                    className="w-52 bg-background text-xs"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent align="end">
-                    {availableShells?.options.map((opt) => (
-                      <SelectItem key={opt.id} value={opt.id}>
-                        <span className="flex items-center gap-2">
-                          <span>{tDynamic(opt.label_key)}</span>
-                          {!opt.exists && !opt.accepts_custom_path && (
-                            <span className="text-[10px] text-muted-foreground">
-                              ({t("terminalShellNotInstalled")})
-                            </span>
-                          )}
+          description={
+            <>
+              {t("terminalDescription")}
+              {availableShells ? (
+                <span className="mt-1 block">
+                  {t("terminalCurrentShell", {
+                    path: availableShells.resolved_shell,
+                  })}
+                </span>
+              ) : null}
+            </>
+          }
+          htmlFor="terminal-default-shell"
+          control={
+            <Select
+              value={selectedShellId}
+              onValueChange={onShellSelectChange}
+              disabled={savingTerminal || !availableShells}
+            >
+              {/* `size` rather than a bare `h-8`: the trigger's height is
+                  gated on `data-size`, which outranks an ungated utility
+                  in the class list. */}
+              <SelectTrigger
+                id="terminal-default-shell"
+                size="sm"
+                className="w-52 bg-background text-xs"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {availableShells?.options.map((opt) => (
+                  <SelectItem key={opt.id} value={opt.id}>
+                    <span className="flex items-center gap-2">
+                      <span>{tDynamic(opt.label_key)}</span>
+                      {!opt.exists && !opt.accepts_custom_path && (
+                        <span className="text-[10px] text-muted-foreground">
+                          ({t("terminalShellNotInstalled")})
                         </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              }
-            />
-
-            {selectedShellId === TERMINAL_SHELL_OPTION_CUSTOM && (
+                      )}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          }
+        >
+          {selectedShellId === TERMINAL_SHELL_OPTION_CUSTOM && (
+            <SettingCard>
               <SettingRow
                 icon={FolderCog}
                 title={t("terminalShellCustomPath")}
@@ -366,36 +360,32 @@ export function GeneralSettings() {
                   </p>
                 )}
               </SettingRow>
-            )}
-          </SettingCard>
+            </SettingCard>
+          )}
         </SettingsSection>
 
         {renderingSectionVisible && (
+          // Titled by the option, not by the category it belongs to: the switch
+          // turns acceleration *off*, so labelling it "Rendering" would read as
+          // the opposite of what it does.
           <SettingsSection
-            icon={MonitorCog}
-            title={t("renderingTitle")}
+            icon={Cpu}
+            title={t("disableHardwareAcceleration")}
             description={t("renderingDescription")}
-          >
-            <SettingCard>
-              <SettingRow
-                icon={Cpu}
-                title={t("disableHardwareAcceleration")}
-                htmlFor="disable-hardware-acceleration"
-                control={
-                  <Switch
-                    id="disable-hardware-acceleration"
-                    checked={disableHwAccel}
-                    disabled={savingRendering}
-                    onCheckedChange={(next) => {
-                      const prev = disableHwAccel
-                      setDisableHwAccel(next)
-                      void saveRenderingSettings(next, prev)
-                    }}
-                  />
-                }
+            htmlFor="disable-hardware-acceleration"
+            control={
+              <Switch
+                id="disable-hardware-acceleration"
+                checked={disableHwAccel}
+                disabled={savingRendering}
+                onCheckedChange={(next) => {
+                  const prev = disableHwAccel
+                  setDisableHwAccel(next)
+                  void saveRenderingSettings(next, prev)
+                }}
               />
-            </SettingCard>
-
+            }
+          >
             {renderingDirty && (
               <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/40 px-3 py-2 text-xs">
                 <span className="min-w-0 text-muted-foreground">
@@ -420,13 +410,7 @@ export function GeneralSettings() {
 
         <DelegationSettingsSection />
 
-        <SessionFeedbackSettingsSection />
-
-        <AskQuestionSettingsSection />
-
-        <SessionInfoSettingsSection />
-
-        <ChatAuthoringSettingsSection />
+        <AgentToolsSettingsSection />
       </div>
     </ScrollArea>
   )

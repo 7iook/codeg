@@ -21,7 +21,6 @@ import {
   BellOff,
   ListMusic,
   Play,
-  Power,
   SlidersHorizontal,
   Volume2,
 } from "lucide-react"
@@ -97,87 +96,86 @@ export function NotificationSoundSettingsSection() {
   const volumePercent = Math.round(prefs.volume * 100)
 
   return (
+    // The master switch is the section's heading row: with sounds off the whole
+    // section is that one line, and the knobs it gates appear under it rather
+    // than in a card that repeats "Enable notification sounds".
     <SettingsSection
       icon={Volume2}
       title={t("title")}
-      description={t("description")}
-    >
-      {/* Whether cues play at all, and the two knobs that shape every cue —
-          one card, because volume and "only when unfocused" are meaningless
-          without the switch above them. */}
-      <SettingCard>
-        <SettingRow
-          icon={Power}
-          title={t("enable")}
-          description={t("enableHint")}
-          htmlFor="notification-sound-enabled"
-          control={
-            <Switch
-              id="notification-sound-enabled"
-              checked={prefs.enabled}
-              onCheckedChange={(enabled) =>
-                saveNotificationSoundPrefs({ ...prefs, enabled })
-              }
-            />
+      description={
+        <>
+          {t("description")}
+          <span className="mt-1 block">{t("enableHint")}</span>
+        </>
+      }
+      htmlFor="notification-sound-enabled"
+      control={
+        <Switch
+          id="notification-sound-enabled"
+          checked={prefs.enabled}
+          onCheckedChange={(enabled) =>
+            saveNotificationSoundPrefs({ ...prefs, enabled })
           }
         />
+      }
+    >
+      {/* The two knobs that shape every cue — one card, because volume and
+          "only when unfocused" are meaningless without the switch above. */}
+      {prefs.enabled && (
+        <SettingCard>
+          <SettingRow
+            icon={SlidersHorizontal}
+            title={t("volume")}
+            control={
+              <span className="text-xs tabular-nums text-muted-foreground">
+                {volumePercent}%
+              </span>
+            }
+          >
+            <div className="flex items-center gap-3">
+              <Slider
+                value={[volumePercent]}
+                min={0}
+                max={100}
+                step={5}
+                aria-label={t("volume")}
+                onValueChange={([value]) =>
+                  saveNotificationSoundPrefs({
+                    ...prefs,
+                    volume: value / 100,
+                  })
+                }
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0 bg-background"
+                onClick={() => previewTone("chime", prefs.volume)}
+              >
+                <Play className="h-3.5 w-3.5" />
+                {t("preview")}
+              </Button>
+            </div>
+          </SettingRow>
 
-        {prefs.enabled && (
-          <>
-            <SettingRow
-              icon={SlidersHorizontal}
-              title={t("volume")}
-              control={
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {volumePercent}%
-                </span>
-              }
-            >
-              <div className="flex items-center gap-3">
-                <Slider
-                  value={[volumePercent]}
-                  min={0}
-                  max={100}
-                  step={5}
-                  aria-label={t("volume")}
-                  onValueChange={([value]) =>
-                    saveNotificationSoundPrefs({
-                      ...prefs,
-                      volume: value / 100,
-                    })
-                  }
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0 bg-background"
-                  onClick={() => previewTone("chime", prefs.volume)}
-                >
-                  <Play className="h-3.5 w-3.5" />
-                  {t("preview")}
-                </Button>
-              </div>
-            </SettingRow>
-
-            <SettingRow
-              icon={BellOff}
-              title={t("onlyWhenUnfocused")}
-              description={t("onlyWhenUnfocusedHint")}
-              htmlFor="notification-sound-unfocused"
-              control={
-                <Switch
-                  id="notification-sound-unfocused"
-                  checked={prefs.onlyWhenUnfocused}
-                  onCheckedChange={(onlyWhenUnfocused) =>
-                    saveNotificationSoundPrefs({ ...prefs, onlyWhenUnfocused })
-                  }
-                />
-              }
-            />
-          </>
-        )}
-      </SettingCard>
+          <SettingRow
+            icon={BellOff}
+            title={t("onlyWhenUnfocused")}
+            description={t("onlyWhenUnfocusedHint")}
+            htmlFor="notification-sound-unfocused"
+            control={
+              <Switch
+                id="notification-sound-unfocused"
+                checked={prefs.onlyWhenUnfocused}
+                onCheckedChange={(onlyWhenUnfocused) =>
+                  saveNotificationSoundPrefs({ ...prefs, onlyWhenUnfocused })
+                }
+              />
+            }
+          />
+        </SettingCard>
+      )}
 
       {prefs.enabled && (
         <SettingCard>
