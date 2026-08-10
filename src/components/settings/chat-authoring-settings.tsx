@@ -15,10 +15,15 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { useTranslations } from "next-intl"
-import { CalendarClock, ListTodo, Loader2, Sparkles } from "lucide-react"
+import { CalendarClock, ListTodo, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 
-import { Button } from "@/components/ui/button"
+import { SettingCard, SettingRow } from "@/components/shared/setting-card"
+import {
+  SettingsError,
+  SettingsSaveBar,
+  SettingsSection,
+} from "@/components/shared/settings-section"
 import { Switch } from "@/components/ui/switch"
 import {
   type ChatAuthoringSettings,
@@ -76,83 +81,56 @@ export function ChatAuthoringSettingsSection() {
   }, [automations, workTasks, t])
 
   return (
-    <section className="rounded-xl border bg-card p-4 space-y-4">
-      <div className="flex items-center gap-2">
-        <Sparkles className="h-4 w-4 text-muted-foreground" aria-hidden />
-        <h2 className="text-sm font-semibold">{t("title")}</h2>
-      </div>
-      <p className="text-xs text-muted-foreground leading-5">
-        {t("description")}
-      </p>
-
+    <SettingsSection
+      icon={Sparkles}
+      title={t("title")}
+      description={t("description")}
+    >
       {loadError && (
-        <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          {t("loadFailed", { detail: loadError })}
-        </p>
+        <SettingsError>{t("loadFailed", { detail: loadError })}</SettingsError>
       )}
 
-      <div className="flex items-center justify-between gap-3">
-        <div className="space-y-1 min-w-0">
-          <label
-            htmlFor="chat-authoring-automations"
-            className="flex items-center gap-1.5 text-sm font-medium"
-          >
-            <CalendarClock
-              className="h-3.5 w-3.5 text-muted-foreground"
-              aria-hidden
+      {/* Both switches share one card: they are the same decision — how much
+          of the app an agent may write to from a conversation — split by which
+          surface the work lands on. */}
+      <SettingCard>
+        <SettingRow
+          icon={CalendarClock}
+          title={t("enableAutomations")}
+          description={t("enableAutomationsHint")}
+          htmlFor="chat-authoring-automations"
+          control={
+            <Switch
+              id="chat-authoring-automations"
+              checked={automations}
+              onCheckedChange={setAutomations}
+              disabled={loading}
             />
-            {t("enableAutomations")}
-          </label>
-          <p className="text-xs text-muted-foreground">
-            {t("enableAutomationsHint")}
-          </p>
-        </div>
-        <Switch
-          id="chat-authoring-automations"
-          checked={automations}
-          onCheckedChange={setAutomations}
-          disabled={loading}
-          className="shrink-0"
+          }
         />
-      </div>
-
-      <div className="flex items-center justify-between gap-3">
-        <div className="space-y-1 min-w-0">
-          <label
-            htmlFor="chat-authoring-work-tasks"
-            className="flex items-center gap-1.5 text-sm font-medium"
-          >
-            <ListTodo
-              className="h-3.5 w-3.5 text-muted-foreground"
-              aria-hidden
+        <SettingRow
+          icon={ListTodo}
+          title={t("enableWorkTasks")}
+          description={t("enableWorkTasksHint")}
+          htmlFor="chat-authoring-work-tasks"
+          control={
+            <Switch
+              id="chat-authoring-work-tasks"
+              checked={workTasks}
+              onCheckedChange={setWorkTasks}
+              disabled={loading}
             />
-            {t("enableWorkTasks")}
-          </label>
-          <p className="text-xs text-muted-foreground">
-            {t("enableWorkTasksHint")}
-          </p>
-        </div>
-        <Switch
-          id="chat-authoring-work-tasks"
-          checked={workTasks}
-          onCheckedChange={setWorkTasks}
-          disabled={loading}
-          className="shrink-0"
+          }
         />
-      </div>
+      </SettingCard>
 
-      <div className="flex justify-end pt-2">
-        <Button onClick={save} disabled={loading || saving} size="sm">
-          {saving ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {t("saving")}
-            </>
-          ) : (
-            t("save")
-          )}
-        </Button>
-      </div>
-    </section>
+      <SettingsSaveBar
+        onSave={() => void save()}
+        saving={saving}
+        disabled={loading}
+        label={t("save")}
+        savingLabel={t("saving")}
+      />
+    </SettingsSection>
   )
 }
