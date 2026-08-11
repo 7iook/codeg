@@ -77,6 +77,11 @@ import {
 } from "@/lib/constants"
 import { sendSystemNotification } from "@/lib/notification"
 import {
+  playEventSound,
+  primeNotificationSoundOutput,
+  withEventSoundsSuppressed,
+} from "@/lib/notification-sound"
+import {
   getSavedPrefsForConnect,
   saveModePreference,
   saveConfigPreference,
@@ -2695,6 +2700,14 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     pushAlertRef.current = pushAlert
   }, [pushAlert])
 
+  // Notification sounds: browsers only open audio output from inside a user
+  // gesture, so start watching for one now. The user's ordinary first click in
+  // the workspace unlocks it, well before an agent event needs it — otherwise
+  // the session's first cue is lost (the Settings preview cannot stand in for
+  // it: that is a different window with its own audio context). No-op while
+  // sounds are disabled.
+  useEffect(() => primeNotificationSoundOutput(), [])
+
   // Ref-based store — mutations don't trigger React state updates
   const storeRef = useRef<InternalStore>({
     connections: new Map(),
@@ -3161,6 +3174,13 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
 
   const handleMappedEvent = useCallback(
     (contextKey: string, e: EventEnvelope) => {
+      // Audible cue for the events the user opted into (Settings → General →
+      // notification sounds). One call for the whole catalogue rather than a
+      // line per case: the mapping — including which events are cues at all —
+      // lives in `soundEventIdForEnvelope`, alongside the preference schema it
+      // mirrors. Off unless configured, and self-throttling, so this is a
+      // cheap no-op on the hot path.
+      playEventSound(e)
       switch (e.type) {
         case "status_changed":
           flushStreamingQueue()
@@ -3654,6 +3674,11 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
                 return t("backendErrors.initializeTimeout", {
                   agent: agentLabel,
                 })
+              case "mcp_rejected_by_agent":
+                return t("backendErrors.mcpRejectedByAgent", {
+                  agent: agentLabel,
+                  message: e.message,
+                })
               case "sdk_not_installed":
                 return t("blocked.sdkMissing", { agent: agentLabel })
               case "platform_not_supported":
@@ -3970,9 +3995,15 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           )
         },
         onReplay: (events) => {
-          for (const envelope of events) {
-            applyMappedEnvelope(contextKey, envelope)
-          }
+          // Catching up on a gap (reconnect / lagged detach) re-delivers events
+          // that already happened. They belong in the UI, but replaying them
+          // must not fire a burst of notification sounds for turns that
+          // finished minutes ago.
+          withEventSoundsSuppressed(() => {
+            for (const envelope of events) {
+              applyMappedEnvelope(contextKey, envelope)
+            }
+          })
         },
         onEvent: (envelope) => {
           applyMappedEnvelope(contextKey, envelope)
@@ -5174,6 +5205,20 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             contextKey: connectionId,
             patch,
           })
+          // Same recovery the other three snapshot consumers do
+          // (`setupAttachSubscription.onSnapshot`, `connectAsViewer`,
+          // `connect()`'s legacy branch): `delegation_started` is transient and
+          // never replayed, so a viewer opening onto a turn that ALREADY
+          // delegated (the work-task transcript dialog is the case) would
+          // otherwise establish no binding — no agent icon/label, no child
+          // sub-stream, no "待批准" badge on the sub-agent card. Idempotent
+          // against any live event for the same `parent_tool_use_id`.
+          seedDelegationsFromSnapshot(
+            patch.connectionId,
+            patch.activeDelegations,
+            patch.eventSeq,
+            patch.conversationId
+          )
         }
         route()
       })()
@@ -5182,6 +5227,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       applyMappedEnvelope,
       consumeBufferedEvents,
       dispatch,
+      seedDelegationsFromSnapshot,
       setupAttachSubscription,
     ]
   )

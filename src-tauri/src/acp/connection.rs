@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -7,12 +7,13 @@ use sacp::schema::{
     CreateTerminalRequest, CreateTerminalResponse, ElicitationCapabilities,
     ElicitationFormCapabilities, EmbeddedResource, EmbeddedResourceResource,
     FileSystemCapabilities, ImageContent, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
-    PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus, PromptRequest, ProtocolVersion,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
-    ResumeSessionRequest, ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
+    KillTerminalResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+    NewSessionResponse, PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus,
+    PromptRequest, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
+    ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectGroup,
     SessionConfigSelectOption, SessionConfigSelectOptions, SessionId, SessionModeState,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, StopReason, TerminalExitStatus,
@@ -37,12 +38,13 @@ use crate::acp::session_state::SessionState;
 use crate::acp::stderr_tail::{summarize_parser_error, StderrTail, TailScope};
 use crate::acp::terminal_runtime::{TerminalRuntime, TerminalRuntimeError};
 use crate::acp::types::{
-    AcpEvent, AvailableCommandInfo, ConnectionInfo, ConnectionStatus, GrokEffortSpec,
+    AcpEvent, AvailableCommandInfo, ConnectionInfo, ConnectionStatus, GrokModelSpec,
     PermissionOptionInfo, PlanEntryInfo, PromptCapabilitiesInfo, PromptInputBlock,
-    SessionConfigKindInfo, SessionConfigOptionInfo, SessionConfigSelectGroupInfo,
-    SessionConfigSelectInfo, SessionConfigSelectOptionInfo, SessionModeInfo, SessionModeStateInfo,
-    SteerOutcome, ToolCallImageInfo, UserMessageBlock,
+    SessionConfigBooleanInfo, SessionConfigKindInfo, SessionConfigOptionInfo,
+    SessionConfigSelectGroupInfo, SessionConfigSelectInfo, SessionConfigSelectOptionInfo,
+    SessionModeInfo, SessionModeStateInfo, SteerOutcome, ToolCallImageInfo, UserMessageBlock,
 };
+use crate::logging::throttle::LeadingEdgeThrottle;
 use crate::models::agent::AgentType;
 use crate::network::proxy;
 use crate::web::event_bridge::{emit_with_state, EventEmitter};
@@ -491,6 +493,48 @@ pub enum ConnectionCommand {
 /// by the outer `.map_err(...)` in `run_connection`.
 const INIT_TIMEOUT_SENTINEL: &str = "__codeg_init_timeout__";
 
+/// Sentinel appended to a `session/new` failure when codeg had just forwarded
+/// MCP servers to a *custom* agent, so the outer `.map_err(...)` can raise
+/// `AcpError::McpRejectedByAgent` and point the user at the `supports_mcp`
+/// switch. Same trick as [`INIT_TIMEOUT_SENTINEL`] — the inner future is typed
+/// to `sacp::Error`, which has nowhere to carry a codeg error kind.
+const MCP_SUSPECT_SENTINEL: &str = "__codeg_mcp_suspect__";
+
+/// Mark a `session/new` failure as possibly caused by the MCP servers codeg put
+/// on the wire.
+///
+/// Restricted to custom agents on purpose. A built-in's `supports_mcp` is a
+/// repository constant already verified against the real agent, so blaming MCP
+/// there would send the user chasing a switch that isn't wrong (and that they
+/// cannot flip). A custom agent's is a user declaration about a binary codeg
+/// knows nothing about — the case this hint is for. An empty list rules MCP out
+/// entirely, since then nothing was forwarded to reject.
+fn tag_mcp_suspect(
+    err: sacp::Error,
+    agent_type: AgentType,
+    mcp_servers: &[McpServer],
+) -> sacp::Error {
+    if mcp_servers.is_empty() || !matches!(agent_type, AgentType::Custom(_)) {
+        return err;
+    }
+    // Also log it. The coded error reaches the desktop webview through the
+    // global `acp://event` emit, but a web/remote client that has not attached
+    // yet never sees it — the connection is removed from the manager map as
+    // soon as this task unwinds, so there is no state left to snapshot. That
+    // loss is not specific to this hint (it costs `initialize_timeout`,
+    // `spawn_failed` and every protocol error just the same), and repairing it
+    // means changing how long terminal connections are retained. Until then the
+    // log is the one channel that survives on every transport.
+    tracing::warn!(
+        "[ACP][{}] session/new failed with {} MCP server(s) attached; if this agent \
+         does not accept MCP, turn off \"MCP support\" for it in settings: {}",
+        agent_type,
+        mcp_servers.len(),
+        err
+    );
+    sacp::util::internal_error(format!("{err}{MCP_SUSPECT_SENTINEL}"))
+}
+
 /// RAII guard that removes the `AgentConnection` entry from the manager
 /// map when dropped. Runs on both normal task exit AND task panic, so a
 /// panic inside `run_connection` can't leak a stale map entry.
@@ -756,9 +800,13 @@ async fn record_turn_end(
 fn current_model_id_from_opts(opts: &[SessionConfigOptionInfo]) -> Option<String> {
     opts.iter()
         .find(|o| o.category.as_deref() == Some("model"))
-        .map(|o| {
-            let SessionConfigKindInfo::Select(sel) = &o.kind;
-            sel.current_value.clone()
+        .and_then(|o| {
+            // A model selector is always a `select`; any other kind carries no
+            // model id to report.
+            let SessionConfigKindInfo::Select(sel) = &o.kind else {
+                return None;
+            };
+            Some(sel.current_value.clone())
         })
         .filter(|m| !m.is_empty())
 }
@@ -1205,8 +1253,8 @@ async fn build_agent(
             } else if let Some((sys_path, sys_args)) = system_cmd.and_then(|(c, a)| {
                 crate::commands::acp::resolve_command_on_path(c).map(|path| (path, a))
             }) {
-                // Fallback: the agent's own CLI is already on PATH (e.g.
-                // `hermes acp`), installed via its official installer rather
+                // Fallback: the agent's own CLI is already on PATH, installed
+                // via pipx / `uv tool install` / an official installer rather
                 // than provisioned through uvx.
                 tracing::warn!(
                     "[ACP][{}] uvx unavailable; falling back to system command {:?}",
@@ -1214,8 +1262,7 @@ async fn build_agent(
                     sys_path
                 );
                 // `system_cmd` is a complete launch recipe for the PATH binary;
-                // the uvx entry-script `args` don't necessarily apply to it
-                // (for Hermes both are empty / `["acp"]`, so this is exact).
+                // the uvx entry-script `args` don't necessarily apply to it.
                 parts.push(sys_path.to_string_lossy().to_string());
                 for a in sys_args {
                     parts.push((*a).into());
@@ -1796,8 +1843,63 @@ fn map_session_config_option(option: &SessionConfigOption) -> Option<SessionConf
                 }),
             })
         }
+        SessionConfigKind::Boolean(toggle) => Some(SessionConfigOptionInfo {
+            id: option.id.to_string(),
+            name: option.name.clone(),
+            description: option.description.clone(),
+            category: option.category.as_ref().map(map_session_config_category),
+            kind: SessionConfigKindInfo::Boolean(SessionConfigBooleanInfo {
+                current_value: toggle.current_value,
+            }),
+        }),
         _ => None,
     }
+}
+
+/// The `type` discriminators codeg's schema build can decode. Anything else on
+/// the wire is stripped by [`strip_unknown_config_options`] before the typed
+/// parse, because `SessionConfigOption::kind` is a required flattened field:
+/// one unrecognized option would otherwise fail the WHOLE response and take the
+/// agent down with it (exactly what cline 3.0.50's `type: "boolean"` did before
+/// `unstable_boolean_config` was enabled).
+const KNOWN_CONFIG_OPTION_KINDS: &[&str] = &["select", "boolean"];
+
+/// Drop `configOptions[]` entries whose `type` this build cannot decode, in
+/// place, on a raw session response.
+///
+/// ACP's `SessionConfigKind` is a `#[serde(tag = "type")]` enum with no
+/// catch-all variant, so an option kind added upstream after codeg's schema pin
+/// is a hard deserialization failure rather than an ignorable unknown. Stripping
+/// unknown kinds here downgrades "this agent is completely unusable" to "this
+/// one selector is missing", which is the correct failure mode for a selector.
+///
+/// Entries missing a `type`, or shaped unexpectedly, are left untouched — serde
+/// gives a better error for those than a silent drop would.
+fn strip_unknown_config_options(raw: &mut serde_json::Value, method: &str) {
+    let Some(options) = raw
+        .get_mut("configOptions")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    options.retain(|option| {
+        let Some(kind) = option.get("type").and_then(serde_json::Value::as_str) else {
+            return true;
+        };
+        if KNOWN_CONFIG_OPTION_KINDS.contains(&kind) {
+            return true;
+        }
+        tracing::warn!(
+            "[ACP] {method}: dropping config option '{}' — unsupported kind '{kind}'; \
+             codeg's ACP schema knows {:?}. The selector will not be shown.",
+            option
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<no id>"),
+            KNOWN_CONFIG_OPTION_KINDS,
+        );
+        false
+    });
 }
 
 fn map_session_config_options(
@@ -1990,11 +2092,12 @@ fn parse_steering_supported(meta: Option<&serde_json::Map<String, serde_json::Va
 }
 
 /// Parse Grok's raw top-level `models` (from a session-establishment response)
-/// into a per-`modelId` reasoning-effort spec map. Absent `models` /
-/// `availableModels` → empty map (caller falls back to the flat
-/// `x.ai/sessionConfig` effort list). Missing `_meta` fields degrade gracefully
-/// (`supports=false` / `default=None` / `options=[]`).
-fn parse_grok_effort_specs(models: Option<&serde_json::Value>) -> HashMap<String, GrokEffortSpec> {
+/// into a per-`modelId` spec map: reasoning-effort capability plus the model's
+/// own context window. Absent `models` / `availableModels` → empty map (caller
+/// falls back to the flat `x.ai/sessionConfig` effort list). Missing `_meta`
+/// fields degrade gracefully (`supports=false` / `default=None` / `options=[]` /
+/// `context_window=None`).
+fn parse_grok_model_specs(models: Option<&serde_json::Value>) -> HashMap<String, GrokModelSpec> {
     let mut out = HashMap::new();
     let Some(list) = models
         .and_then(|m| m.get("availableModels"))
@@ -2038,10 +2141,14 @@ fn parse_grok_effort_specs(models: Option<&serde_json::Value>) -> HashMap<String
         }
         out.insert(
             model_id.to_string(),
-            GrokEffortSpec {
+            GrokModelSpec {
                 options,
                 default,
                 supports,
+                context_window: meta
+                    .and_then(|x| x.get("totalContextTokens"))
+                    .and_then(|v| v.as_u64())
+                    .filter(|window| *window > 0),
             },
         );
     }
@@ -2058,7 +2165,7 @@ fn parse_grok_effort_specs(models: Option<&serde_json::Value>) -> HashMap<String
 /// default (or the first option).
 fn build_grok_effort_option(
     model_id: &str,
-    specs: &HashMap<String, GrokEffortSpec>,
+    specs: &HashMap<String, GrokModelSpec>,
 ) -> Option<SessionConfigOptionInfo> {
     let spec = specs.get(model_id)?;
     if !spec.supports {
@@ -2118,7 +2225,7 @@ fn build_grok_effort_option(
 fn set_grok_effort_selector_for_model(
     opts: &mut Vec<SessionConfigOptionInfo>,
     model_id: &str,
-    specs: &HashMap<String, GrokEffortSpec>,
+    specs: &HashMap<String, GrokModelSpec>,
 ) {
     opts.retain(|o| o.id != GROK_EFFORT_OPTION_ID);
     if let Some(effort) = build_grok_effort_option(model_id, specs) {
@@ -2137,7 +2244,7 @@ fn set_grok_effort_selector_for_model(
 /// frontend code. Returns `None` when there is no usable sessionConfig.
 fn synthesize_grok_config_options(
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
-    specs: &HashMap<String, GrokEffortSpec>,
+    specs: &HashMap<String, GrokModelSpec>,
 ) -> Option<Vec<SessionConfigOptionInfo>> {
     let options = meta?
         .get("x.ai/sessionConfig")?
@@ -2384,7 +2491,7 @@ async fn apply_grok_preferred_options(
     session_id: &SessionId,
     opts: &mut Vec<SessionConfigOptionInfo>,
     preferred_config_values: &BTreeMap<String, String>,
-    specs: &HashMap<String, GrokEffortSpec>,
+    specs: &HashMap<String, GrokModelSpec>,
 ) {
     // Model preference — a pure `set_model` (no effort override). On success we
     // also re-point the effort selector at the newly-preferred model (grok ships
@@ -2396,15 +2503,22 @@ async fn apply_grok_preferred_options(
             .iter()
             .find(|o| o.id == GROK_MODEL_OPTION_ID)
             .is_some_and(|o| {
-                let SessionConfigKindInfo::Select(sel) = &o.kind;
+                // Grok's selectors are synthesized as selects; any other kind
+                // has no model value to compare against.
+                let SessionConfigKindInfo::Select(sel) = &o.kind else {
+                    return false;
+                };
                 // Skip if already current, or the saved model is no longer offered.
                 sel.current_value != pref && sel.options.iter().any(|x| x.value == pref)
             });
         if eligible {
             match set_grok_model(cx, session_id, pref.clone(), None).await {
                 Ok(()) => {
-                    if let Some(o) = opts.iter_mut().find(|o| o.id == GROK_MODEL_OPTION_ID) {
-                        let SessionConfigKindInfo::Select(sel) = &mut o.kind;
+                    if let Some(SessionConfigKindInfo::Select(sel)) = opts
+                        .iter_mut()
+                        .find(|o| o.id == GROK_MODEL_OPTION_ID)
+                        .map(|o| &mut o.kind)
+                    {
                         sel.current_value = pref.clone();
                     }
                     if !specs.is_empty() {
@@ -2422,8 +2536,11 @@ async fn apply_grok_preferred_options(
     // unsupported model (no selector) or an unoffered value is skipped here.
     if let Some(pref) = preferred_config_values.get(GROK_EFFORT_OPTION_ID) {
         let model_id = current_grok_model_id_from_opts(opts);
-        if let Some(effort_opt) = opts.iter_mut().find(|o| o.id == GROK_EFFORT_OPTION_ID) {
-            let SessionConfigKindInfo::Select(sel) = &mut effort_opt.kind;
+        if let Some(SessionConfigKindInfo::Select(sel)) = opts
+            .iter_mut()
+            .find(|o| o.id == GROK_EFFORT_OPTION_ID)
+            .map(|o| &mut o.kind)
+        {
             if &sel.current_value != pref && sel.options.iter().any(|o| &o.value == pref) {
                 if let Some(model_id) = model_id {
                     match set_grok_model(cx, session_id, model_id, Some(pref.clone())).await {
@@ -2440,10 +2557,14 @@ async fn apply_grok_preferred_options(
 
 /// The Grok model selector's current value, read from an in-memory options list.
 fn current_grok_model_id_from_opts(opts: &[SessionConfigOptionInfo]) -> Option<String> {
-    opts.iter().find(|o| o.id == GROK_MODEL_OPTION_ID).map(|o| {
-        let SessionConfigKindInfo::Select(sel) = &o.kind;
-        sel.current_value.clone()
-    })
+    opts.iter()
+        .find(|o| o.id == GROK_MODEL_OPTION_ID)
+        .and_then(|o| {
+            let SessionConfigKindInfo::Select(sel) = &o.kind else {
+                return None;
+            };
+            Some(sel.current_value.clone())
+        })
 }
 
 /// The Grok model selector's current value, read from the authoritative
@@ -2452,6 +2573,113 @@ fn current_grok_model_id_from_opts(opts: &[SessionConfigOptionInfo]) -> Option<S
 async fn current_grok_model_id(state: &Arc<RwLock<SessionState>>) -> Option<String> {
     let opts = state.read().await.config_options.clone()?;
     current_grok_model_id_from_opts(&opts)
+}
+
+/// Context window for the session's CURRENT Grok model. One state read, done at
+/// turn start — the answer only changes on a model switch, which cannot happen
+/// mid-turn.
+///
+/// Resolution order mirrors `parsers::grok::build_detail` so the live ring and
+/// the re-parsed history never disagree about the denominator: what Grok
+/// reported for the model at session establishment, then its on-disk catalog
+/// (which is where a BYO endpoint's declared window lives — that one is often
+/// absent from the wire), then the id-shaped heuristic.
+///
+/// `None` is a real outcome, not just "no model selector": a BYO endpoint is
+/// keyed by whatever id the user typed (`[model.<id>]` holds the upstream
+/// model's name), so an id like `deepseek-chat` can miss the wire, the catalog,
+/// and every heuristic family at once. [`grok_window_change_usage`] is what
+/// keeps that from stranding a previous model's window on screen.
+async fn grok_current_model_context_window(state: &Arc<RwLock<SessionState>>) -> Option<u64> {
+    let (model, reported) = {
+        let st = state.read().await;
+        let model = current_grok_model_id_from_opts(st.config_options.as_deref()?)?;
+        let reported = st
+            .grok_model_specs
+            .as_ref()
+            .and_then(|specs| specs.get(&model))
+            .and_then(|spec| spec.context_window);
+        (model, reported)
+    };
+    // Lock released: the catalog lookup below touches the filesystem.
+    reported.or_else(|| {
+        grok_offline_context_window(&model, &crate::parsers::grok::resolve_grok_home_dir())
+    })
+}
+
+/// The window for `model` when Grok didn't report one on the wire: its on-disk
+/// catalog first, then the id-shaped heuristic. Split out of
+/// [`grok_current_model_context_window`] so the resolution order is testable
+/// against a fixture home instead of the host's real `~/.grok`.
+fn grok_offline_context_window(model: &str, grok_home: &Path) -> Option<u64> {
+    crate::parsers::grok::grok_catalog_context_window(grok_home, model)
+        .or_else(|| crate::parsers::infer_context_window_max_tokens(Some(model)))
+}
+
+/// The live pair to re-emit at turn start because the DENOMINATOR moved — the
+/// user switched model between turns — or `None` when nothing needs re-keying.
+///
+/// Two cases, and the second is why this exists at all:
+///   * the new model has a window → carry the cumulative count forward onto it,
+///     so the ring doesn't keep dividing by the previous model's window until
+///     this turn's first token-bearing update;
+///   * the new model has NO resolvable window (a BYO id that the wire, the
+///     catalog and the heuristic all decline to size) → hand the denominator
+///     back with `size: 0`, the frontend's own "unknown window" sentinel
+///     (`rawLiveSize > 0 ? … : null`), which drops the ring to the re-parsed
+///     session stats. This is what stops the previous model's window from
+///     surviving indefinitely on a turn that never reports a token count.
+///
+/// Note `size: 0` and not `used: 0` — the frontend's `USAGE_UPDATE` reducer
+/// *drops* a zero-`used` update whenever it already holds a positive one (a rule
+/// that exists for Claude Code's synthetic `/context` responses), so clearing
+/// via zeros would strand every attached client on the stale value while the
+/// backend snapshot moved on.
+fn grok_window_change_usage(window: Option<u64>, last: Option<(u64, u64)>) -> Option<(u64, u64)> {
+    let (used, last_size) = last?;
+    let size = window.unwrap_or(0);
+    (size != last_size).then_some((used, size))
+}
+
+/// The `(used, size)` a Grok update moves the context ring to, or `None` when
+/// there is nothing new to report.
+///
+/// Grok emits no ACP `usage_update` at all; it reports a CUMULATIVE token count
+/// for the session in the OUTER `params._meta.totalTokens` of ordinary
+/// `session/update` notifications (the same number
+/// `parsers::grok::GrokTurnMeta` folds into each turn's `usage.input_tokens`).
+/// That count IS the context "used", so pairing it with the model's window fills
+/// the composer ring live — previously it only moved once a turn had been
+/// written to disk and re-parsed.
+///
+/// `last` suppresses the repeats: the count rides nearly every chunk, but steps
+/// only a handful of times per turn. It keys on the WINDOW too, so a model
+/// switch still re-emits while the count sits still.
+///
+/// An unresolvable window reports `size: 0` rather than going silent — the
+/// frontend reads that as "unknown window" and sizes the ring from the re-parsed
+/// session stats, while the live count still tracks. Going silent instead would
+/// freeze whatever pair was last emitted (see [`grok_window_change_usage`]).
+fn grok_live_usage_step(
+    dispatch: &Dispatch,
+    agent_type: AgentType,
+    context_window: Option<u64>,
+    last: Option<(u64, u64)>,
+) -> Option<(u64, u64)> {
+    if agent_type != AgentType::Grok {
+        return None;
+    }
+    let size = context_window.unwrap_or(0);
+    let Dispatch::Notification(notification) = dispatch else {
+        return None;
+    };
+    let used = notification
+        .params
+        .get("_meta")?
+        .get("totalTokens")?
+        .as_u64()
+        .filter(|used| *used > 0)?;
+    (Some((used, size)) != last).then_some((used, size))
 }
 
 /// Route a composer config-option change for Grok. Both live selectors go
@@ -2496,11 +2724,14 @@ async fn set_grok_config_option(
         Ok(()) => {
             let (current, specs) = {
                 let g = state.read().await;
-                (g.config_options.clone(), g.grok_effort_specs.clone())
+                (g.config_options.clone(), g.grok_model_specs.clone())
             };
             if let Some(mut opts) = current {
-                if let Some(o) = opts.iter_mut().find(|o| o.id == config_id) {
-                    let SessionConfigKindInfo::Select(sel) = &mut o.kind;
+                if let Some(SessionConfigKindInfo::Select(sel)) = opts
+                    .iter_mut()
+                    .find(|o| o.id == config_id)
+                    .map(|o| &mut o.kind)
+                {
                     sel.current_value = value_id.clone();
                 }
                 // A MODEL switch must re-point the effort selector at the new
@@ -2570,19 +2801,19 @@ async fn apply_and_emit_session_config_options(
     emitter: &EventEmitter,
     agent_type: AgentType,
     grok_meta: Option<&serde_json::Map<String, serde_json::Value>>,
-    grok_effort_specs: Option<&HashMap<String, GrokEffortSpec>>,
+    grok_model_specs: Option<&HashMap<String, GrokModelSpec>>,
     preferred_mode_id: Option<&str>,
     preferred_config_values: &BTreeMap<String, String>,
     initial_config_options: Vec<SessionConfigOption>,
 ) {
     if agent_type == AgentType::Grok {
-        let specs = grok_effort_specs.cloned().unwrap_or_default();
+        let specs = grok_model_specs.cloned().unwrap_or_default();
         if let Some(mut opts) = synthesize_grok_config_options(grok_meta, &specs) {
             // Cache the per-model effort map so a later model switch can rebuild
             // the effort selector for the target model (grok ships it only at
             // session birth). `None` when empty keeps the switch path on the
             // flat-fallback branch.
-            state.write().await.grok_effort_specs = (!specs.is_empty()).then(|| specs.clone());
+            state.write().await.grok_model_specs = (!specs.is_empty()).then(|| specs.clone());
             let session_id = session.session_id().clone();
             apply_grok_preferred_options(
                 cx,
@@ -2807,41 +3038,69 @@ async fn send_resume_session(
     let untyped_req = UntypedMessage::new("session/resume", req)
         .map_err(|e| sacp::util::internal_error(format!("Failed to build resume request: {e}")))?;
 
-    let raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    let mut raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
     // Capture the raw top-level `models` (per-model reasoning-effort data) BEFORE
     // deserializing into the typed response, which drops it (Grok only — the
     // field survives serde as an ignored unknown for other agents).
     let models = raw_response.get("models").cloned();
+    strip_unknown_config_options(&mut raw_response, "session/resume");
     let resp = serde_json::from_value(raw_response)
         .map_err(|e| sacp::util::internal_error(format!("Failed to parse resume response: {e}")))?;
     Ok((resp, models))
 }
 
-/// Send `session/new`. For Grok, send it UNTYPED so the raw top-level `models`
-/// (per-model reasoning-effort data — dropped by the typed `NewSessionResponse`
-/// because the `unstable_session_model` feature is off) can be captured before
-/// deserialization. Every other agent keeps the exact typed send, byte-for-byte,
-/// and gets `None`.
+/// Send `session/new` UNTYPED, so the raw response can be inspected before it is
+/// deserialized.
+///
+/// Two things need the raw JSON. For Grok, the top-level `models` (per-model
+/// reasoning-effort data) is dropped by the typed `NewSessionResponse` because
+/// the `unstable_session_model` feature is off, so it is captured here and
+/// returned; every other agent gets `None`. For *all* agents,
+/// [`strip_unknown_config_options`] runs first so an option kind newer than
+/// codeg's schema pin cannot fail the whole response.
+///
+/// The request bytes are identical to the typed send — `UntypedMessage::new`
+/// serializes the very same `NewSessionRequest` — and `attach_session` only
+/// consumes `session_id` / `modes` / `meta` off the result. Literal method
+/// string because the schema's `SESSION_NEW_METHOD_NAME` is `pub(crate)` and
+/// sacp ships no `JsonRpcRequest` for a raw new-session; this mirrors the
+/// `session/resume` / `session/fork` untyped sends.
 async fn send_new_session_capturing_models(
     cx: &ConnectionTo<Agent>,
     agent_type: AgentType,
     req: NewSessionRequest,
 ) -> Result<(NewSessionResponse, Option<serde_json::Value>), sacp::Error> {
-    if agent_type != AgentType::Grok {
-        return Ok((cx.send_request_to(Agent, req).block_task().await?, None));
-    }
-    // Literal method string: the schema's `SESSION_NEW_METHOD_NAME` is
-    // `pub(crate)`, and sacp ships no `JsonRpcRequest` for a raw new-session, so
-    // this mirrors the `session/resume` / `session/fork` untyped sends.
     let untyped_req = UntypedMessage::new("session/new", req).map_err(|e| {
         sacp::util::internal_error(format!("Failed to build new_session request: {e}"))
     })?;
-    let raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
-    let models = raw_response.get("models").cloned();
+    let mut raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    let models = (agent_type == AgentType::Grok)
+        .then(|| raw_response.get("models").cloned())
+        .flatten();
+    strip_unknown_config_options(&mut raw_response, "session/new");
     let resp = serde_json::from_value(raw_response).map_err(|e| {
         sacp::util::internal_error(format!("Failed to parse new_session response: {e}"))
     })?;
     Ok((resp, models))
+}
+
+/// Send `session/load` UNTYPED for the same reason as
+/// [`send_new_session_capturing_models`]: the raw response must pass through
+/// [`strip_unknown_config_options`] before the typed parse. Request bytes and
+/// the `Err(sacp::Error)` a JSON-RPC failure yields (`.code` / `.to_string()`
+/// intact) are unchanged, so the caller's error ladder reads identically.
+async fn send_load_session(
+    cx: &ConnectionTo<Agent>,
+    req: LoadSessionRequest,
+) -> Result<LoadSessionResponse, sacp::Error> {
+    let untyped_req = UntypedMessage::new("session/load", req).map_err(|e| {
+        sacp::util::internal_error(format!("Failed to build load_session request: {e}"))
+    })?;
+    let mut raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    strip_unknown_config_options(&mut raw_response, "session/load");
+    serde_json::from_value(raw_response).map_err(|e| {
+        sacp::util::internal_error(format!("Failed to parse load_session response: {e}"))
+    })
 }
 
 /// Whether MCP servers forwarded over the ACP wire (`session/new.mcpServers`)
@@ -3834,7 +4093,11 @@ async fn run_connection(
             // (`session/new`'s `mcpServers`). Almost all do; OpenClaw rejects
             // any server entry and fails session creation, so it must receive
             // NONE — neither user-configured servers nor the built-in codeg-mcp
-            // companion. (The `mcpServers` key itself is always serialized as
+            // companion. A custom agent carries the same flag as a stored
+            // declaration the user flips in settings, for the same reason:
+            // codeg cannot know whether an arbitrary ACP agent tolerates the
+            // field, and one that doesn't fails to connect at all until it is
+            // turned off. (The `mcpServers` key itself is always serialized as
             // `[]` by the ACP schema and OpenClaw tolerates the empty list; the
             // gate only guarantees the list stays empty for it.) This is the
             // single chokepoint feeding session/new, session/load, and the
@@ -3985,8 +4248,8 @@ async fn run_connection(
                             };
                             // Opportunistic: grok may include per-model effort data
                             // on resume; absent ⇒ empty specs ⇒ flat fallback.
-                            let grok_effort_specs = (agent_type == AgentType::Grok)
-                                .then(|| parse_grok_effort_specs(grok_models_raw.as_ref()));
+                            let grok_model_specs = (agent_type == AgentType::Grok)
+                                .then(|| parse_grok_model_specs(grok_models_raw.as_ref()));
                             let mut session = cx.attach_session(new_resp, Default::default())?;
 
                             // No drain: session/resume does not replay history,
@@ -4011,7 +4274,7 @@ async fn run_connection(
                                 &emitter_clone,
                                 agent_type,
                                 grok_meta.as_ref(),
-                                grok_effort_specs.as_ref(),
+                                grok_model_specs.as_ref(),
                                 preferred_mode_id.as_deref(),
                                 &preferred_config_values,
                                 initial_config_options.unwrap_or_default(),
@@ -4102,7 +4365,7 @@ async fn run_connection(
                         &cwd,
                         mcp_servers.clone(),
                     );
-                    cx.send_request_to(Agent, load_req).block_task().await
+                    send_load_session(&cx, load_req).await
                 } else {
                     Err(sacp::Error::method_not_found()
                         .data("agent does not advertise the loadSession capability"))
@@ -4201,7 +4464,11 @@ async fn run_connection(
                                     })
                                     .await
                                     .otherwise(async |dispatch| {
-                                        maybe_emit_ext_notification(&st, &h, agent_type, dispatch).await;
+                                        // Historical replay: throwaway state,
+                                        // mirroring the sibling closure above.
+                                        let mut replay_cb_state =
+                                            CodeBuddyLiveState::default();
+                                        maybe_emit_ext_notification(&st, &h, agent_type, dispatch, &mut replay_cb_state).await;
                                         Ok(())
                                     })
                                     .await;
@@ -4370,7 +4637,8 @@ async fn run_connection(
                             agent_type,
                             build_new_session_request(agent_type, &cwd, mcp_servers.clone()),
                         )
-                        .await?;
+                        .await
+                        .map_err(|e| tag_mcp_suspect(e, agent_type, &mcp_servers))?;
                         let fallback_sid = new_resp.session_id.0.to_string();
                         let initial_config_options = new_resp.config_options.clone();
                         let grok_meta = if agent_type == AgentType::Grok {
@@ -4378,8 +4646,8 @@ async fn run_connection(
                         } else {
                             None
                         };
-                        let grok_effort_specs = (agent_type == AgentType::Grok)
-                            .then(|| parse_grok_effort_specs(grok_models_raw.as_ref()));
+                        let grok_model_specs = (agent_type == AgentType::Grok)
+                            .then(|| parse_grok_model_specs(grok_models_raw.as_ref()));
                         let mut session = cx.attach_session(new_resp, Default::default())?;
                         // Same conversation, new agent session: link the fresh
                         // transcript to the one the failed load was for, so the
@@ -4406,7 +4674,7 @@ async fn run_connection(
                             &emitter_clone,
                             agent_type,
                             grok_meta.as_ref(),
-                            grok_effort_specs.as_ref(),
+                            grok_model_specs.as_ref(),
                             preferred_mode_id.as_deref(),
                             &preferred_config_values,
                             initial_config_options.unwrap_or_default(),
@@ -4459,7 +4727,8 @@ async fn run_connection(
                     agent_type,
                     build_new_session_request(agent_type, &cwd, mcp_servers.clone()),
                 )
-                .await?;
+                .await
+                .map_err(|e| tag_mcp_suspect(e, agent_type, &mcp_servers))?;
                 let sid = new_resp.session_id.0.to_string();
                 let initial_config_options = new_resp.config_options.clone();
                 let grok_meta = if agent_type == AgentType::Grok {
@@ -4467,8 +4736,8 @@ async fn run_connection(
                 } else {
                     None
                 };
-                let grok_effort_specs = (agent_type == AgentType::Grok)
-                    .then(|| parse_grok_effort_specs(grok_models_raw.as_ref()));
+                let grok_model_specs = (agent_type == AgentType::Grok)
+                    .then(|| parse_grok_model_specs(grok_models_raw.as_ref()));
                 let mut session = cx.attach_session(new_resp, Default::default())?;
                 record_transcript_header(agent_type, &sid, &cwd.to_string_lossy());
                 emit_with_state(
@@ -4487,7 +4756,7 @@ async fn run_connection(
                     &emitter_clone,
                     agent_type,
                     grok_meta.as_ref(),
-                    grok_effort_specs.as_ref(),
+                    grok_model_specs.as_ref(),
                     preferred_mode_id.as_deref(),
                     &preferred_config_values,
                     initial_config_options.unwrap_or_default(),
@@ -4536,6 +4805,10 @@ async fn run_connection(
             let raw = e.to_string();
             if raw.contains(INIT_TIMEOUT_SENTINEL) {
                 AcpError::InitializeTimeout
+            } else if raw.contains(MCP_SUSPECT_SENTINEL) {
+                // Strip the marker so the user sees the agent's own words, then
+                // let the frontend append the `supports_mcp` suggestion.
+                AcpError::mcp_rejected(raw.replace(MCP_SUSPECT_SENTINEL, ""))
             } else {
                 AcpError::protocol(raw)
             }
@@ -5133,9 +5406,48 @@ async fn set_session_config_option(
     config_id: String,
     value_id: String,
 ) -> Result<(), sacp::Error> {
-    let updated = set_session_config_option_inner(cx, session_id, config_id, value_id).await?;
+    // The whole selector transport carries values as opaque strings; only here,
+    // at the wire, does the option's advertised kind decide how to encode it.
+    let is_boolean = state
+        .read()
+        .await
+        .config_options
+        .as_ref()
+        .and_then(|opts| opts.iter().find(|o| o.id == config_id))
+        .is_some_and(|o| matches!(o.kind, SessionConfigKindInfo::Boolean(_)));
+    let value = encode_config_option_value(is_boolean, &value_id);
+    let updated = set_session_config_option_inner(cx, session_id, config_id, value).await?;
     emit_session_config_options_values(state, emitter, agent_type, updated).await;
     Ok(())
+}
+
+/// Encode a selector value for `session/set_config_option`.
+///
+/// codeg keeps config values as opaque `String`s end to end (Tauri command, web
+/// handler, and the per-agent preference store all use `Record<string, string>`
+/// semantics), so the boolean round-trip is `"true"` ⇄ `true` and happens only
+/// here. A `select` value stays a bare `{"value": "…"}`, byte-for-byte what
+/// codeg sent before boolean options existed — every non-cline agent's wire
+/// traffic is unchanged.
+fn encode_config_option_value(is_boolean: bool, value: &str) -> SessionConfigOptionValue {
+    if is_boolean {
+        SessionConfigOptionValue::boolean(value == "true")
+    } else {
+        SessionConfigOptionValue::value_id(value.to_string())
+    }
+}
+
+/// Whether an advertised option already holds `value`, so applying a saved
+/// preference at connect can skip the round-trip. Reads the same `"true"` ⇄
+/// `true` encoding [`encode_config_option_value`] writes; an option kind this
+/// build cannot interpret is treated as "does not match" so the agent, not
+/// codeg, decides.
+fn config_option_already_holds(option: &SessionConfigOption, value: &str) -> bool {
+    match &option.kind {
+        SessionConfigKind::Select(s) => s.current_value.to_string() == value,
+        SessionConfigKind::Boolean(b) => b.current_value == (value == "true"),
+        _ => false,
+    }
 }
 
 /// Wire-level half of `set_session_config_option`: send the JSON-RPC request and
@@ -5147,14 +5459,15 @@ async fn set_session_config_option_inner(
     cx: &ConnectionTo<Agent>,
     session_id: &SessionId,
     config_id: String,
-    value_id: String,
+    value: SessionConfigOptionValue,
 ) -> Result<Vec<SessionConfigOption>, sacp::Error> {
-    let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value_id);
+    let req = SetSessionConfigOptionRequest::new(session_id.clone(), config_id, value);
     let untyped_req = UntypedMessage::new("session/set_config_option", req).map_err(|e| {
         sacp::util::internal_error(format!("Failed to build config option request: {e}"))
     })?;
 
-    let raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    let mut raw_response = cx.send_request_to(Agent, untyped_req).block_task().await?;
+    strip_unknown_config_options(&mut raw_response, "session/set_config_option");
     let response: SetSessionConfigOptionResponse =
         serde_json::from_value(raw_response).map_err(|e| {
             sacp::util::internal_error(format!("Failed to parse config option response: {e}"))
@@ -5524,19 +5837,19 @@ async fn apply_preferred_session_options(
         // requested config_id is absent from the advertised options — older or
         // edge-case builds accept `set_config_option` for an unadvertised "mode"
         // (see `ensure_codex_mode_option`), so let the agent decide.
-        let already_matches = options.iter().any(|o| {
-            o.id.to_string() == *config_id
-                && matches!(
-                    &o.kind,
-                    SessionConfigKind::Select(s) if s.current_value.to_string() == *value_id
-                )
-        });
+        let advertised = options.iter().find(|o| o.id.to_string() == *config_id);
+        let already_matches =
+            advertised.is_some_and(|o| config_option_already_holds(o, value_id.as_str()));
         if already_matches {
             continue;
         }
-        match set_session_config_option_inner(cx, &session_id, config_id.clone(), value_id.clone())
-            .await
-        {
+        // Encode against what the agent advertised for this id. An id the agent
+        // never advertised falls back to the select form — the same value shape
+        // codeg has always sent (see the note above on unadvertised "mode").
+        let is_boolean =
+            advertised.is_some_and(|o| matches!(o.kind, SessionConfigKind::Boolean(_)));
+        let value = encode_config_option_value(is_boolean, value_id);
+        match set_session_config_option_inner(cx, &session_id, config_id.clone(), value).await {
             Ok(updated) => options = updated,
             Err(e) => tracing::error!(
                 "[ACP] failed to apply preferred config '{config_id}'='{value_id}' \
@@ -6255,8 +6568,8 @@ async fn handle_fork_or_exit(
         None
     };
     // Opportunistic: grok may carry per-model effort data on a fork response.
-    let grok_effort_specs =
-        (agent_type == AgentType::Grok).then(|| parse_grok_effort_specs(fork_models_raw.as_ref()));
+    let grok_model_specs =
+        (agent_type == AgentType::Grok).then(|| parse_grok_model_specs(fork_models_raw.as_ref()));
     let mut session = cx.attach_session(new_resp, Default::default())?;
 
     // A fork is a new session id, hence a new transcript file. Its history
@@ -6279,7 +6592,7 @@ async fn handle_fork_or_exit(
         emitter,
         agent_type,
         grok_meta.as_ref(),
-        grok_effort_specs.as_ref(),
+        grok_model_specs.as_ref(),
         None,
         &BTreeMap::new(),
         initial_config_options.unwrap_or_default(),
@@ -6486,6 +6799,47 @@ impl DropSite {
             DropSite::Decode => "decode",
             DropSite::Dispatch => "dispatch",
         }
+    }
+}
+
+/// Minimum spacing between "dropped an unreadable update" WARN lines. Chosen to
+/// match [`crate::logging::throttle::LAG_LOG_WINDOW`]: the first drop still
+/// surfaces instantly, and a sustained mismatch keeps reporting itself roughly
+/// every 10s instead of once per streaming chunk.
+const DROPPED_UPDATE_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The WARN text for a dropped update. `where_` names the layer that dropped it
+/// (the two [`DropSite`] labels, plus `"idle"` — the idle loop has no turn in
+/// flight and therefore no probe).
+///
+/// `coalesced` is the throttle's occurrence count: suppressed hits are never
+/// lost, the tally rides on the next emitted line. Pure so the "and the
+/// suppressed count is reported" contract has a test that doesn't need a
+/// subscriber.
+fn dropped_update_log_line(where_: &str, error: &impl std::fmt::Display, coalesced: u64) -> String {
+    let head = format!("[ACP] Ignoring unreadable session update ({where_}): {error}");
+    if coalesced <= 1 {
+        head
+    } else {
+        format!(
+            "{head} (+{} more in the last {}s)",
+            coalesced - 1,
+            DROPPED_UPDATE_LOG_WINDOW.as_secs()
+        )
+    }
+}
+
+/// Emit the throttled "codeg dropped an update it could not read" WARN.
+fn log_dropped_update(
+    throttle: &mut LeadingEdgeThrottle,
+    where_: &str,
+    error: &impl std::fmt::Display,
+) {
+    if let Some(summary) = throttle.record(1) {
+        tracing::warn!(
+            "{}",
+            dropped_update_log_line(where_, error, summary.occurrences)
+        );
     }
 }
 
@@ -6795,6 +7149,21 @@ async fn run_conversation_loop<'a>(
     // prompt turn, journaled or not, so consecutive ordinals prove adjacent
     // turns to the reader.
     let mut cursor_turn_ord: u64 = 0;
+    // Session-scoped throttle for the three "we dropped an update we couldn't
+    // read" lines below (idle-loop decode, turn-loop decode, turn-loop dispatch).
+    //
+    // Each fires ONCE PER NOTIFICATION, i.e. per streaming chunk, at WARN — so
+    // they are live under the DEFAULT level, and one schema-drifted agent turns
+    // them into a firehose. That is exactly the shape that wrote 34GB in 8.8h in
+    // the 0.23.3 field report (issue #427). The information they carry is
+    // "codeg is dropping this agent's output", which is worth one line per
+    // window, not one per token: `TurnOutputProbe` keeps the exact counts and the
+    // first redacted error, and surfaces them in the empty-turn diagnosis.
+    //
+    // One throttle across all three sites on purpose — they are three layers of
+    // the same failure (the agent is speaking a protocol we can't read), so the
+    // operator wants one signal, not three interleaved ones.
+    let mut drop_log_throttle = LeadingEdgeThrottle::new(DROPPED_UPDATE_LOG_WINDOW);
     loop {
         // Wait for either a user command or a session update (e.g. available_commands_update)
         let cmd = loop {
@@ -6817,14 +7186,14 @@ async fn run_conversation_loop<'a>(
                                 )
                                 .await
                                 .otherwise(async |dispatch| {
-                                    maybe_emit_ext_notification(&st, &h, agent_type, dispatch).await;
+                                    maybe_emit_ext_notification(&st, &h, agent_type, dispatch, &mut cb_state).await;
                                     Ok(())
                                 })
                                 .await;
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            tracing::warn!("[ACP] Ignoring unrecognized session update in idle loop: {e}");
+                            log_dropped_update(&mut drop_log_throttle, "idle", &e);
                         }
                     }
                 }
@@ -6971,6 +7340,32 @@ async fn run_conversation_loop<'a>(
                 // (a card's identity is session-stable).
                 cb_state.open_subagents.clear();
                 cb_state.closed_subagents.clear();
+                // Grok spawn bookkeeping scoped to one turn: progress
+                // eligibility (a prior turn's background child must never tick
+                // into THIS turn's live message) and the un-paired pending
+                // queue (a spawn whose `subagent_spawned` never arrived —
+                // aborted turn — must not mispair with the next turn's first
+                // spawn). The subagent→call map, seen and settled sets persist:
+                // background children legitimately span turns.
+                cb_state.grok_progress_eligible.clear();
+                cb_state.grok_pending_spawn_ids.clear();
+                // Grok's context ring needs the active model's window paired
+                // with the cumulative token count riding each update. Resolve it
+                // once here (the model can't change mid-turn) so the per-update
+                // peek below never touches the state lock. A switch since the
+                // last turn changes the denominator, so re-key the live pair to
+                // the new window right away rather than leaving the previous
+                // model's ring on screen until this turn's first token count.
+                if agent_type == AgentType::Grok {
+                    let window = grok_current_model_context_window(state).await;
+                    cb_state.grok_turn_context_window = window;
+                    if let Some((used, size)) =
+                        grok_window_change_usage(window, cb_state.grok_last_usage)
+                    {
+                        cb_state.grok_last_usage = Some((used, size));
+                        emit_with_state(state, emitter, AcpEvent::UsageUpdate { used, size }).await;
+                    }
+                }
 
                 // Read updates until turn completes.
                 // We must also listen for commands (e.g. RespondPermission)
@@ -6987,7 +7382,11 @@ async fn run_conversation_loop<'a>(
                                     // that said nothing, and the two need
                                     // completely different fixes.
                                     probe.note_dropped(DropSite::Decode, &e);
-                                    tracing::warn!("[ACP] Ignoring unrecognized session update: {e}");
+                                    log_dropped_update(
+                                        &mut drop_log_throttle,
+                                        DropSite::Decode.label(),
+                                        &e,
+                                    );
                                     continue;
                                 }
                             };
@@ -7007,6 +7406,26 @@ async fn run_conversation_loop<'a>(
                                     // isn't misclassified as `"empty"` at turn end.
                                     if grok_ext_notification_is_turn_output(&dispatch, agent_type) {
                                         probe.saw_agent_output = true;
+                                    }
+                                    // Grok has no `usage_update` channel; its
+                                    // cumulative token count rides the outer
+                                    // `_meta` of ordinary updates. Peek it before
+                                    // the typed pipeline consumes the dispatch
+                                    // (which drops that `_meta`) so the composer
+                                    // ring tracks the turn as it streams.
+                                    if let Some((used, size)) = grok_live_usage_step(
+                                        &dispatch,
+                                        agent_type,
+                                        cb_state.grok_turn_context_window,
+                                        cb_state.grok_last_usage,
+                                    ) {
+                                        cb_state.grok_last_usage = Some((used, size));
+                                        emit_with_state(
+                                            state,
+                                            emitter,
+                                            AcpEvent::UsageUpdate { used, size },
+                                        )
+                                        .await;
                                     }
                                     if let Err(e) = MatchDispatch::new(dispatch)
                                         .if_notification(
@@ -7034,7 +7453,7 @@ async fn run_conversation_loop<'a>(
                                         )
                                         .await
                                         .otherwise(async |dispatch| {
-                                            maybe_emit_ext_notification(&st, &h, agent_type, dispatch).await;
+                                            maybe_emit_ext_notification(&st, &h, agent_type, dispatch, &mut cb_state).await;
                                             Ok(())
                                         })
                                         .await
@@ -7045,7 +7464,11 @@ async fn run_conversation_loop<'a>(
                                         // only be a typed-deserialization
                                         // failure — i.e. ACP schema drift.
                                         probe.note_dropped(DropSite::Dispatch, &e);
-                                        tracing::warn!("[ACP] Ignoring dispatch parse error: {e}");
+                                        log_dropped_update(
+                                            &mut drop_log_throttle,
+                                            DropSite::Dispatch.label(),
+                                            &e,
+                                        );
                                     }
                                 }
                                 SessionMessage::StopReason(reason) => {
@@ -8628,6 +9051,151 @@ struct CodeBuddyLiveState {
     /// dropped so the card doesn't double-render; tracked by id because a later
     /// status-only update may drop the `x.ai/tool` meta that first identified it.
     grok_ask_tool_ids: HashSet<String>,
+    /// Grok `spawn_subagent` tool_call ids ever announced on this connection
+    /// (dedupe for the pending queue + status tracking on meta-less updates).
+    grok_spawn_seen: HashSet<String>,
+    /// Announced spawn calls not yet paired with a `subagent_spawned`
+    /// notification. Grok's ext notifications carry a `subagent_id` but no
+    /// `tool_call_id`, so pairing is by matching `(description, subagent_type)`
+    /// captured from the launch `rawInput` against the notification's own
+    /// fields, first match in stream order — FIFO in the common in-order case
+    /// (mirroring the history parser's pairing), while a DELAYED prior-turn
+    /// `subagent_spawned` fails the match against a new turn's differently-
+    /// described entry instead of stealing its slot. A spawn that FAILS before
+    /// pairing is removed so later pairs can't shift; the queue is cleared at
+    /// every turn start (staleness bound).
+    grok_pending_spawn_ids: VecDeque<GrokPendingSpawn>,
+    /// subagent_id → its launching spawn tool_call id, from `subagent_spawned`.
+    /// Routes `subagent_progress` ticks (live meta on the Agent card) and the
+    /// `subagent_finished` settle; the entry is dropped at finish.
+    grok_subagent_to_call: HashMap<String, String>,
+    /// spawn tool_call id → the child's OWN session id (`child_session_id`, or
+    /// the subagent id it always equals in practice). Grok runs each sub-agent
+    /// as a standalone session that writes its transcript to disk while it
+    /// works, so this is what lets the live Agent card offer "open the child's
+    /// session" — the only way to watch a blocking child, whose launch call
+    /// carries no output until it finishes. Kept in state (not just emitted
+    /// once) because `upsert_tool_call` REPLACES a block's meta: every later
+    /// progress tick must re-send it or the id would be dropped. Entry dropped
+    /// at finish, alongside `grok_subagent_to_call`.
+    grok_call_child_session: HashMap<String, String>,
+    /// Spawn calls that reached a terminal wire status. A `subagent_finished`
+    /// for one of these is a BACKGROUND child settling after its launch ack —
+    /// the case whose result would otherwise never reach the card live; a
+    /// blocking spawn's own completion frame carries the output instead.
+    grok_settled_spawn_ids: HashSet<String>,
+    /// Spawn calls announced in the CURRENT turn — the only ones whose
+    /// `subagent_progress` ticks may emit a live `ToolCallUpdate`. Cleared at
+    /// every turn start (with the pending queue): a tick for a PRIOR turn's
+    /// background child would otherwise pass the Prompting gate during a later
+    /// turn and get appended into that turn's live message as a ghost card
+    /// (its real card lives in the promoted history). The settle path
+    /// (`subagent_finished` → BackgroundActivity) is unaffected — it targets
+    /// promoted turns by design.
+    grok_progress_eligible: HashSet<String>,
+    /// Context window of the model this Grok turn runs on, resolved ONCE at turn
+    /// start (`grok_current_model_context_window`) so the per-update usage peek
+    /// never takes the state lock on the streaming hot path. `None` for non-Grok
+    /// agents, and for a Grok model whose spec carried no `totalContextTokens`
+    /// — the ring then keeps falling back to the parsed per-turn stats.
+    grok_turn_context_window: Option<u64>,
+    /// Last `(used, size)` emitted as a live `UsageUpdate` on this connection.
+    /// Grok repeats its cumulative `totalTokens` on nearly every update (169 of
+    /// 189 in a real capture), so re-emitting each one would put a broadcast on
+    /// a per-chunk hot path for a number that changes a handful of times a turn.
+    /// The WINDOW is part of the key so a between-turn model switch re-emits
+    /// even when the token count hasn't moved yet — otherwise the ring would
+    /// keep dividing by the previous model's window.
+    grok_last_usage: Option<(u64, u64)>,
+}
+
+/// One announced-but-unpaired Grok `spawn_subagent` call. `description` /
+/// `subagent_type` come from the launch `rawInput` and validate the pairing
+/// against the `subagent_spawned` notification's own fields (`None` = wildcard,
+/// tolerant of older wire shapes).
+#[derive(Debug)]
+struct GrokPendingSpawn {
+    call_id: String,
+    description: Option<String>,
+    subagent_type: Option<String>,
+}
+
+/// True when a Grok tool call's ACP `_meta` identifies it as the native
+/// `spawn_subagent` launcher (`_meta["x.ai/tool"].name`). Present on the very
+/// first frame (verified against real captures), unlike `subagent_type` which
+/// rides `rawInput`. Gated on Grok so the namespaced key can't affect others.
+fn grok_meta_marks_spawn_subagent(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    matches!(agent_type, AgentType::Grok)
+        && meta
+            .and_then(|m| m.get("x.ai/tool"))
+            .and_then(|t| t.get("name"))
+            .and_then(|n| n.as_str())
+            == Some("spawn_subagent")
+}
+
+/// Track a Grok `spawn_subagent` call's lifecycle for the subagent-notification
+/// pairing (see the `grok_*` fields on [`CodeBuddyLiveState`]). `is_spawn` is
+/// the precomputed meta marker; a status-only update that lost the meta still
+/// tracks via the seen-set. `raw_input` (the launch input, when this frame
+/// carries it) supplies the `(description, subagent_type)` the pairing
+/// validates against. No-op for other agents/tools by construction
+/// (`is_spawn` false + id never seen).
+fn track_grok_spawn_call(
+    cb_state: &mut CodeBuddyLiveState,
+    is_spawn: bool,
+    status: Option<&str>,
+    tool_call_id: &str,
+    raw_input: &Option<String>,
+) {
+    if is_spawn && cb_state.grok_spawn_seen.insert(tool_call_id.to_string()) {
+        let (description, subagent_type) = raw_input
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .map(|input| {
+                let field = |key: &str| {
+                    input
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                };
+                (field("description"), field("subagent_type"))
+            })
+            .unwrap_or((None, None));
+        cb_state.grok_pending_spawn_ids.push_back(GrokPendingSpawn {
+            call_id: tool_call_id.to_string(),
+            description,
+            subagent_type,
+        });
+        // Announced in the current turn → its progress ticks may render live.
+        cb_state
+            .grok_progress_eligible
+            .insert(tool_call_id.to_string());
+    }
+    if !cb_state.grok_spawn_seen.contains(tool_call_id) {
+        return;
+    }
+    match status {
+        Some("completed") => {
+            cb_state
+                .grok_settled_spawn_ids
+                .insert(tool_call_id.to_string());
+        }
+        Some("failed") => {
+            cb_state
+                .grok_settled_spawn_ids
+                .insert(tool_call_id.to_string());
+            // Never spawned a child (depth-limit / config error): drop it from
+            // the pairing queue so the next spawn doesn't inherit its slot.
+            cb_state
+                .grok_pending_spawn_ids
+                .retain(|pending| pending.call_id != tool_call_id);
+        }
+        _ => {}
+    }
 }
 
 /// True when a tool call's ACP `_meta` marks it as grok's native
@@ -8912,6 +9480,296 @@ fn map_grok_ext_notification(
     }
 }
 
+/// Map grok's sub-agent lifecycle notifications (`_x.ai/session/update` with
+/// `sessionUpdate: subagent_spawned | subagent_progress | subagent_finished`)
+/// onto live events for the launching `spawn_subagent` Agent card. STATEFUL —
+/// kept out of the pure [`map_grok_ext_notification`] (which doubles as the
+/// turn-output predicate and must stay re-invocable).
+///
+/// Grok never forwards a child's chunks or tool calls over ACP (unlike
+/// claude-agent-acp ≥0.63) — these three notifications are the ONLY live
+/// signal a subagent emits, so:
+///
+/// * `subagent_spawned` pairs `subagent_id` → the oldest unpaired spawn call
+///   (FIFO; the notifications carry no `tool_call_id` — same pairing as the
+///   history parser).
+/// * `subagent_progress` becomes a meta-only `ToolCallUpdate`
+///   (`meta.grokSubagentProgress`) so the running Agent card can show a live
+///   "N tools · M turns · ctx%" line. Replacing the block's meta is safe for
+///   this call: its classification rides `rawInput.subagent_type`, not meta.
+///   GATED on `turn_active`: after `TurnComplete` the frontend diverts wire
+///   tool updates out of the transcript anyway, while the backend
+///   `SessionState` apply arm would lazily RECREATE `live_message` for the
+///   update — resurrecting a ghost pending card into every later
+///   snapshot/attach. An out-of-turn tick is therefore dropped whole (the
+///   `subagent_finished` settle below is the out-of-turn-safe channel).
+/// * `subagent_finished` for a spawn whose CALL already settled (= a
+///   BACKGROUND child; the launch ack was its final wire output) settles via
+///   the same `BackgroundActivity` channel Claude's async sub-agents use: the
+///   frontend flips the launch card's `[[codeg-background-task]]` marker
+///   in-memory (works out-of-turn too), raises the OS notification, and
+///   mirrors `outstanding` for the idle-sweep exemption. A BLOCKING spawn is
+///   skipped — its own completion frame delivers the output.
+fn map_grok_subagent_notification(
+    notification: &UntypedMessage,
+    agent_type: AgentType,
+    turn_active: bool,
+    cb_state: &mut CodeBuddyLiveState,
+) -> Vec<AcpEvent> {
+    map_grok_subagent_notification_inner(notification, agent_type, turn_active, cb_state)
+        .unwrap_or_default()
+}
+
+/// The body of [`map_grok_subagent_notification`], written with `?` on the many
+/// "this notification isn't one of ours / is malformed" checks. A spawn can
+/// produce TWO events (the card's session stamp plus the background-activity
+/// report), hence the list.
+fn map_grok_subagent_notification_inner(
+    notification: &UntypedMessage,
+    agent_type: AgentType,
+    turn_active: bool,
+    cb_state: &mut CodeBuddyLiveState,
+) -> Option<Vec<AcpEvent>> {
+    if !matches!(agent_type, AgentType::Grok) {
+        return None;
+    }
+    if !GROK_EXT_UPDATE_METHODS.contains(&notification.method()) {
+        return None;
+    }
+    let params = notification.params();
+    let update = params.get("update")?;
+    let subagent_id = update.get("subagent_id").and_then(|v| v.as_str())?;
+    // `outstanding` = paired subagents still running whose launch call already
+    // settled — i.e. background children codeg would otherwise sweep as idle.
+    let outstanding = |cb_state: &CodeBuddyLiveState| {
+        cb_state
+            .grok_subagent_to_call
+            .values()
+            .filter(|call_id| cb_state.grok_settled_spawn_ids.contains(*call_id))
+            .count() as u32
+    };
+    match update.get("sessionUpdate").and_then(|v| v.as_str())? {
+        "subagent_spawned" => {
+            // First pending entry whose captured launch `(description,
+            // subagent_type)` is consistent with the notification's own
+            // fields. ASYMMETRIC rule: a value captured from the launch input
+            // must be matched by an EQUAL value on the notification — a
+            // notification that omits the field does NOT wildcard past it
+            // (that shape would let a delayed, description-less prior-turn
+            // notification steal a described new-turn entry). Only a pending
+            // side that captured nothing (unparseable/absent input field —
+            // then there is nothing to validate against) is a wildcard. Real
+            // captures always carry both fields on both sides, so in-order
+            // streams match at the head (plain FIFO); the fail direction for
+            // an unmatched notification is pairing nothing (live progress/
+            // settle degrade gracefully; history re-parse is unaffected).
+            let event_field = |key: &str| {
+                update
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            };
+            let matches = |pending: &Option<String>, event: Option<&str>| match (pending, event) {
+                (Some(p), Some(e)) => p == e,
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            let idx = cb_state.grok_pending_spawn_ids.iter().position(|p| {
+                matches(&p.description, event_field("description"))
+                    && matches(&p.subagent_type, event_field("subagent_type"))
+            })?;
+            let call_id = cb_state.grok_pending_spawn_ids.remove(idx)?.call_id;
+            cb_state
+                .grok_subagent_to_call
+                .insert(subagent_id.to_string(), call_id.clone());
+            // The child's own session id — `child_session_id` when the wire
+            // carries it, else the subagent id (they are the same value in
+            // every capture). Remembered so later progress ticks can re-send it
+            // (`upsert_tool_call` replaces meta wholesale, so every tick must
+            // carry it again).
+            //
+            // Gated by the same `is_safe_subagent_id` the history parser applies
+            // to this field: the value is handed to the frontend, which asks
+            // `get_conversation` to resolve a session directory by it, so both
+            // paths have to reject a traversal-shaped id — not just the one that
+            // reads from disk itself. Failing the gate simply leaves the card
+            // without a session to open.
+            let child_session_id = update
+                .get("child_session_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(subagent_id);
+            let child_session_id = crate::parsers::is_safe_subagent_id(child_session_id)
+                .then(|| child_session_id.to_string());
+            if let Some(child) = &child_session_id {
+                cb_state
+                    .grok_call_child_session
+                    .insert(call_id.clone(), child.clone());
+            }
+
+            let mut events = Vec::new();
+            // Stamp the child's session onto the launching Agent card so it can
+            // offer to open the child's transcript WHILE it runs — for a
+            // blocking spawn that is the only live window into the child, since
+            // its call produces no output until the very end. Gated exactly like
+            // a progress tick: out of turn, the `SessionState` apply arm would
+            // lazily recreate `live_message` and strand a ghost card in every
+            // later snapshot.
+            if turn_active && cb_state.grok_progress_eligible.contains(&call_id) {
+                events.push(AcpEvent::ToolCallUpdate {
+                    tool_call_id: call_id.clone(),
+                    title: None,
+                    status: None,
+                    content: None,
+                    raw_input: None,
+                    raw_output: None,
+                    raw_output_append: None,
+                    locations: None,
+                    meta: Some(grok_subagent_meta(
+                        subagent_id,
+                        child_session_id.as_deref(),
+                        None,
+                    )),
+                    images: None,
+                });
+            }
+            // A background launch's call settles before/around the pairing;
+            // surface the outstanding count so the connection is exempt from
+            // idle sweeps while the child works. Nothing to add for a
+            // blocking spawn (its turn is open — nothing can sweep it).
+            if cb_state.grok_settled_spawn_ids.contains(&call_id) {
+                let session_id = params.get("sessionId").and_then(|v| v.as_str())?;
+                events.push(AcpEvent::BackgroundActivity {
+                    session_id: session_id.to_string(),
+                    turns: Vec::new(),
+                    outstanding: outstanding(cb_state),
+                    outstanding_agents: outstanding(cb_state),
+                    outstanding_shells: 0,
+                    settled: Vec::new(),
+                    watermark: 0,
+                });
+            }
+            Some(events)
+        }
+        "subagent_progress" => {
+            if !turn_active {
+                return None;
+            }
+            let call_id = cb_state.grok_subagent_to_call.get(subagent_id)?.clone();
+            // Launch-turn-specific gate on top of Prompting: a tick for a
+            // PRIOR turn's background child must not be appended into the
+            // CURRENT turn's live message (see `grok_progress_eligible`).
+            if !cb_state.grok_progress_eligible.contains(&call_id) {
+                return None;
+            }
+            let mut progress = serde_json::Map::new();
+            for (wire, out) in [
+                ("duration_ms", "durationMs"),
+                ("turn_count", "turnCount"),
+                ("tool_call_count", "toolCallCount"),
+                ("context_usage_pct", "contextUsagePct"),
+                ("error_count", "errorCount"),
+            ] {
+                if let Some(v) = update.get(wire).filter(|v| v.is_number()) {
+                    progress.insert(out.to_string(), v.clone());
+                }
+            }
+            if progress.is_empty() {
+                return None;
+            }
+            // Carry the session stamp along: `upsert_tool_call` replaces the
+            // block's meta wholesale, so a progress-only payload would drop the
+            // "open the child's session" affordance mid-run.
+            let child_session_id = cb_state.grok_call_child_session.get(&call_id).cloned();
+            Some(vec![AcpEvent::ToolCallUpdate {
+                tool_call_id: call_id,
+                title: None,
+                status: None,
+                content: None,
+                raw_input: None,
+                raw_output: None,
+                raw_output_append: None,
+                locations: None,
+                meta: Some(grok_subagent_meta(
+                    subagent_id,
+                    child_session_id.as_deref(),
+                    Some(serde_json::Value::Object(progress)),
+                )),
+                images: None,
+            }])
+        }
+        "subagent_finished" => {
+            let call_id = cb_state.grok_subagent_to_call.remove(subagent_id)?;
+            cb_state.grok_call_child_session.remove(&call_id);
+            if !cb_state.grok_settled_spawn_ids.contains(&call_id) {
+                // Blocking spawn: the child's output arrives on the call's own
+                // completion frame; the settle channel would double-render it.
+                return None;
+            }
+            let session_id = params.get("sessionId").and_then(|v| v.as_str())?;
+            let status = update
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("completed");
+            let result = update
+                .get("output")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    crate::parsers::truncate_str(
+                        s,
+                        crate::parsers::claude::BACKGROUND_RESULT_MAX_CHARS,
+                    )
+                });
+            Some(vec![AcpEvent::BackgroundActivity {
+                session_id: session_id.to_string(),
+                turns: Vec::new(),
+                outstanding: outstanding(cb_state),
+                outstanding_agents: outstanding(cb_state),
+                outstanding_shells: 0,
+                settled: vec![crate::acp::types::BackgroundSettledInfo {
+                    task_id: subagent_id.to_string(),
+                    status: status.to_string(),
+                    summary: None,
+                    tool_use_id: Some(call_id),
+                    result,
+                    // The settle itself flips the card in-memory; no later
+                    // overlay content follows, so the syncing hint would dangle.
+                    wire_visible: true,
+                }],
+                watermark: 0,
+            }])
+        }
+        _ => None,
+    }
+}
+
+/// The `meta` payload a Grok sub-agent's launching Agent card carries:
+/// `grokSubagentSession` (ids — lets the card open the child's transcript) and,
+/// while it runs, `grokSubagentProgress` (the live "N tools · M turns · ctx%"
+/// line). Built in one place because `upsert_tool_call` REPLACES a block's
+/// meta: every emission has to carry the whole picture, not just its own half.
+fn grok_subagent_meta(
+    subagent_id: &str,
+    child_session_id: Option<&str>,
+    progress: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut session = serde_json::Map::new();
+    session.insert("subagentId".to_string(), subagent_id.into());
+    if let Some(child) = child_session_id {
+        session.insert("childSessionId".to_string(), child.into());
+    }
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "grokSubagentSession".to_string(),
+        serde_json::Value::Object(session),
+    );
+    if let Some(progress) = progress {
+        meta.insert("grokSubagentProgress".to_string(), progress);
+    }
+    serde_json::Value::Object(meta)
+}
+
 /// Whether a dispatch is a grok ext notification that
 /// `map_grok_ext_notification` renders as visible turn output (a compaction card
 /// or a compaction error). The active-turn loop consults this BEFORE the typed
@@ -8956,6 +9814,7 @@ async fn maybe_emit_ext_notification(
     emitter: &EventEmitter,
     agent_type: AgentType,
     dispatch: Dispatch,
+    cb_state: &mut CodeBuddyLiveState,
 ) {
     let notification = match dispatch {
         Dispatch::Notification(notification) => notification,
@@ -8979,7 +9838,22 @@ async fn maybe_emit_ext_notification(
         }
     };
 
-    if let Some(event) = map_claude_sdk_ext_notification(&notification)
+    // The CURRENT connection status decides whether a grok `subagent_progress`
+    // tick may touch the live tool call — the same Prompting predicate the
+    // out-of-turn chunk defenses use (#870). Read here (not at the call sites)
+    // so a stray notification the active-turn loop drains AFTER the status
+    // already flipped back is still classified as out-of-turn.
+    let turn_active = state.read().await.status == ConnectionStatus::Prompting;
+    // A grok `subagent_spawned` can yield TWO events (the card's session stamp
+    // and the background-activity report), so this mapper hands back a list; an
+    // empty one means "not mine", and the chain continues as before.
+    let grok_subagent_events =
+        map_grok_subagent_notification(&notification, agent_type, turn_active, cb_state);
+    if !grok_subagent_events.is_empty() {
+        for event in grok_subagent_events {
+            emit_with_state(state, emitter, event).await;
+        }
+    } else if let Some(event) = map_claude_sdk_ext_notification(&notification)
         .or_else(|| map_grok_ext_notification(&notification, agent_type))
     {
         emit_with_state(state, emitter, event).await;
@@ -9179,9 +10053,19 @@ async fn emit_conversation_update(
             let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tc.meta.as_ref());
             let meta_marks_background =
                 codebuddy_meta_marks_background(agent_type, tc.meta.as_ref());
+            let grok_spawn = grok_meta_marks_spawn_subagent(agent_type, tc.meta.as_ref());
             let meta = tc.meta.map(serde_json::Value::Object);
             let status = format!("{:?}", tc.status).to_lowercase();
             raw_output_cache.remove_if_final(&tool_call_id, Some(status.as_str()));
+            // Track Grok's spawn_subagent lifecycle for the subagent-notification
+            // pairing (progress meta + finished settle). No-op for other agents.
+            track_grok_spawn_call(
+                cb_state,
+                grok_spawn,
+                Some(status.as_str()),
+                &tool_call_id,
+                &raw_input,
+            );
             // Avoid logging titles/payloads below — they can be model-generated
             // user task descriptions (PII-adjacent) and would create noise in
             // server-mode log sinks. The opaque tool_call_id is enough to
@@ -9336,9 +10220,55 @@ async fn emit_conversation_update(
             let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tcu.meta.as_ref());
             let meta_marks_background =
                 codebuddy_meta_marks_background(agent_type, tcu.meta.as_ref());
+            let grok_spawn = grok_meta_marks_spawn_subagent(agent_type, tcu.meta.as_ref());
             let meta = tcu.meta.clone().map(serde_json::Value::Object);
             let status = tcu.fields.status.map(|s| format!("{:?}", s).to_lowercase());
             raw_output_cache.remove_if_final(&tool_call_id, status.as_deref());
+            // Symmetric with the ToolCall arm: an update may carry the terminal
+            // status (and, on grok, usually re-carries the `x.ai/tool` meta).
+            track_grok_spawn_call(
+                cb_state,
+                grok_spawn,
+                status.as_deref(),
+                &tool_call_id,
+                &raw_input,
+            );
+            // Ordering variant: `subagent_spawned` can pair BEFORE the launch
+            // call's terminal frame arrives. The pairing site skipped its
+            // outstanding emission then (call not yet settled), so surface the
+            // count here — a completed launch with a paired, still-running
+            // child is a background subagent codeg must not idle-sweep. The
+            // common ordering (completed first) emits from the pairing site,
+            // and `subagent_finished` always re-emits the corrected count.
+            if status.as_deref() == Some("completed")
+                && cb_state
+                    .grok_subagent_to_call
+                    .values()
+                    .any(|call| call == &tool_call_id)
+            {
+                let session_id = state.read().await.external_id.clone();
+                if let Some(session_id) = session_id {
+                    let outstanding = cb_state
+                        .grok_subagent_to_call
+                        .values()
+                        .filter(|call| cb_state.grok_settled_spawn_ids.contains(*call))
+                        .count() as u32;
+                    emit_with_state(
+                        state,
+                        emitter,
+                        AcpEvent::BackgroundActivity {
+                            session_id,
+                            turns: Vec::new(),
+                            outstanding,
+                            outstanding_agents: outstanding,
+                            outstanding_shells: 0,
+                            settled: Vec::new(),
+                            watermark: 0,
+                        },
+                    )
+                    .await;
+                }
+            }
             // Re-assert any authoritative title rewrite (see fn doc): an update
             // that carries the subagent/deferred marker classifies (and records)
             // the card, and — the key fix — a later status-only update that LOST
@@ -9535,8 +10465,21 @@ async fn emit_conversation_update(
             }
         }
         other => {
-            // Log unhandled update types for debugging
-            tracing::info!("[ACP] Unhandled SessionUpdate: {:?}", other);
+            // Unhandled update types, for debugging. DEBUG, not INFO: this arm
+            // runs once per `session/update` notification, and `{other:?}` is the
+            // whole payload — for a chunk-shaped variant that is the agent's full
+            // text. At INFO a single agent emitting an update kind codeg doesn't
+            // map would write the entire conversation to disk several times over
+            // under the default level (issue #427). Nothing acts on this line;
+            // it exists to be read while adding support for a new variant, which
+            // is exactly when `debug` is on.
+            //
+            // The default-level signal for "a variant we don't map swallowed the
+            // reply" is not this line but the empty-turn diagnosis: such an
+            // update decodes fine, so `TurnOutputProbe::note_update` files it as
+            // metadata and the turn reports `MetadataOnly`. Turn `debug` on from
+            // there to find out *which* variant.
+            tracing::debug!("[ACP] Unhandled SessionUpdate: {:?}", other);
         }
     }
 }
@@ -9544,7 +10487,19 @@ async fn emit_conversation_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sacp::schema::Diff;
+    use sacp::schema::{Diff, SessionConfigId};
+
+    /// Unwrap a select selector. The Grok synthesizers below only ever build
+    /// selects, so any other kind is a test failure rather than a branch to
+    /// handle — this keeps the assertions as terse as the irrefutable `let`
+    /// they replaced (which stopped compiling once `SessionConfigKindInfo`
+    /// gained its `Boolean` variant).
+    fn expect_select(kind: &SessionConfigKindInfo) -> &SessionConfigSelectInfo {
+        match kind {
+            SessionConfigKindInfo::Select(sel) => sel,
+            other => panic!("expected a select config option, got {other:?}"),
+        }
+    }
 
     /// Build a `runtime_env` from `(key, value)` pairs.
     fn env_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -10929,6 +11884,335 @@ mod tests {
         assert!(map_grok_ext_notification(&other, AgentType::Grok).is_none());
     }
 
+    #[test]
+    fn track_grok_spawn_call_pairs_dedupes_and_drops_failed() {
+        let mut cb = CodeBuddyLiveState::default();
+        // Announce (pending) — re-announce on a later frame must not re-queue.
+        track_grok_spawn_call(&mut cb, true, Some("pending"), "call-1", &None);
+        track_grok_spawn_call(&mut cb, true, None, "call-1", &None);
+        assert_eq!(cb.grok_pending_spawn_ids.len(), 1);
+        // A status-only update WITHOUT the meta marker still tracks a seen id.
+        track_grok_spawn_call(&mut cb, false, Some("completed"), "call-1", &None);
+        assert!(cb.grok_settled_spawn_ids.contains("call-1"));
+        // A failed spawn leaves the pairing queue so later pairs can't shift.
+        track_grok_spawn_call(&mut cb, true, Some("pending"), "call-2", &None);
+        track_grok_spawn_call(&mut cb, false, Some("failed"), "call-2", &None);
+        assert!(!cb
+            .grok_pending_spawn_ids
+            .iter()
+            .any(|p| p.call_id == "call-2"));
+        // A never-seen id (another tool) is entirely ignored.
+        track_grok_spawn_call(&mut cb, false, Some("completed"), "call-x", &None);
+        assert!(!cb.grok_settled_spawn_ids.contains("call-x"));
+    }
+
+    /// A DELAYED prior-turn `subagent_spawned` (its launch turn ended, its
+    /// pending entry was cleared) must NOT steal the pairing slot a NEW turn's
+    /// spawn queued: the `(description, subagent_type)` captured from the
+    /// launch input has to match the notification's own fields.
+    #[test]
+    fn delayed_subagent_spawned_does_not_steal_a_new_turns_slot() {
+        let mut cb = CodeBuddyLiveState::default();
+        let input_b = Some(
+            serde_json::json!({
+                "description": "B task", "prompt": "PB", "subagent_type": "plan"
+            })
+            .to_string(),
+        );
+        track_grok_spawn_call(&mut cb, true, Some("pending"), "call-b", &input_b);
+
+        // The prior turn's child announces late, with ITS OWN description.
+        let stale = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sub-a",
+            "description": "A task",
+            "subagent_type": "explore"
+        }));
+        assert!(
+            map_grok_subagent_notification(&stale, AgentType::Grok, true, &mut cb).is_empty(),
+            "a mismatched spawned must pair nothing"
+        );
+        assert_eq!(cb.grok_pending_spawn_ids.len(), 1, "B keeps its slot");
+
+        // A delayed notification that OMITS the description (same type or
+        // none at all) must not wildcard past B's captured description either.
+        let stale_bare = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sub-a2",
+            "subagent_type": "plan"
+        }));
+        assert!(
+            map_grok_subagent_notification(&stale_bare, AgentType::Grok, true, &mut cb).is_empty(),
+            "an event missing a captured field must not match"
+        );
+        assert_eq!(cb.grok_pending_spawn_ids.len(), 1, "B still keeps its slot");
+
+        // B's own notification pairs it.
+        let real = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sub-b",
+            "description": "B task",
+            "subagent_type": "plan"
+        }));
+        map_grok_subagent_notification(&real, AgentType::Grok, true, &mut cb);
+        assert_eq!(
+            cb.grok_subagent_to_call.get("sub-b").map(String::as_str),
+            Some("call-b")
+        );
+        assert!(cb.grok_pending_spawn_ids.is_empty());
+    }
+
+    fn grok_subagent_notif(update: serde_json::Value) -> UntypedMessage {
+        UntypedMessage::new(
+            "_x.ai/session/update",
+            serde_json::json!({ "sessionId": "sess-1", "update": update }),
+        )
+        .unwrap()
+    }
+
+    /// Full background-subagent lifecycle over the stateful mapper: spawned
+    /// pairs FIFO, progress lands as a meta-only ToolCallUpdate on the paired
+    /// call, and finished settles over the BackgroundActivity channel with the
+    /// launch call's id (so the frontend flips its marker card in-memory).
+    #[test]
+    fn map_grok_subagent_notification_background_lifecycle() {
+        let mut cb = CodeBuddyLiveState::default();
+        track_grok_spawn_call(&mut cb, true, Some("pending"), "call-1", &None);
+        // Background: the launch call settles before the pairing arrives.
+        track_grok_spawn_call(&mut cb, true, Some("completed"), "call-1", &None);
+
+        let spawned = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sub-1",
+            "child_session_id": "sub-1",
+            "subagent_type": "explore"
+        }));
+        // Pairing consumed the pending slot; the already-settled call means a
+        // background child is now outstanding (idle-sweep exemption). Passed
+        // with turn_active=false: the BackgroundActivity channel is
+        // out-of-turn-safe by design and must not be gated.
+        match map_grok_subagent_notification(&spawned, AgentType::Grok, false, &mut cb).as_slice() {
+            // Out of turn there is no session stamp (it would resurrect a ghost
+            // live_message) — only the background report.
+            [AcpEvent::BackgroundActivity {
+                outstanding,
+                settled,
+                ..
+            }] => {
+                assert_eq!(*outstanding, 1);
+                assert!(settled.is_empty());
+            }
+            other => panic!("expected one BackgroundActivity, got {other:?}"),
+        }
+        assert!(cb.grok_pending_spawn_ids.is_empty());
+        // The child's session id is remembered for the card, whether or not it
+        // was emitted this time.
+        assert_eq!(
+            cb.grok_call_child_session.get("call-1").map(String::as_str),
+            Some("sub-1")
+        );
+
+        let progress = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_progress",
+            "subagent_id": "sub-1",
+            "duration_ms": 4200,
+            "turn_count": 1,
+            "tool_call_count": 7,
+            "context_usage_pct": 12.5,
+            "tools_used": ["read_file"]
+        }));
+        // Out-of-turn tick: dropped whole. A post-TurnComplete ToolCallUpdate
+        // would resurrect a ghost `live_message` in the SessionState snapshot
+        // (the apply arm lazily creates it), while the frontend diverts it out
+        // of the transcript anyway.
+        assert!(
+            map_grok_subagent_notification(&progress, AgentType::Grok, false, &mut cb).is_empty(),
+            "progress must not emit outside an active turn"
+        );
+        // Cross-turn tick: the launch turn ended and a LATER turn is Prompting
+        // (turn_active=true) — the per-turn eligibility clear must still drop
+        // it, or the old tool id would be appended into the NEW turn's live
+        // message as a ghost card.
+        let eligibility_backup = cb.grok_progress_eligible.clone();
+        cb.grok_progress_eligible.clear();
+        assert!(
+            map_grok_subagent_notification(&progress, AgentType::Grok, true, &mut cb).is_empty(),
+            "a prior turn's background child must not tick into a later turn"
+        );
+        cb.grok_progress_eligible = eligibility_backup;
+        match map_grok_subagent_notification(&progress, AgentType::Grok, true, &mut cb).as_slice() {
+            [AcpEvent::ToolCallUpdate {
+                tool_call_id,
+                status,
+                meta,
+                ..
+            }] => {
+                assert_eq!(tool_call_id, "call-1");
+                assert_eq!(*status, None, "progress must not touch the status");
+                let progress = meta
+                    .as_ref()
+                    .and_then(|m| m.get("grokSubagentProgress"))
+                    .expect("progress meta");
+                assert_eq!(
+                    progress.get("toolCallCount").and_then(|v| v.as_u64()),
+                    Some(7)
+                );
+                assert_eq!(
+                    progress.get("durationMs").and_then(|v| v.as_u64()),
+                    Some(4200)
+                );
+                assert_eq!(
+                    progress.get("contextUsagePct").and_then(|v| v.as_f64()),
+                    Some(12.5)
+                );
+                // Meta is REPLACED on apply, so every tick must re-send the
+                // session ids or the "open child session" affordance vanishes
+                // the moment the first progress tick lands.
+                assert_eq!(
+                    meta.as_ref()
+                        .and_then(|m| m.get("grokSubagentSession"))
+                        .and_then(|s| s.get("childSessionId"))
+                        .and_then(|v| v.as_str()),
+                    Some("sub-1")
+                );
+            }
+            other => panic!("expected one ToolCallUpdate, got {other:?}"),
+        }
+
+        let finished = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_finished",
+            "subagent_id": "sub-1",
+            "child_session_id": "sub-1",
+            "status": "completed",
+            "tool_calls": 7,
+            "duration_ms": 63775,
+            "output": "## Findings"
+        }));
+        // The settle is likewise out-of-turn-safe (a background child usually
+        // finishes after its launch turn ended).
+        match map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb).as_slice()
+        {
+            [AcpEvent::BackgroundActivity {
+                session_id,
+                outstanding,
+                settled,
+                ..
+            }] => {
+                assert_eq!(session_id, "sess-1");
+                assert_eq!(*outstanding, 0, "the settled child leaves the count");
+                assert_eq!(settled.len(), 1);
+                let s = &settled[0];
+                assert_eq!(s.task_id, "sub-1");
+                assert_eq!(s.status, "completed");
+                assert_eq!(s.tool_use_id.as_deref(), Some("call-1"));
+                assert_eq!(s.result.as_deref(), Some("## Findings"));
+                assert!(
+                    s.wire_visible,
+                    "settle flips the card in-memory — no syncing hint"
+                );
+            }
+            other => panic!("expected BackgroundActivity, got {other:?}"),
+        }
+        // Lifecycle over: a duplicate finished no longer routes anywhere.
+        assert!(
+            map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb).is_empty()
+        );
+    }
+
+    /// A BLOCKING spawn (call not yet settled when the child finishes) must NOT
+    /// emit a settle — its own completion frame carries the output; a duplicate
+    /// marker would double-render it. Non-grok agents never route at all.
+    #[test]
+    fn map_grok_subagent_notification_skips_blocking_and_other_agents() {
+        let mut cb = CodeBuddyLiveState::default();
+        track_grok_spawn_call(&mut cb, true, Some("pending"), "call-1", &None);
+        let spawned = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sub-1"
+        }));
+        // Blocking: the call is still in_progress at pairing time, so there is
+        // no background report — only the session stamp, which is exactly what
+        // lets the user open a blocking child's transcript while it runs (its
+        // launch call stays output-less until the very end).
+        match map_grok_subagent_notification(&spawned, AgentType::Grok, true, &mut cb).as_slice() {
+            [AcpEvent::ToolCallUpdate {
+                tool_call_id, meta, ..
+            }] => {
+                assert_eq!(tool_call_id, "call-1");
+                // No `child_session_id` on this wire shape → fall back to the
+                // subagent id, which is the same value in every capture.
+                assert_eq!(
+                    meta.as_ref()
+                        .and_then(|m| m.get("grokSubagentSession"))
+                        .and_then(|s| s.get("childSessionId"))
+                        .and_then(|v| v.as_str()),
+                    Some("sub-1")
+                );
+            }
+            other => panic!("expected one ToolCallUpdate, got {other:?}"),
+        }
+        let finished = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_finished",
+            "subagent_id": "sub-1",
+            "status": "completed",
+            "output": "done"
+        }));
+        assert!(
+            map_grok_subagent_notification(&finished, AgentType::Grok, true, &mut cb).is_empty(),
+            "blocking spawn settles via its own completion frame"
+        );
+
+        // Gating: same payload from a non-grok agent is untouched (and state
+        // untouched — the pending queue keeps its entry).
+        let mut cb2 = CodeBuddyLiveState::default();
+        track_grok_spawn_call(&mut cb2, true, Some("pending"), "call-9", &None);
+        let spawned2 = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sub-9"
+        }));
+        assert!(
+            map_grok_subagent_notification(&spawned2, AgentType::Codex, true, &mut cb2).is_empty()
+        );
+        assert_eq!(cb2.grok_pending_spawn_ids.len(), 1);
+    }
+
+    /// A traversal-shaped `child_session_id` must not reach the card: the
+    /// frontend hands that value to `get_conversation`, which resolves a session
+    /// directory by it, so the live path applies the same `is_safe_subagent_id`
+    /// gate the history parser (`grok::subagent_stats`) does. The stamp still
+    /// carries the subagent id — the run is identified, there is just no session
+    /// offered to open.
+    #[test]
+    fn map_grok_subagent_notification_rejects_unsafe_child_session_id() {
+        let mut cb = CodeBuddyLiveState::default();
+        track_grok_spawn_call(&mut cb, true, Some("pending"), "call-1", &None);
+        let spawned = grok_subagent_notif(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sub-1",
+            "child_session_id": "../../../etc/passwd"
+        }));
+        match map_grok_subagent_notification(&spawned, AgentType::Grok, true, &mut cb).as_slice() {
+            [AcpEvent::ToolCallUpdate { meta, .. }] => {
+                let session = meta
+                    .as_ref()
+                    .and_then(|m| m.get("grokSubagentSession"))
+                    .expect("session meta");
+                assert_eq!(
+                    session.get("subagentId").and_then(|v| v.as_str()),
+                    Some("sub-1")
+                );
+                assert!(
+                    session.get("childSessionId").is_none(),
+                    "a traversal-shaped child id must not reach the viewer"
+                );
+            }
+            other => panic!("expected one ToolCallUpdate, got {other:?}"),
+        }
+        // Nothing memorized either — a later progress tick has nothing to
+        // re-send, so the rejection holds for the whole run.
+        assert!(cb.grok_call_child_session.is_empty());
+    }
+
     /// The turn-loop consults this to keep a compaction-only `/compact` turn
     /// from being reclassified as `"empty"` (which re-surfaces a spurious error).
     /// It must count exactly the compaction outcomes that emit a card/error.
@@ -10971,10 +12255,233 @@ mod tests {
         ));
     }
 
+    /// Grok's cumulative token count rides the OUTER `params._meta` of ordinary
+    /// updates — the only live context signal it offers, and one the typed
+    /// pipeline drops. The peek must read it there, hold its fire while the
+    /// number repeats, and stay silent without a window to divide by.
+    #[test]
+    fn grok_live_usage_step_reads_the_outer_meta_and_dedupes() {
+        let update = |meta: serde_json::Value| {
+            Dispatch::Notification(
+                UntypedMessage::new(
+                    "session/update",
+                    serde_json::json!({
+                        "sessionId": "s",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "hi"}
+                        },
+                        "_meta": meta,
+                    }),
+                )
+                .unwrap(),
+            )
+        };
+        let streaming = update(serde_json::json!({"totalTokens": 4200, "agentTimestampMs": 3}));
+
+        assert_eq!(
+            grok_live_usage_step(&streaming, AgentType::Grok, Some(500_000), None),
+            Some((4200, 500_000))
+        );
+        // Same count again → nothing to say (the field rides nearly every chunk).
+        assert_eq!(
+            grok_live_usage_step(
+                &streaming,
+                AgentType::Grok,
+                Some(500_000),
+                Some((4200, 500_000))
+            ),
+            None
+        );
+        // A different prior value is a real step → emit.
+        assert_eq!(
+            grok_live_usage_step(
+                &streaming,
+                AgentType::Grok,
+                Some(500_000),
+                Some((3000, 500_000))
+            ),
+            Some((4200, 500_000))
+        );
+        // Same count but a NEW window (the user switched model between turns) →
+        // re-emit, or the ring would keep dividing by the old model's window.
+        assert_eq!(
+            grok_live_usage_step(
+                &streaming,
+                AgentType::Grok,
+                Some(256_000),
+                Some((4200, 500_000))
+            ),
+            Some((4200, 256_000))
+        );
+        // No resolvable window → still report the count, with the frontend's
+        // "unknown window" sentinel as the size, so the ring falls back to the
+        // parsed session stats instead of freezing on a previous model's window.
+        assert_eq!(
+            grok_live_usage_step(&streaming, AgentType::Grok, None, None),
+            Some((4200, 0))
+        );
+        assert_eq!(
+            grok_live_usage_step(&streaming, AgentType::Grok, None, Some((4200, 0))),
+            None
+        );
+        // `_meta` without the count, and a zero count, are both "no data".
+        assert_eq!(
+            grok_live_usage_step(
+                &update(serde_json::json!({"agentTimestampMs": 3})),
+                AgentType::Grok,
+                Some(500_000),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            grok_live_usage_step(
+                &update(serde_json::json!({"totalTokens": 0})),
+                AgentType::Grok,
+                Some(500_000),
+                None
+            ),
+            None
+        );
+        // Never fires for another agent — they have a real `usage_update`.
+        assert_eq!(
+            grok_live_usage_step(&streaming, AgentType::ClaudeCode, Some(500_000), None),
+            None
+        );
+    }
+
+    /// A model switch between turns moves the denominator, and the frontend's
+    /// reducer drops a `used == 0` update while it holds a positive one — so the
+    /// previous model's window has to be re-keyed at turn start, not cleared.
+    #[test]
+    fn grok_window_change_usage_rekeys_a_live_pair_to_the_new_window() {
+        // Same window (no switch) → nothing to do.
+        assert_eq!(
+            grok_window_change_usage(Some(500_000), Some((4200, 500_000))),
+            None
+        );
+        // Switched to a smaller-window model → carry the count, swap the window.
+        assert_eq!(
+            grok_window_change_usage(Some(256_000), Some((4200, 500_000))),
+            Some((4200, 256_000))
+        );
+        // Nothing emitted yet → nothing to re-key (the first real count will).
+        assert_eq!(grok_window_change_usage(Some(256_000), None), None);
+        // Switched to a BYO model nothing can size → relinquish the denominator
+        // with the "unknown window" sentinel. This is the case that would
+        // otherwise strand the previous model's window forever: no later update
+        // can correct it, and a zero-`used` clear would be dropped by the
+        // frontend reducer.
+        assert_eq!(
+            grok_window_change_usage(None, Some((4200, 500_000))),
+            Some((4200, 0))
+        );
+        // …and once relinquished, it stays relinquished (no event storm).
+        assert_eq!(grok_window_change_usage(None, Some((4200, 0))), None);
+        // Switching BACK to a sized model re-keys off the sentinel.
+        assert_eq!(
+            grok_window_change_usage(Some(500_000), Some((4200, 0))),
+            Some((4200, 500_000))
+        );
+    }
+
+    /// The offline half of the live resolver: Grok's own on-disk catalog, then
+    /// the id heuristic. A BYO endpoint is keyed by whatever id the user typed,
+    /// so this genuinely can come back empty — `grok_window_change_usage` is
+    /// what keeps that from stranding a stale window.
+    #[test]
+    fn grok_offline_context_window_falls_through_catalog_then_heuristic() {
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            home.path().join("models_cache.json"),
+            r#"{"models":{"grok-4.5":{"info":{"context_window":500000}},
+                          "deepseek-chat":{"info":{"context_window":131072}}}}"#,
+        )
+        .expect("write catalog");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[model.\"my-byo\"]\nmodel = \"my-byo\"\ncontext_window = 64000\n",
+        )
+        .expect("write config");
+
+        // Catalog wins, including for a non-`grok` id.
+        assert_eq!(
+            grok_offline_context_window("deepseek-chat", home.path()),
+            Some(131_072)
+        );
+        // BYO block in config.toml is the second source.
+        assert_eq!(
+            grok_offline_context_window("my-byo", home.path()),
+            Some(64_000)
+        );
+        // Neither file names it, but the id is Grok-shaped → heuristic answers.
+        assert_eq!(
+            grok_offline_context_window("grok-9-unreleased", home.path()),
+            Some(256_000)
+        );
+        // Neither file names it AND the id belongs to no known family — the BYO
+        // case Codex flagged. `None` here is load-bearing, not a gap.
+        assert_eq!(
+            grok_offline_context_window("some-local-llama", home.path()),
+            None
+        );
+    }
+
     // ---- empty-turn diagnosis ----
 
     fn drop_err(msg: &str) -> String {
         msg.to_string()
+    }
+
+    /// The read loop drops at most one update per notification, so an agent
+    /// speaking a protocol codeg can't decode used to put a WARN on the
+    /// per-streaming-chunk path — under the DEFAULT level, which is how a field
+    /// report ended up writing 34GB in 8.8h (issue #427). The throttle collapses
+    /// the burst; this pins the part that must survive it, the tally.
+    #[test]
+    fn dropped_update_log_line_reports_what_the_throttle_swallowed() {
+        // Leading edge: the plain line, no tally to report yet.
+        let first = dropped_update_log_line("decode", &drop_err("bad json"), 1);
+        assert_eq!(
+            first,
+            "[ACP] Ignoring unreadable session update (decode): bad json"
+        );
+        // A coalesced line names how many were suppressed and over what window,
+        // so the reader can tell "happened once" from "happening constantly".
+        let coalesced = dropped_update_log_line("dispatch", &drop_err("missing field"), 4213);
+        assert!(
+            coalesced
+                .starts_with("[ACP] Ignoring unreadable session update (dispatch): missing field"),
+            "{coalesced}"
+        );
+        assert!(coalesced.contains("+4212 more"), "{coalesced}");
+        assert!(
+            coalesced.contains(&format!("{}s", DROPPED_UPDATE_LOG_WINDOW.as_secs())),
+            "{coalesced}"
+        );
+    }
+
+    #[test]
+    fn dropped_update_logging_emits_once_per_window() {
+        let mut throttle = LeadingEdgeThrottle::new(DROPPED_UPDATE_LOG_WINDOW);
+        let now = std::time::Instant::now();
+        // First hit surfaces instantly...
+        assert!(throttle.record_at(now, 1).is_some());
+        // ...and a chunk-rate burst inside the window emits nothing at all.
+        for i in 1..10_000u64 {
+            assert!(
+                throttle
+                    .record_at(now + std::time::Duration::from_micros(i * 100), 1)
+                    .is_none(),
+                "burst hit {i} must be suppressed"
+            );
+        }
+        // Past the window, one line carries the whole suppressed tally.
+        let summary = throttle
+            .record_at(now + DROPPED_UPDATE_LOG_WINDOW, 1)
+            .expect("post-window hit emits");
+        assert_eq!(summary.occurrences, 10_000);
     }
 
     #[test]
@@ -11336,6 +12843,79 @@ mod tests {
         );
     }
 
+    fn stdio_server(name: &str) -> McpServer {
+        McpServer::Stdio(McpServerStdio::new(
+            name,
+            std::path::PathBuf::from("/usr/local/bin/node"),
+        ))
+    }
+
+    // The `supports_mcp` hint fires only where the declaration could actually
+    // be wrong: a custom agent that was handed server entries.
+    #[test]
+    fn mcp_suspect_tags_only_custom_agents_with_servers() {
+        let servers = vec![stdio_server("codeg")];
+
+        let tagged = tag_mcp_suspect(
+            sacp::util::internal_error("session/new failed: unknown field `mcpServers`"),
+            AgentType::Custom("my-agent"),
+            &servers,
+        );
+        assert!(
+            tagged.to_string().contains(MCP_SUSPECT_SENTINEL),
+            "a custom agent that received MCP servers must be tagged"
+        );
+
+        // Nothing was forwarded, so MCP cannot be the cause.
+        let empty = tag_mcp_suspect(
+            sacp::util::internal_error("session/new failed: boom"),
+            AgentType::Custom("my-agent"),
+            &[],
+        );
+        assert!(
+            !empty.to_string().contains(MCP_SUSPECT_SENTINEL),
+            "an empty server list rules MCP out"
+        );
+
+        // A built-in's flag is a verified repository constant, and the user has
+        // no switch to flip — blaming MCP would misdirect them.
+        let builtin = tag_mcp_suspect(
+            sacp::util::internal_error("session/new failed: boom"),
+            AgentType::ClaudeCode,
+            &servers,
+        );
+        assert!(
+            !builtin.to_string().contains(MCP_SUSPECT_SENTINEL),
+            "built-in agents must never be tagged"
+        );
+    }
+
+    // The sentinel is a transport detail: it must be consumed by the
+    // translation, never shown. This mirrors the `.map_err` in
+    // `run_connection`, which cannot be called directly from a unit test.
+    #[test]
+    fn mcp_suspect_sentinel_translates_to_code_and_is_stripped() {
+        let raw = tag_mcp_suspect(
+            sacp::util::internal_error("Unsupported parameter: mcpServers"),
+            AgentType::Custom("my-agent"),
+            &[stdio_server("codeg")],
+        )
+        .to_string();
+
+        let err = AcpError::mcp_rejected(raw.replace(MCP_SUSPECT_SENTINEL, ""));
+
+        assert_eq!(err.code(), Some("mcp_rejected_by_agent"));
+        let shown = err.to_string();
+        assert!(
+            shown.contains("Unsupported parameter: mcpServers"),
+            "the agent's own message must survive: {shown}"
+        );
+        assert!(
+            !shown.contains(MCP_SUSPECT_SENTINEL),
+            "the sentinel must never reach the user: {shown}"
+        );
+    }
+
     #[test]
     fn build_resume_session_request_sets_claude_raw_meta() {
         let cwd = std::path::PathBuf::from("/tmp/codeg");
@@ -11499,7 +13079,7 @@ mod tests {
         let model = &opts[0];
         assert_eq!(model.id, GROK_MODEL_OPTION_ID);
         assert_eq!(model.category.as_deref(), Some("model"));
-        let SessionConfigKindInfo::Select(model_sel) = &model.kind;
+        let model_sel = expect_select(&model.kind);
         // Both models appear (agent-type filtering is deliberately NOT applied —
         // cross-type switches are handled gracefully at set time instead).
         assert_eq!(model_sel.options.len(), 2);
@@ -11515,7 +13095,7 @@ mod tests {
         let effort = &opts[1];
         assert_eq!(effort.id, GROK_EFFORT_OPTION_ID);
         assert_eq!(effort.category.as_deref(), Some("mode"));
-        let SessionConfigKindInfo::Select(effort_sel) = &effort.kind;
+        let effort_sel = expect_select(&effort.kind);
         assert_eq!(effort_sel.options.len(), 2);
         assert_eq!(
             effort_sel.current_value, "high",
@@ -11577,6 +13157,7 @@ mod tests {
                     "modelId": "grok-4.5",
                     "name": "Grok 4.5",
                     "_meta": {
+                        "totalContextTokens": 500000,
                         "supportsReasoningEffort": true,
                         "reasoningEffort": "xhigh",
                         "reasoningEfforts": [
@@ -11596,19 +13177,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_grok_effort_specs_reads_per_model_meta() {
-        let specs = parse_grok_effort_specs(Some(&grok_models_fixture()));
+    fn parse_grok_model_specs_reads_per_model_meta() {
+        let specs = parse_grok_model_specs(Some(&grok_models_fixture()));
         let g45 = specs.get("grok-4.5").expect("grok-4.5 present");
         assert!(g45.supports);
         assert_eq!(g45.default.as_deref(), Some("xhigh"));
         assert_eq!(g45.options.len(), 3);
         assert_eq!(g45.options[0].0, "high");
+        // Grok's own window rides the same per-model `_meta` — the number the
+        // context ring uses instead of inferring one from the model id.
+        assert_eq!(g45.context_window, Some(500_000));
         let fast = specs
             .get("grok-composer-2.5-fast")
             .expect("composer present");
         assert!(!fast.supports);
         assert!(fast.default.is_none());
         assert!(fast.options.is_empty());
+        // No `totalContextTokens` → no opinion (the id heuristic decides).
+        assert_eq!(fast.context_window, None);
+        // …and a zero window is "no opinion" too, never a ring divided by zero.
+        let zeroed = parse_grok_model_specs(Some(&serde_json::json!({
+            "availableModels": [{"modelId": "z", "_meta": {"totalContextTokens": 0}}]
+        })));
+        assert_eq!(zeroed["z"].context_window, None);
     }
 
     /// T1 (R2.1) red: the steering flag lives at the TOP LEVEL of the
@@ -12850,12 +14441,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_grok_effort_specs_absent_models_is_empty() {
-        assert!(parse_grok_effort_specs(None).is_empty());
-        assert!(parse_grok_effort_specs(Some(&serde_json::json!({}))).is_empty());
+    fn parse_grok_model_specs_absent_models_is_empty() {
+        assert!(parse_grok_model_specs(None).is_empty());
+        assert!(parse_grok_model_specs(Some(&serde_json::json!({}))).is_empty());
         // Missing `_meta` degrades to supports=false / default=None / options=[].
         let bare = serde_json::json!({ "availableModels": [{"modelId": "m1", "name": "M1"}] });
-        let specs = parse_grok_effort_specs(Some(&bare));
+        let specs = parse_grok_model_specs(Some(&bare));
         let m1 = specs.get("m1").expect("m1 present");
         assert!(!m1.supports);
         assert!(m1.default.is_none());
@@ -12864,12 +14455,12 @@ mod tests {
 
     #[test]
     fn build_grok_effort_option_injects_default_and_gates_supports() {
-        let specs = parse_grok_effort_specs(Some(&grok_models_fixture()));
+        let specs = parse_grok_model_specs(Some(&grok_models_fixture()));
         // grok-4.5: `xhigh` default is injected at the FRONT (not in the
         // switchable list), current = xhigh, with canonical labels.
         let effort = build_grok_effort_option("grok-4.5", &specs).expect("has effort");
         assert_eq!(effort.id, GROK_EFFORT_OPTION_ID);
-        let SessionConfigKindInfo::Select(sel) = &effort.kind;
+        let sel = expect_select(&effort.kind);
         assert_eq!(sel.current_value, "xhigh");
         assert_eq!(sel.options.len(), 4, "high/medium/low + injected xhigh");
         assert_eq!(sel.options[0].value, "xhigh");
@@ -12904,14 +14495,14 @@ mod tests {
             }),
         )
         .unwrap();
-        let specs = parse_grok_effort_specs(Some(&grok_models_fixture()));
+        let specs = parse_grok_model_specs(Some(&grok_models_fixture()));
         let opts = synthesize_grok_config_options(Some(&meta), &specs).expect("synthesize");
         assert_eq!(opts.len(), 2, "model + effort");
         let effort = opts
             .iter()
             .find(|o| o.id == GROK_EFFORT_OPTION_ID)
             .expect("effort selector");
-        let SessionConfigKindInfo::Select(sel) = &effort.kind;
+        let sel = expect_select(&effort.kind);
         assert_eq!(sel.current_value, "xhigh", "grok-4.5's real default");
         assert!(sel
             .options
@@ -12933,7 +14524,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let specs = parse_grok_effort_specs(Some(&grok_models_fixture()));
+        let specs = parse_grok_model_specs(Some(&grok_models_fixture()));
         let opts = synthesize_grok_config_options(Some(&meta), &specs).expect("synthesize");
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].id, GROK_MODEL_OPTION_ID);
@@ -12941,7 +14532,7 @@ mod tests {
 
     #[test]
     fn set_grok_effort_selector_for_model_drops_and_adds() {
-        let specs = parse_grok_effort_specs(Some(&grok_models_fixture()));
+        let specs = parse_grok_model_specs(Some(&grok_models_fixture()));
         // Model + grok-4.5 effort → switching to the no-effort model DROPS effort.
         let mut opts = grok_model_options("grok-4.5");
         opts.push(build_grok_effort_option("grok-4.5", &specs).unwrap());
@@ -12955,7 +14546,7 @@ mod tests {
             .iter()
             .find(|o| o.id == GROK_EFFORT_OPTION_ID)
             .expect("re-added");
-        let SessionConfigKindInfo::Select(sel) = &effort.kind;
+        let sel = expect_select(&effort.kind);
         assert_eq!(sel.current_value, "xhigh");
     }
 
@@ -13015,7 +14606,7 @@ mod tests {
 
         // The optimistic pick is reverted: the authoritative model is unchanged.
         let opts = guard.config_options.as_ref().expect("options preserved");
-        let SessionConfigKindInfo::Select(sel) = &opts[0].kind;
+        let sel = expect_select(&opts[0].kind);
         assert_eq!(sel.current_value, "grok-4.5");
 
         // Event ordering: the authoritative options (revert) precede the coded
@@ -13033,7 +14624,7 @@ mod tests {
 
         // The reverted options carry the original model.
         if let AcpEvent::SessionConfigOptions { config_options } = &events[cfg_idx].payload {
-            let SessionConfigKindInfo::Select(sel) = &config_options[0].kind;
+            let sel = expect_select(&config_options[0].kind);
             assert_eq!(sel.current_value, "grok-4.5");
         }
 
@@ -14537,6 +16128,7 @@ mod tests {
             skills_dir: None,
             source: Default::default(),
             version_probe: None,
+            supports_mcp: true,
         };
         assert!(hydrate(&[def("delegate-on"), def("delegate-off")]).is_empty());
 
@@ -14620,5 +16212,200 @@ mod tests {
             }),
             Some("delegation,feedback,ask,sessions,tasks,automations,taskboard".to_string())
         );
+    }
+
+    // ── Boolean config options (cline 3.0.50 `auto_approve`) ──
+
+    /// The exact `configOptions` entry cline 3.0.50 ships. Before
+    /// `unstable_boolean_config` was enabled this failed to deserialize with
+    /// `unknown variant 'boolean', expected 'select'` — and because
+    /// `SessionConfigOption::kind` is a required flattened field, that one entry
+    /// failed the WHOLE `session/new` response and left cline unusable.
+    fn cline_auto_approve_json() -> serde_json::Value {
+        serde_json::json!({
+            "type": "boolean",
+            "id": "auto_approve",
+            "name": "Auto-approve tools",
+            "description": "Automatically approve all tool calls without asking for permission",
+            "currentValue": false
+        })
+    }
+
+    #[test]
+    fn cline_boolean_config_option_maps_to_a_toggle() {
+        let option: SessionConfigOption =
+            serde_json::from_value(cline_auto_approve_json()).expect("boolean kind must parse");
+
+        let mapped = map_session_config_option(&option).expect("boolean options are surfaced");
+        assert_eq!(mapped.id, "auto_approve");
+        assert_eq!(mapped.name, "Auto-approve tools");
+        match mapped.kind {
+            SessionConfigKindInfo::Boolean(toggle) => assert!(!toggle.current_value),
+            other => panic!("expected a boolean kind, got {other:?}"),
+        }
+    }
+
+    /// The whole point of the fix: one boolean option must not take the session
+    /// down with it.
+    #[test]
+    fn new_session_response_with_a_boolean_option_parses() {
+        let raw = serde_json::json!({
+            "sessionId": "sess-1",
+            "configOptions": [
+                {
+                    "type": "select",
+                    "id": "model",
+                    "name": "Model",
+                    "currentValue": "anthropic/claude-sonnet-5",
+                    "options": [{"value": "anthropic/claude-sonnet-5", "name": "Claude Sonnet 5"}]
+                },
+                cline_auto_approve_json(),
+            ]
+        });
+        let resp: NewSessionResponse = serde_json::from_value(raw).expect("must parse");
+        assert_eq!(resp.config_options.map(|o| o.len()), Some(2));
+    }
+
+    #[test]
+    fn select_values_keep_their_pre_boolean_wire_shape() {
+        // Regression guard for every agent that is NOT cline: enabling
+        // `unstable_boolean_config` changed `SetSessionConfigOptionRequest.value`
+        // from a plain `SessionConfigValueId` to a flattened enum. The untagged
+        // `ValueId` variant must still serialize to a bare `"value"` string, or
+        // codex / claude / opencode model switching silently breaks.
+        let req = SetSessionConfigOptionRequest::new(
+            SessionId::new("sess-1"),
+            SessionConfigId::new("model"),
+            encode_config_option_value(false, "anthropic/claude-sonnet-5"),
+        );
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            serde_json::json!({
+                "sessionId": "sess-1",
+                "configId": "model",
+                "value": "anthropic/claude-sonnet-5"
+            })
+        );
+    }
+
+    #[test]
+    fn boolean_values_carry_a_type_discriminator() {
+        let on = SetSessionConfigOptionRequest::new(
+            SessionId::new("sess-1"),
+            SessionConfigId::new("auto_approve"),
+            encode_config_option_value(true, "true"),
+        );
+        assert_eq!(
+            serde_json::to_value(&on).unwrap(),
+            serde_json::json!({
+                "sessionId": "sess-1",
+                "configId": "auto_approve",
+                "type": "boolean",
+                "value": true
+            })
+        );
+        // Anything that is not the literal "true" is off — the selector only
+        // ever emits "true"/"false".
+        assert_eq!(
+            encode_config_option_value(true, "false").as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn unknown_config_option_kinds_are_stripped_not_fatal() {
+        let mut raw = serde_json::json!({
+            "sessionId": "sess-1",
+            "modes": null,
+            "configOptions": [
+                {
+                    "type": "select",
+                    "id": "model",
+                    "name": "Model",
+                    "currentValue": "m1",
+                    "options": [{"value": "m1", "name": "M1"}]
+                },
+                cline_auto_approve_json(),
+                // A kind newer than codeg's schema pin — today this is what
+                // `boolean` was yesterday.
+                {"type": "radio", "id": "future", "name": "Future", "currentValue": "a"},
+            ]
+        });
+        strip_unknown_config_options(&mut raw, "session/new");
+
+        let ids: Vec<&str> = raw["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["model", "auto_approve"],
+            "only `radio` is dropped"
+        );
+        // Untouched siblings survive, and the response still parses.
+        assert_eq!(raw["sessionId"], "sess-1");
+        serde_json::from_value::<NewSessionResponse>(raw).expect("parses after stripping");
+    }
+
+    /// `session/new` and `session/load` are now sent as `UntypedMessage`s for
+    /// EVERY agent (so the raw response can be sanitized first), which means the
+    /// literal method strings are load-bearing for all of them rather than just
+    /// Grok. The schema's own constants are `pub(crate)`, but it re-exports them
+    /// through `AGENT_METHOD_NAMES` — pin against that so a rename upstream is a
+    /// failing test, not every agent silently getting "method not found".
+    #[test]
+    fn untyped_session_method_names_match_the_schema() {
+        use sacp::schema::AGENT_METHOD_NAMES;
+        assert_eq!(AGENT_METHOD_NAMES.session_new, "session/new");
+        assert_eq!(AGENT_METHOD_NAMES.session_load, "session/load");
+        assert_eq!(
+            AGENT_METHOD_NAMES.session_set_config_option,
+            "session/set_config_option"
+        );
+    }
+
+    /// The untyped send must put the same params on the wire the typed send did
+    /// — `UntypedMessage::new` runs the very same `serde_json::to_value` on the
+    /// request, so this pins the payload rather than the mechanism.
+    #[test]
+    fn untyped_new_session_carries_the_typed_request_payload() {
+        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let req = build_new_session_request(AgentType::Cline, &cwd, Vec::new());
+        let expected = serde_json::to_value(&req).unwrap();
+
+        let untyped = UntypedMessage::new("session/new", req).expect("builds");
+        assert_eq!(untyped.method(), "session/new");
+        assert_eq!(untyped.params(), &expected);
+    }
+
+    #[test]
+    fn saved_boolean_preference_skips_the_redundant_round_trip() {
+        let off: SessionConfigOption =
+            serde_json::from_value(cline_auto_approve_json()).expect("parses");
+        assert!(config_option_already_holds(&off, "false"));
+        assert!(!config_option_already_holds(&off, "true"));
+
+        let mut on_json = cline_auto_approve_json();
+        on_json["currentValue"] = serde_json::json!(true);
+        let on: SessionConfigOption = serde_json::from_value(on_json).expect("parses");
+        assert!(config_option_already_holds(&on, "true"));
+        assert!(!config_option_already_holds(&on, "false"));
+    }
+
+    #[test]
+    fn strip_leaves_responses_without_config_options_alone() {
+        // `session/new` responses from agents that publish no selectors at all,
+        // and entries with no `type`, must pass through untouched — serde gives
+        // a better error for a malformed entry than a silent drop would.
+        let mut none = serde_json::json!({"sessionId": "sess-1"});
+        let before = none.clone();
+        strip_unknown_config_options(&mut none, "session/new");
+        assert_eq!(none, before);
+
+        let mut untyped = serde_json::json!({"configOptions": [{"id": "weird"}]});
+        strip_unknown_config_options(&mut untyped, "session/new");
+        assert_eq!(untyped["configOptions"].as_array().unwrap().len(), 1);
     }
 }

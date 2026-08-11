@@ -7,14 +7,15 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 
 use crate::models::{
-    AgentType, ContentBlock, ConversationDetail, ConversationSummary, MessageTurn, TurnRole,
-    TurnUsage,
+    AgentExecutionStats, AgentToolCall, AgentType, ContentBlock, ConversationDetail,
+    ConversationSummary, MessageTurn, TurnRole, TurnUsage,
 };
+use crate::parsers::claude::BACKGROUND_TASK_MARKER;
 use crate::parsers::{
     backfill_turn_durations, compute_session_stats, folder_name_from_path,
-    infer_context_window_max_tokens, latest_turn_total_usage_tokens, merge_context_window_stats,
-    relocate_orphaned_tool_results, structurize_read_tool_output, title_from_user_text,
-    truncate_str, AgentParser, ParseError,
+    infer_context_window_max_tokens, is_safe_subagent_id, latest_turn_total_usage_tokens,
+    merge_context_window_stats, relocate_orphaned_tool_results, structurize_read_tool_output,
+    title_from_user_text, truncate_str, AgentParser, ParseError,
 };
 
 /// Cap for a single tool result / tool input preview stored on a turn. Grok's
@@ -37,6 +38,27 @@ const GROK_TASK_OUTPUT_CAP: usize = 48 * 1024;
 /// be recovered from `chat_history.jsonl` (see `inject_grok_ask_answers`).
 const GROK_ASK_TOOL_NAME: &str = "ask_user_question";
 
+/// Grok's native sub-agent launcher (`_meta["x.ai/tool"].name`). Rewritten to
+/// `"Agent"` at parse time — the same parser-side rename opencode/codex/
+/// codebuddy do — so the frontend routes the call to the dedicated
+/// `AgentToolCallPart` instead of a generic tool card. The `rawInput` already
+/// carries the standard `{description, prompt, subagent_type, …}` shape, so
+/// only the name changes (mirrors `parsers/codebuddy.rs`).
+const GROK_SPAWN_SUBAGENT_TOOL_NAME: &str = "spawn_subagent";
+
+/// Prefix of the `spawn_subagent(background: true)` completion ack ("Subagent
+/// started in background.\nsubagent_id: …" — verified against grok 0.2.99 and
+/// the 0.2.112 binary's template). Internal metadata text never meant for
+/// users; rewritten into a [`BACKGROUND_TASK_MARKER`] payload like Claude's
+/// async-launch acks (see `attach_subagent_stats`).
+const GROK_SUBAGENT_STARTED_ACK_PREFIX: &str = "Subagent started in background";
+
+/// Cap for a subagent's final output folded into the background-task marker /
+/// a nested tool-call preview. Mirrors `claude.rs::BACKGROUND_RESULT_MAX_CHARS`
+/// and the 500-char nested previews of `claude.rs`/`codebuddy.rs`.
+const GROK_SUBAGENT_RESULT_CAP: usize = 16_000;
+const GROK_SUBAGENT_PREVIEW_CAP: usize = 500;
+
 /// Resolve Grok's data home, honoring `GROK_HOME`, else `~/.grok` (mirrors the
 /// CLI's own `GROK_HOME` override). The transcript store lives under the
 /// `sessions/` subdirectory of this path.
@@ -49,6 +71,64 @@ fn resolve_grok_home_from(grok_home_env: Option<OsString>, home_dir: Option<Path
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home_dir.unwrap_or_default().join(".grok"))
+}
+
+/// The context window Grok itself assigns to `model`, read from its own on-disk
+/// catalog — the authoritative number, and the same one the live ACP path gets
+/// from `availableModels[]._meta.totalContextTokens` (see
+/// `acp::connection::parse_grok_model_specs`).
+///
+/// Two sources, in precedence order:
+///   1. `$GROK_HOME/models_cache.json` — the catalog Grok fetches from its API
+///      and rewrites on every model refresh (`models.<id>.info.context_window`).
+///   2. `$GROK_HOME/config.toml` — a BYO endpoint's `[model.<id>].context_window`
+///      (see `commands::acp::apply_grok_custom_model`), which never appears in
+///      the fetched catalog.
+///
+/// `None` when neither names the model, and the caller falls back to
+/// [`infer_context_window_max_tokens`]'s name heuristic. Reading these beats
+/// guessing from the model id: a new Grok model, or a self-hosted one, gets its
+/// real window instead of the conservative default.
+///
+/// Shared with the live path (`acp::connection::grok_current_model_context_window`)
+/// so a session's ring reads the same denominator whether it comes from the wire
+/// or from re-parsed history.
+pub(crate) fn grok_catalog_context_window(home: &Path, model: &str) -> Option<u64> {
+    let read = |name: &str| fs::read_to_string(home.join(name)).ok();
+    read("models_cache.json")
+        .and_then(|raw| grok_context_window_from_models_cache(&raw, model))
+        .or_else(|| {
+            read("config.toml").and_then(|raw| grok_context_window_from_config_toml(&raw, model))
+        })
+}
+
+/// `models.<id>.info.context_window` from Grok's `models_cache.json`. Non-positive
+/// / missing / malformed → `None`.
+fn grok_context_window_from_models_cache(raw: &str, model: &str) -> Option<u64> {
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .get("models")?
+        .get(model)?
+        .get("info")?
+        .get("context_window")?
+        .as_u64()
+        .filter(|window| *window > 0)
+}
+
+/// `[model.<id>].context_window` from Grok's `config.toml` — a BYO endpoint's
+/// declared window. Mirrors the read `commands::acp::parse_grok_settings` does
+/// for the settings panel. Non-positive / missing / malformed → `None`.
+fn grok_context_window_from_config_toml(raw: &str, model: &str) -> Option<u64> {
+    raw.parse::<toml::Table>()
+        .ok()?
+        .get("model")?
+        .as_table()?
+        .get(model)?
+        .as_table()?
+        .get("context_window")?
+        .as_integer()
+        .filter(|window| *window > 0)
+        .map(|window| window as u64)
 }
 
 /// Grok Build (xAI) stores each conversation as a **directory-per-session**,
@@ -64,8 +144,17 @@ fn resolve_grok_home_from(grok_home_env: Option<OsString>, home_dir: Option<Path
 ///             ├── updates.jsonl      # ACP session/update stream — the conversation
 ///             ├── chat_history.jsonl # raw model messages (not read here)
 ///             ├── plan.json          # TODO state
-///             └── terminal/<id>.log  # full background-command output
+///             ├── terminal/<id>.log  # full background-command output
+///             └── subagents/<id>/    # per-spawned-subagent snapshot
+///                 ├── meta.json      #   parent/child link, status, counts
+///                 └── output.json    #   final output text
 /// ```
+///
+/// A `spawn_subagent` child is ALSO a full sibling `<session-uuid>/` directory
+/// (its `summary.json` says `session_kind: "subagent"`, `agent_name: <type>`);
+/// a `cwd`/worktree-isolated child lands under a different group. Children are
+/// excluded from `list_conversations` and instead surface as nested
+/// `agent_stats` on the parent's Agent card (see `attach_subagent_stats`).
 ///
 /// `base_dir` points at the `sessions/` directory.
 ///
@@ -117,7 +206,29 @@ impl GrokParser {
         Self { base_dir }
     }
 
+    /// Grok's data home — the parent of the `sessions/` tree this parser reads,
+    /// which is where its `models_cache.json` / `config.toml` live. Derived from
+    /// `base_dir` rather than re-resolving `GROK_HOME` so a fixture-scoped parser
+    /// stays inside its fixture instead of reading the host's real `~/.grok`.
+    fn grok_home(&self) -> PathBuf {
+        self.base_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.base_dir.clone())
+    }
+
     fn build_summary(&self, session_dir: &Path, session_id: &str) -> Option<ConversationSummary> {
+        // Cheap gate BEFORE the full updates.jsonl parse: a `spawn_subagent`
+        // child is a complete sibling session directory whose `summary.json`
+        // carries `session_kind: "subagent"`. Its transcript belongs INSIDE the
+        // parent conversation's Agent card (see `attach_subagent_stats`), not in
+        // the sidebar as a stray top-level conversation — mirroring how Claude
+        // Code / CodeBuddy subagent transcripts never surface as sessions.
+        // `get_conversation` deliberately keeps resolving the child by id.
+        let meta = read_summary_json(session_dir);
+        if meta.session_kind.as_deref() == Some("subagent") {
+            return None;
+        }
         let parsed = parse_updates(&session_dir.join("updates.jsonl"));
         // A session that never produced any user/assistant/tool content (only
         // metadata) is treated as empty — matches the "metadata-only is not
@@ -125,7 +236,6 @@ impl GrokParser {
         if parsed.content_events == 0 {
             return None;
         }
-        let meta = read_summary_json(session_dir);
         Some(self.summary_from(session_id, &meta, &parsed))
     }
 
@@ -168,6 +278,12 @@ impl GrokParser {
         relocate_orphaned_tool_results(&mut parsed.turns);
         structurize_read_tool_output(&mut parsed.turns);
 
+        // Sub-agent enrichment: pair each `spawn_subagent` call with its
+        // `subagent_spawned`/`subagent_finished` lifecycle, load the child
+        // session's own transcript into `agent_stats`, and fold a background
+        // launch's ack text into the structured background-task marker.
+        self.attach_subagent_stats(session_dir, &mut parsed);
+
         // Grok resolves its native `ask_user_question` over the `_x.ai/ask_user_question`
         // ext round-trip and never writes the answer into `updates.jsonl`, so the
         // parsed ToolResult is empty and the `AskQuestionResultCard` shows "未选择".
@@ -199,10 +315,17 @@ impl GrokParser {
         // (mirrors gemini/kimi/opencode — the bare `compute_session_stats` leaves
         // the context fields `None`).
         let session_model = meta.model.as_deref().or(parsed.model.as_deref());
+        // Grok publishes each model's real window in its own on-disk catalog, so
+        // read that first and keep the id-shaped guess only as the fallback for
+        // a model neither file names.
+        let context_window = session_model.and_then(|model| {
+            grok_catalog_context_window(&self.grok_home(), model)
+                .or_else(|| infer_context_window_max_tokens(Some(model)))
+        });
         let session_stats = merge_context_window_stats(
             compute_session_stats(&parsed.turns),
             latest_turn_total_usage_tokens(&parsed.turns),
-            infer_context_window_max_tokens(session_model),
+            context_window,
         );
         let summary = self.summary_from(session_id, &meta, &parsed);
 
@@ -224,6 +347,142 @@ impl GrokParser {
             }
         }
         None
+    }
+
+    /// Enrich each `spawn_subagent` ("Agent") call with its child's execution:
+    ///
+    /// * `agent_stats` — nested tool calls parsed from the CHILD session's own
+    ///   `updates.jsonl` (a subagent is a full sibling session directory; a
+    ///   worktree-isolated child lands under a different cwd group, hence the
+    ///   `find_session_dir` fallback), plus totals from `subagent_finished`.
+    /// * a background launch's "Subagent started in background…" ack —
+    ///   internal metadata text — becomes the same [`BACKGROUND_TASK_MARKER`]
+    ///   payload Claude's async launches use, so the card renders the settled
+    ///   status + final output instead of the raw ack.
+    /// * a blocking spawn interrupted before its completion frame still gets
+    ///   the child's final output from the lifecycle event.
+    ///
+    /// Pairing walks spawn calls and `subagent_spawned` events in stream order
+    /// (grok emits them in call order; the live path pairs the same way). The
+    /// background ack's `subagent_id: …` line, when present, overrides the
+    /// positional pick — and an errored spawn (depth-limit, config) consumes no
+    /// lifecycle so later pairs can't shift.
+    fn attach_subagent_stats(&self, session_dir: &Path, parsed: &mut ParsedUpdates) {
+        if parsed.spawn_call_ids.is_empty() {
+            return;
+        }
+        let lifecycles = std::mem::take(&mut parsed.subagents);
+        let mut consumed = vec![false; lifecycles.len()];
+        for call_id in &parsed.spawn_call_ids {
+            let Some((output_preview, is_error)) =
+                find_tool_result(&parsed.turns, call_id).map(|r| match r {
+                    ContentBlock::ToolResult {
+                        output_preview,
+                        is_error,
+                        ..
+                    } => (output_preview.clone(), *is_error),
+                    _ => (None, false),
+                })
+            else {
+                continue;
+            };
+            let ack_id = output_preview.as_deref().and_then(subagent_id_from_ack);
+            let lifecycle_idx = match &ack_id {
+                Some(id) => lifecycles.iter().position(|l| &l.subagent_id == id),
+                // A spawn that failed outright never produced a lifecycle;
+                // consuming one here would shift every later pair.
+                None if is_error => None,
+                None => consumed.iter().position(|used| !used),
+            };
+            let Some(idx) = lifecycle_idx else { continue };
+            if consumed[idx] {
+                continue;
+            }
+            consumed[idx] = true;
+            let lifecycle = &lifecycles[idx];
+
+            let stats = self.subagent_stats(session_dir, lifecycle);
+            let marker = output_preview
+                .as_deref()
+                .is_some_and(|o| o.trim_start().starts_with(GROK_SUBAGENT_STARTED_ACK_PREFIX))
+                .then(|| background_marker_payload(lifecycle));
+            apply_subagent_result(&mut parsed.turns, call_id, stats, marker, lifecycle);
+        }
+    }
+
+    /// Build the `agent_stats` for one subagent: totals from the lifecycle
+    /// (`subagent_finished`), the nested tool-call list from the child
+    /// session's transcript, gaps filled from the on-disk
+    /// `subagents/<id>/meta.json` snapshot (covers a parent transcript cut
+    /// short before `subagent_finished` landed).
+    fn subagent_stats(
+        &self,
+        session_dir: &Path,
+        lifecycle: &GrokSubagentLifecycle,
+    ) -> Option<AgentExecutionStats> {
+        let disk_meta = read_subagent_meta(session_dir, &lifecycle.subagent_id);
+        let child_id = lifecycle
+            .child_session_id
+            .as_deref()
+            .or(disk_meta
+                .as_ref()
+                .and_then(|m| m.child_session_id.as_deref()))
+            .unwrap_or(&lifecycle.subagent_id);
+        let tool_calls = if is_safe_subagent_id(child_id) {
+            // The child usually sits in the SAME cwd group as the parent; a
+            // `cwd`/worktree-isolated child lands elsewhere, so fall back to
+            // the full two-level scan.
+            let child_dir = session_dir
+                .parent()
+                .map(|group| group.join(child_id))
+                .filter(|dir| dir.join("updates.jsonl").is_file())
+                .or_else(|| self.find_session_dir(child_id));
+            child_dir
+                .map(|dir| subagent_tool_calls(&dir.join("updates.jsonl")))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let status = lifecycle
+            .status
+            .clone()
+            .or_else(|| disk_meta.as_ref().and_then(|m| m.status.clone()));
+        let duration_ms = lifecycle
+            .duration_ms
+            .or(disk_meta.as_ref().and_then(|m| m.duration_ms));
+        let tool_count = lifecycle
+            .tool_calls
+            .or(disk_meta.as_ref().and_then(|m| m.tool_calls))
+            .or_else(|| u32::try_from(tool_calls.len()).ok().filter(|n| *n > 0));
+        if tool_calls.is_empty()
+            && status.is_none()
+            && duration_ms.is_none()
+            && tool_count.is_none()
+        {
+            return None;
+        }
+        Some(AgentExecutionStats {
+            agent_type: lifecycle.subagent_type.clone(),
+            status,
+            total_duration_ms: duration_ms,
+            total_tokens: lifecycle.tokens_used,
+            total_tool_use_count: tool_count,
+            read_count: None,
+            search_count: None,
+            bash_count: None,
+            edit_file_count: None,
+            lines_added: None,
+            lines_removed: None,
+            other_tool_count: None,
+            tool_calls,
+            // Grok runs every sub-agent as a full session of its own, so the
+            // card can offer to open the child's transcript. Only hand over an
+            // id that passed the path-traversal guard — it is used to look up a
+            // session directory. `get_conversation` resolves it even though
+            // `build_summary` keeps sub-agent sessions out of the sidebar.
+            child_session_id: is_safe_subagent_id(child_id).then(|| child_id.to_string()),
+        })
     }
 }
 
@@ -276,6 +535,9 @@ struct SummaryMeta {
     git_branch: Option<String>,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,
+    /// `"primary"` for a normal session, `"subagent"` for a `spawn_subagent`
+    /// child (grok 0.2.9x+ writes this discriminator; absent on older files).
+    session_kind: Option<String>,
 }
 
 fn read_summary_json(session_dir: &Path) -> SummaryMeta {
@@ -321,6 +583,10 @@ fn read_summary_json(session_dir: &Path) -> SummaryMeta {
             .get("updated_at")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339),
+        session_kind: v
+            .get("session_kind")
+            .and_then(Value::as_str)
+            .and_then(non_empty),
     }
 }
 
@@ -344,6 +610,30 @@ struct ParsedUpdates {
     /// Model discovered in-stream (`user_message_chunk._meta.modelId`); a
     /// fallback when `summary.json` lacks `current_model_id`.
     model: Option<String>,
+    /// `spawn_subagent` tool_call ids in encounter order, paired against
+    /// `subagents` by `attach_subagent_stats`.
+    spawn_call_ids: Vec<String>,
+    /// Sub-agent lifecycles observed on the `_x.ai/session/update` stream
+    /// (`subagent_spawned` opens one, `subagent_finished` completes it), in
+    /// spawn order.
+    subagents: Vec<GrokSubagentLifecycle>,
+}
+
+/// One subagent's lifecycle, folded from the parent-stream extension
+/// notifications. `subagent_finished` carries the child's FULL final output —
+/// the only in-stream source for a background subagent the model never polled.
+#[derive(Default)]
+struct GrokSubagentLifecycle {
+    subagent_id: String,
+    /// Distinct from `subagent_id` in principle (`== subagent_id` in every
+    /// observed capture); the child session directory is named by this.
+    child_session_id: Option<String>,
+    subagent_type: Option<String>,
+    status: Option<String>,
+    output: Option<String>,
+    duration_ms: Option<u64>,
+    tool_calls: Option<u32>,
+    tokens_used: Option<u64>,
 }
 
 fn parse_updates(path: &Path) -> ParsedUpdates {
@@ -498,7 +788,7 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                 // whose args are top-level — pass through unchanged.
                 let raw_input = update.get("rawInput");
                 let unwrapped = unwrap_use_tool(raw_input);
-                let tool_name = match unwrapped {
+                let mut tool_name = match unwrapped {
                     Some((name, _)) => name.to_string(),
                     None => update
                         .get("_meta")
@@ -509,6 +799,16 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                         .unwrap_or("tool")
                         .to_string(),
                 };
+                // Native sub-agent launch → the dedicated Agent card (see
+                // `GROK_SPAWN_SUBAGENT_TOOL_NAME`). Recorded for the
+                // lifecycle/stats pairing pass; the MCP-unwrapped branch is
+                // untouched (an MCP tool can't be grok's native launcher).
+                if unwrapped.is_none() && tool_name == GROK_SPAWN_SUBAGENT_TOOL_NAME {
+                    tool_name = "Agent".to_string();
+                    if !id.is_empty() {
+                        out.spawn_call_ids.push(id.clone());
+                    }
+                }
                 let input_preview = match unwrapped {
                     // Valid-JSON-preserving cap so the delegation card can parse a
                     // long task; native inputs keep the opaque byte-truncation.
@@ -520,6 +820,13 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                     tool_use_id: Some(id.clone()),
                     tool_name,
                     input_preview,
+                    // Grok is the one agent whose transcript is read WHILE it is
+                    // being written (`SubagentSessionDialog` polls a running
+                    // `spawn_subagent` child's file), so it is the one agent
+                    // that has to say whether a call is still working. The
+                    // paired placeholder result below cannot answer that: it
+                    // stays `output_preview: None` for an empty completion too.
+                    status: grok_line_status(&v, update),
                     meta: None,
                 });
                 turn.blocks.push(ContentBlock::ToolResult {
@@ -536,7 +843,12 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
             "tool_call_update" => {
                 let id = str_field(update, "toolCallId");
                 let output = update_tool_output(update);
-                let failed = update.get("status").and_then(Value::as_str) == Some("failed");
+                let status = grok_line_status(&v, update);
+                let failed = status.as_deref() == Some("failed");
+                // Cumulative updates: the latest STATED status wins, so a call
+                // that settles overwrites its own `pending`; a content-only
+                // update states nothing and leaves it standing.
+                apply_tool_status(assistant.as_mut(), &tool_result_idx, &id, status.as_deref());
                 apply_tool_result(assistant.as_mut(), &tool_result_idx, &id, output, failed);
             }
             "turn_completed" => {
@@ -581,6 +893,7 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                     tool_use_id: Some(id.clone()),
                     tool_name: "context_compaction".to_string(),
                     input_preview: None,
+                    status: None,
                     meta: Some(Value::Object(meta)),
                 });
                 turn.blocks.push(ContentBlock::ToolResult {
@@ -590,6 +903,72 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                     agent_stats: None,
                     images: Vec::new(),
                 });
+            }
+            // Sub-agent lifecycle (namespaced `_x.ai/session/update` method).
+            // Metadata, not content — deliberately NOT counted into
+            // `content_events` and never a turn boundary. Collected in spawn
+            // order for `attach_subagent_stats`.
+            "subagent_spawned" => {
+                let Some(subagent_id) = update
+                    .get("subagent_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                else {
+                    continue;
+                };
+                out.subagents.push(GrokSubagentLifecycle {
+                    subagent_id: subagent_id.to_string(),
+                    child_session_id: update
+                        .get("child_session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    subagent_type: update
+                        .get("subagent_type")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    ..GrokSubagentLifecycle::default()
+                });
+            }
+            "subagent_finished" => {
+                let Some(subagent_id) = update.get("subagent_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                // Pair by id; a finished-without-spawned event (defensive —
+                // not observed on real streams) still lands as its own entry
+                // so its output is not lost.
+                let lifecycle = match out
+                    .subagents
+                    .iter_mut()
+                    .find(|l| l.subagent_id == subagent_id)
+                {
+                    Some(l) => l,
+                    None => {
+                        out.subagents.push(GrokSubagentLifecycle {
+                            subagent_id: subagent_id.to_string(),
+                            child_session_id: update
+                                .get("child_session_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            ..GrokSubagentLifecycle::default()
+                        });
+                        out.subagents.last_mut().expect("just pushed")
+                    }
+                };
+                lifecycle.status = update
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                lifecycle.output = update
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| truncate_str(s, GROK_SUBAGENT_RESULT_CAP));
+                lifecycle.duration_ms = update.get("duration_ms").and_then(Value::as_u64);
+                lifecycle.tool_calls = update
+                    .get("tool_calls")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok());
+                lifecycle.tokens_used = update.get("tokens_used").and_then(Value::as_u64);
             }
             // `task_backgrounded` / `task_completed` / plan / other extension
             // updates carry no distinct rendered content beyond what the tool
@@ -846,6 +1225,31 @@ fn str_field(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
+/// The call's status as this LINE states it, read from wherever the wire
+/// actually put it.
+///
+/// Grok never sets `update.status` on the initial `tool_call` (486/486 in the
+/// real transcripts on this machine) and only sets it on TERMINAL
+/// `tool_call_update`s; the affirmative running value — `"Pending"` — lives in
+/// the line-level `params._meta.updateParams.status`, a SIBLING of
+/// `params.update`. Mid-run cumulative updates carry neither, which correctly
+/// yields `None` ("this line states nothing") so the last stated value stands.
+/// The inner field wins when both are present (terminal updates carry both);
+/// the result is lowercased so the persisted value space stays the model's
+/// documented `pending`/`in_progress`/`completed`/`failed` regardless of the
+/// meta's capitalized spelling (`"Pending"`, `"Completed"`, …).
+fn grok_line_status(line: &Value, update: &Value) -> Option<String> {
+    update
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            line.pointer("/params/_meta/updateParams/status")
+                .and_then(Value::as_str)
+        })
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
 /// Peel Grok's `use_tool` MCP envelope (`{tool_name, tool_input}`) into its inner
 /// `(tool_name, tool_input)`. Mirrors `connection.rs::unwrap_grok_use_tool` so the
 /// history and live paths classify Grok's MCP calls identically. Native tools
@@ -966,9 +1370,9 @@ fn cap_json_to_budget(value: &Value, budget: usize) -> Option<String> {
     }
 }
 
-/// Serialize a Grok `TaskOutput` `rawOutput` — the result of a
-/// `get_command_or_subagent_output` poll — for the frontend, which parses it
-/// into a background-task card (`@/lib/background-task`). Returns `None` for
+/// Serialize a Grok `TaskOutput` / `SubagentCompleted` `rawOutput` — the result
+/// of a `get_command_or_subagent_output` poll — for the frontend, which parses
+/// it into a background-task card (`@/lib/background-task`). Returns `None` for
 /// every other `rawOutput`, so the caller falls through to its normal paths.
 ///
 /// The WHOLE envelope is passed through verbatim (bounded by
@@ -980,10 +1384,20 @@ fn cap_json_to_budget(value: &Value, budget: usize) -> Option<String> {
 /// entirely: `content[]` is absent on these updates, and the `output_for_prompt`
 /// / MCP paths don't match.
 ///
+/// `SubagentCompleted` is the sibling `ToolOutput` variant grok 0.2.11x emits
+/// when the SAME poll tool retrieves a background SUB-AGENT's result (flat
+/// `{subagent_id, subagent_type, tool_calls, turns, duration_ms, …}` fields —
+/// 0.2.9x instead folded subagents into a `TaskOutput.Result` whose `command`
+/// reads `[subagent:<type>] <description>`). Passing it through the same
+/// door keeps subagent polls from being the one shape both paths still drop.
+///
 /// Shared with the live path (`acp::connection::grok_live_tool_output`) so both
 /// hand the frontend a byte-identical string.
 pub(crate) fn grok_task_output_envelope(raw_output: &Value) -> Option<String> {
-    if raw_output.get("type").and_then(Value::as_str) != Some("TaskOutput") {
+    if !matches!(
+        raw_output.get("type").and_then(Value::as_str),
+        Some("TaskOutput") | Some("SubagentCompleted")
+    ) {
         return None;
     }
     cap_json_to_budget(raw_output, GROK_TASK_OUTPUT_CAP)
@@ -1006,6 +1420,42 @@ fn cap_json_string_values(value: &Value, cap: usize) -> Value {
                 .collect(),
         ),
         other => other.clone(),
+    }
+}
+
+/// Record the agent's own status on the `ToolUse` block correlated to `id`.
+///
+/// The `ToolUse` is pushed immediately before its placeholder `ToolResult` (see
+/// the `tool_call` arm), so it sits one slot earlier — but the slot is only
+/// written after its `tool_use_id` is confirmed to match, so a future change to
+/// that ordering degrades to "no status" (unknown) rather than to a status
+/// stamped on the wrong call. An absent status leaves the slot untouched: the
+/// last value the wire actually stated wins.
+fn apply_tool_status(
+    turn: Option<&mut MessageTurn>,
+    tool_result_idx: &std::collections::HashMap<String, usize>,
+    id: &str,
+    status: Option<&str>,
+) {
+    let Some(status) = status.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let Some(turn) = turn else { return };
+    let Some(&result_idx) = tool_result_idx.get(id) else {
+        return;
+    };
+    let Some(use_idx) = result_idx.checked_sub(1) else {
+        return;
+    };
+    if let Some(ContentBlock::ToolUse {
+        tool_use_id: Some(existing),
+        status: slot,
+        ..
+    }) = turn.blocks.get_mut(use_idx)
+    {
+        if existing == id {
+            *slot = Some(status.to_string());
+        }
     }
 }
 
@@ -1162,6 +1612,207 @@ fn append_thinking(turn: &mut MessageTurn, text: String) {
     } else {
         turn.blocks.push(ContentBlock::Thinking { text });
     }
+}
+
+// ---------------------------------------------------------------------------
+// spawn_subagent — child transcripts, lifecycle pairing, background marker
+// ---------------------------------------------------------------------------
+
+/// The ToolResult block belonging to `call_id`, wherever it landed.
+fn find_tool_result<'a>(turns: &'a [MessageTurn], call_id: &str) -> Option<&'a ContentBlock> {
+    turns.iter().flat_map(|t| t.blocks.iter()).find(|b| {
+        matches!(
+            b,
+            ContentBlock::ToolResult { tool_use_id: Some(id), .. } if id == call_id
+        )
+    })
+}
+
+/// Extract the `subagent_id: <uuid>` line from the background-launch ack
+/// ("Subagent started in background.\nsubagent_id: 019f…\ntype: explore…").
+/// `None` for any other text — notably a BLOCKING spawn's result, which is the
+/// child's final output.
+fn subagent_id_from_ack(output: &str) -> Option<String> {
+    if !output
+        .trim_start()
+        .starts_with(GROK_SUBAGENT_STARTED_ACK_PREFIX)
+    {
+        return None;
+    }
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("subagent_id:")
+            .map(|id| id.trim().trim_matches('`').to_string())
+            .filter(|id| !id.is_empty())
+    })
+}
+
+/// Build the [`BACKGROUND_TASK_MARKER`] payload replacing a background
+/// launch's ack text — the exact contract `parseBackgroundTaskMarker`
+/// (`src/lib/background-agent.ts`) renders: settled status + folded result,
+/// or "launched · result pending" while `status` is null. Byte-compatible
+/// with `claude.rs::apply_background_lifecycle`'s shape. Shared with the live
+/// `subagent_finished` settle (`acp::connection`) so a card flipped live and
+/// one re-parsed from disk render identically. `output` is capped here so both
+/// callers stay bounded.
+pub(crate) fn grok_background_subagent_marker(
+    subagent_id: &str,
+    status: Option<&str>,
+    output: Option<&str>,
+) -> String {
+    let payload = serde_json::json!({
+        "task_id": subagent_id,
+        "status": status,
+        "summary": Value::Null,
+        "result": output.map(|o| truncate_str(o, GROK_SUBAGENT_RESULT_CAP)),
+    });
+    format!("{BACKGROUND_TASK_MARKER}{payload}")
+}
+
+fn background_marker_payload(lifecycle: &GrokSubagentLifecycle) -> String {
+    grok_background_subagent_marker(
+        &lifecycle.subagent_id,
+        lifecycle.status.as_deref(),
+        lifecycle.output.as_deref(),
+    )
+}
+
+/// Apply one paired subagent's enrichment to its spawn call blocks:
+/// `agent_stats` onto the ToolResult, the background marker (when the recorded
+/// output was the launch ack), and — for a blocking spawn cut short before its
+/// completion frame — the child's final output. An errored spawn keeps its
+/// error text untouched.
+fn apply_subagent_result(
+    turns: &mut [MessageTurn],
+    call_id: &str,
+    stats: Option<AgentExecutionStats>,
+    marker: Option<String>,
+    lifecycle: &GrokSubagentLifecycle,
+) {
+    for turn in turns.iter_mut() {
+        for block in turn.blocks.iter_mut() {
+            let ContentBlock::ToolResult {
+                tool_use_id: Some(id),
+                output_preview,
+                is_error,
+                agent_stats,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            if id != call_id {
+                continue;
+            }
+            if stats.is_some() {
+                *agent_stats = stats.clone();
+            }
+            if let Some(marker) = &marker {
+                *output_preview = Some(marker.clone());
+            } else if !*is_error
+                && output_preview
+                    .as_deref()
+                    .is_none_or(|o| o.trim().is_empty())
+            {
+                if let Some(final_output) = &lifecycle.output {
+                    *output_preview = Some(final_output.clone());
+                }
+            }
+            return;
+        }
+    }
+}
+
+/// On-disk `subagents/<id>/meta.json` snapshot beside the parent session —
+/// the fallback source for status/duration/counts when the parent transcript
+/// was cut short before `subagent_finished` landed.
+struct GrokSubagentDiskMeta {
+    child_session_id: Option<String>,
+    status: Option<String>,
+    duration_ms: Option<u64>,
+    tool_calls: Option<u32>,
+}
+
+fn read_subagent_meta(session_dir: &Path, subagent_id: &str) -> Option<GrokSubagentDiskMeta> {
+    // `subagent_id` comes straight from transcript JSON; it becomes a path
+    // component, so reject anything that couldn't be a plain directory name.
+    if !is_safe_subagent_id(subagent_id) {
+        return None;
+    }
+    let raw = fs::read_to_string(
+        session_dir
+            .join("subagents")
+            .join(subagent_id)
+            .join("meta.json"),
+    )
+    .ok()?;
+    let v = serde_json::from_str::<Value>(&raw).ok()?;
+    Some(GrokSubagentDiskMeta {
+        child_session_id: v
+            .get("child_session_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        status: v.get("status").and_then(Value::as_str).map(str::to_string),
+        duration_ms: v.get("duration_ms").and_then(Value::as_u64),
+        tool_calls: v
+            .get("tool_calls")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()),
+    })
+}
+
+/// Nested tool calls from a CHILD session's `updates.jsonl` — the same
+/// wire format as the parent, so the child runs through [`parse_updates`]
+/// and its ToolUse/ToolResult pairs (kept adjacent by that parser) fold into
+/// the `AgentToolCall` list the Agent card renders. Previews are capped like
+/// `claude.rs`/`codebuddy.rs` nested calls. Missing/empty file → empty vec.
+fn subagent_tool_calls(child_updates: &Path) -> Vec<AgentToolCall> {
+    let parsed = parse_updates(child_updates);
+    let mut out = Vec::new();
+    for turn in &parsed.turns {
+        let mut pending: Option<(String, String, Option<String>)> = None;
+        for block in &turn.blocks {
+            match block {
+                ContentBlock::ToolUse {
+                    tool_use_id,
+                    tool_name,
+                    input_preview,
+                    ..
+                } => {
+                    pending = Some((
+                        tool_use_id.clone().unwrap_or_default(),
+                        tool_name.clone(),
+                        input_preview
+                            .as_deref()
+                            .map(|s| truncate_str(s, GROK_SUBAGENT_PREVIEW_CAP)),
+                    ));
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    output_preview,
+                    is_error,
+                    ..
+                } => {
+                    let Some((pending_id, tool_name, input_preview)) = pending.take() else {
+                        continue;
+                    };
+                    if tool_use_id.as_deref().unwrap_or_default() != pending_id {
+                        continue;
+                    }
+                    out.push(AgentToolCall {
+                        tool_name,
+                        input_preview,
+                        output_preview: output_preview
+                            .as_deref()
+                            .map(|s| truncate_str(s, GROK_SUBAGENT_PREVIEW_CAP)),
+                        is_error: *is_error,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// Immediate subdirectories of `dir` (non-recursive). Missing dir → empty.
@@ -1491,20 +2142,25 @@ mod tests {
         assert!(matches!(turns[1].role, TurnRole::Assistant));
     }
 
+    /// One turn whose stats live where Grok really puts them: model in
+    /// `update._meta.modelId`, cumulative `totalTokens` + timing in the OUTER
+    /// `params._meta`. Shared by the context-ring tests below.
+    const RING_UPDATES: &str = concat!(
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"},"_meta":{"modelId":"grok-4.5-fast","promptIndex":0}},"_meta":{"turnStartMs":1000,"totalTokens":100}},"timestamp":1783584019}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}},"_meta":{"totalTokens":500,"agentTimestampMs":3000}},"timestamp":1783584024}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"},"_meta":{"agentTimestampMs":5000}},"timestamp":1783584024}"#,
+        "\n",
+    );
+
     #[test]
     fn assistant_turn_carries_model_tokens_and_duration() {
         // Grok reports the footer's stats in two sibling metadata places the
         // loop must fold in: model in `update._meta.modelId`, and token total +
         // timing in the OUTER `params._meta` (`totalTokens` cumulative,
         // `turnStartMs` → `agentTimestampMs`).
-        let updates = concat!(
-            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"},"_meta":{"modelId":"grok-4.5-fast","promptIndex":0}},"_meta":{"turnStartMs":1000,"totalTokens":100}},"timestamp":1783584019}"#,
-            "\n",
-            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}},"_meta":{"totalTokens":500,"agentTimestampMs":3000}},"timestamp":1783584024}"#,
-            "\n",
-            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"},"_meta":{"agentTimestampMs":5000}},"timestamp":1783584024}"#,
-            "\n",
-        );
+        let updates = RING_UPDATES;
         let (_tmp, sessions) = fixture(SUMMARY, updates);
         let parser = GrokParser::with_base_dir(sessions);
         let detail = parser
@@ -1534,6 +2190,102 @@ mod tests {
             .context_window_usage_percent
             .expect("context window percent");
         assert!((pct - 0.1).abs() < 1e-6, "pct = {pct}");
+    }
+
+    /// Grok's own catalog outranks the id-shaped guess. The fixture's session
+    /// model (summary `current_model_id` = `grok-4.5`) would infer 500K from its
+    /// name, so a distinct cached window proves the ring read `models_cache.json`
+    /// and not the heuristic.
+    #[test]
+    fn context_window_prefers_groks_models_cache() {
+        let (tmp, sessions) = fixture(SUMMARY, RING_UPDATES);
+        write(
+            tmp.path(),
+            "models_cache.json",
+            r#"{"models":{"grok-4.5":{"info":{"context_window":314000}}}}"#,
+        );
+        let parser = GrokParser::with_base_dir(sessions);
+        let stats = parser
+            .get_conversation("019f45e3-e1ef-7690-a29f-fe2554382b49")
+            .unwrap()
+            .session_stats
+            .expect("session stats");
+        assert_eq!(stats.context_window_max_tokens, Some(314_000));
+    }
+
+    /// A BYO endpoint (`[model.<id>]` in `config.toml`) never appears in the
+    /// fetched catalog, so its declared window is the second source.
+    #[test]
+    fn context_window_falls_back_to_byo_config_toml() {
+        let (tmp, sessions) = fixture(SUMMARY, RING_UPDATES);
+        write(
+            tmp.path(),
+            "models_cache.json",
+            r#"{"models":{"some-other-model":{"info":{"context_window":999}}}}"#,
+        );
+        write(
+            tmp.path(),
+            "config.toml",
+            "[models]\ndefault = \"grok-4.5\"\n\n[model.\"grok-4.5\"]\nmodel = \"grok-4.5\"\ncontext_window = 123456\n",
+        );
+        let parser = GrokParser::with_base_dir(sessions);
+        let stats = parser
+            .get_conversation("019f45e3-e1ef-7690-a29f-fe2554382b49")
+            .unwrap()
+            .session_stats
+            .expect("session stats");
+        assert_eq!(stats.context_window_max_tokens, Some(123_456));
+    }
+
+    /// No catalog on disk (the common case for a machine that only ever ran
+    /// grok through codeg) → the name heuristic still supplies a window.
+    #[test]
+    fn context_window_falls_back_to_the_name_heuristic() {
+        let (_tmp, sessions) = fixture(SUMMARY, RING_UPDATES);
+        let parser = GrokParser::with_base_dir(sessions);
+        let stats = parser
+            .get_conversation("019f45e3-e1ef-7690-a29f-fe2554382b49")
+            .unwrap()
+            .session_stats
+            .expect("session stats");
+        assert_eq!(stats.context_window_max_tokens, Some(500_000));
+    }
+
+    #[test]
+    fn catalog_context_window_readers_reject_junk() {
+        // Real `models_cache.json` shape (trimmed) → the model's own window.
+        let cache = r#"{"grok_version":"1.0.0","models":{"grok-4.5":{"info":{
+            "id":"grok-4.5","context_window":500000,"agent_type":"grok-build-plan"},
+            "api_key":null}}}"#;
+        assert_eq!(
+            grok_context_window_from_models_cache(cache, "grok-4.5"),
+            Some(500_000)
+        );
+        // Unknown model / malformed JSON / non-positive window → no opinion.
+        assert_eq!(grok_context_window_from_models_cache(cache, "nope"), None);
+        assert_eq!(
+            grok_context_window_from_models_cache("{oops", "grok-4.5"),
+            None
+        );
+        assert_eq!(
+            grok_context_window_from_models_cache(
+                r#"{"models":{"m":{"info":{"context_window":0}}}}"#,
+                "m"
+            ),
+            None
+        );
+        // Same for the BYO TOML block.
+        let toml = "[model.mine]\nmodel = \"mine\"\ncontext_window = 64000\n";
+        assert_eq!(
+            grok_context_window_from_config_toml(toml, "mine"),
+            Some(64_000)
+        );
+        assert_eq!(grok_context_window_from_config_toml(toml, "other"), None);
+        assert_eq!(grok_context_window_from_config_toml("[model", "mine"), None);
+        assert_eq!(
+            grok_context_window_from_config_toml("[model.mine]\ncontext_window = -1\n", "mine"),
+            None
+        );
     }
 
     #[test]
@@ -1886,5 +2638,405 @@ mod tests {
         let (_tmp, sessions) = fixture(SUMMARY, ASK_UPDATES);
         let detail = ask_detail(sessions);
         assert!(ask_result_output(&detail).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // spawn_subagent
+    // -----------------------------------------------------------------------
+
+    const PARENT_ID: &str = "019f45e3-e1ef-7690-a29f-fe2554382b49";
+    const CHILD_ID: &str = "019f9432-e0d8-74c3-bd02-0772c4e04a65";
+
+    /// A BACKGROUND spawn mirroring the real 019f9432 capture: the launch call
+    /// completes with the "Subagent started in background…" ack, then the
+    /// `_x.ai` lifecycle events arrive, and the model polls the child with
+    /// `get_command_or_subagent_output` (0.2.11x `SubagentCompleted` shape).
+    fn background_spawn_updates() -> String {
+        [
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"探索代码库"},"_meta":{"modelId":"grok-4.5","promptIndex":0}}},"timestamp":1784897780}"#,
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"call-s1","title":"spawn_subagent","rawInput":{"description":"Explore test pages","prompt":"Explore this codebase","subagent_type":"explore","capability_mode":"read-only"},"_meta":{"x.ai/tool":{"version":1,"name":"spawn_subagent","kind":"task","namespace":"grok_build","label":"Subagent","read_only":false},"subagentBackground":true}}},"timestamp":1784897790}"#,
+            &format!(
+                r#"{{"method":"session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"tool_call_update","toolCallId":"call-s1","status":"completed","content":[{{"type":"content","content":{{"type":"text","text":"Subagent started in background.\nsubagent_id: {CHILD_ID}\ntype: explore\ndescription: Explore test pages\n\nUse get_command_or_subagent_output with task_ids=[\"{CHILD_ID}\"] and timeout_ms to wait for results."}}}}],"rawOutput":{{"type":"Text","text":"Subagent started in background.\nsubagent_id: {CHILD_ID}"}}}}}},"timestamp":1784897790}}"#
+            ),
+            &format!(
+                r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_spawned","subagent_id":"{CHILD_ID}","parent_session_id":"{PARENT_ID}","child_session_id":"{CHILD_ID}","subagent_type":"explore","description":"Explore test pages","capability_mode":"read-only","model":"grok-4.5"}}}},"timestamp":1784897790}}"#
+            ),
+            &format!(
+                r###"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_finished","subagent_id":"{CHILD_ID}","child_session_id":"{CHILD_ID}","status":"completed","tool_calls":2,"turns":1,"duration_ms":63775,"tokens_used":29477,"output":"## Codebase exploration summary\n\nNext.js 16 app."}}}},"timestamp":1784897853}}"###
+            ),
+            &format!(
+                r#"{{"method":"session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"tool_call","toolCallId":"call-p1","title":"get_command_or_subagent_output","rawInput":{{"task_ids":["{CHILD_ID}"],"timeout_ms":120000}},"_meta":{{"x.ai/tool":{{"name":"get_command_or_subagent_output","kind":"background_task_action"}}}}}}}},"timestamp":1784897860}}"#
+            ),
+            &format!(
+                r###"{{"method":"session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"tool_call_update","toolCallId":"call-p1","status":"completed","rawOutput":{{"type":"SubagentCompleted","subagent_id":"{CHILD_ID}","subagent_type":"explore","status":"completed","tool_calls":2,"turns":1,"duration_ms":63775,"output":"## Codebase exploration summary"}}}}}},"timestamp":1784897861}}"###
+            ),
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","prompt_id":"p0","stop_reason":"end_turn"}},"timestamp":1784897870}"#,
+        ]
+        .join("\n")
+    }
+
+    /// Child transcript (same wire format as the parent) with two tool calls.
+    const CHILD_UPDATES: &str = concat!(
+        r#"{"method":"session/update","params":{"sessionId":"c","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Explore this codebase"},"_meta":{"promptIndex":0}}},"timestamp":1784897791}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"c","update":{"sessionUpdate":"tool_call","toolCallId":"cc-1","title":"list_dir","rawInput":{"target_directory":"/Users/me/proj"},"_meta":{"x.ai/tool":{"name":"list_dir","kind":"list"}}}},"timestamp":1784897792}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"c","update":{"sessionUpdate":"tool_call_update","toolCallId":"cc-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"- app/\n- package.json"}}]}},"timestamp":1784897793}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"c","update":{"sessionUpdate":"tool_call","toolCallId":"cc-2","title":"read_file","rawInput":{"target_file":"/Users/me/proj/package.json"},"_meta":{"x.ai/tool":{"name":"read_file","kind":"read"}}}},"timestamp":1784897794}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"c","update":{"sessionUpdate":"tool_call_update","toolCallId":"cc-2","status":"failed","content":[{"type":"content","content":{"type":"text","text":"boom"}}]}},"timestamp":1784897795}"#,
+        "\n",
+        r###"{"method":"session/update","params":{"sessionId":"c","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"## Codebase exploration summary"}}},"timestamp":1784897796}"###,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"c","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}},"timestamp":1784897797}"#,
+        "\n",
+    );
+
+    fn child_summary(kind: &str) -> String {
+        format!(
+            r#"{{
+                "info": {{"id": "{CHILD_ID}", "cwd": "/Users/me/proj"}},
+                "generated_title": "Explore this codebase",
+                "created_at": "2026-07-24T12:56:30.176279Z",
+                "session_kind": "{kind}",
+                "agent_name": "explore",
+                "current_model_id": "grok-4.5"
+            }}"#
+        )
+    }
+
+    /// Create the child session dir as a SIBLING of the parent (same group).
+    fn write_child_session(sessions: &Path) {
+        let child = sessions.join("%2FUsers%2Fme%2Fproj").join(CHILD_ID);
+        fs::create_dir_all(&child).unwrap();
+        write(&child, "summary.json", &child_summary("subagent"));
+        write(&child, "updates.jsonl", CHILD_UPDATES);
+    }
+
+    fn spawn_blocks(detail: &ConversationDetail) -> (&ContentBlock, &ContentBlock) {
+        let blocks: Vec<&ContentBlock> = detail.turns.iter().flat_map(|t| &t.blocks).collect();
+        let tool_use = blocks
+            .iter()
+            .find(|b| {
+                matches!(b, ContentBlock::ToolUse { tool_use_id: Some(id), .. } if id == "call-s1")
+            })
+            .expect("spawn ToolUse");
+        let tool_result = blocks
+            .iter()
+            .find(|b| {
+                matches!(b, ContentBlock::ToolResult { tool_use_id: Some(id), .. } if id == "call-s1")
+            })
+            .expect("spawn ToolResult");
+        (tool_use, tool_result)
+    }
+
+    #[test]
+    fn background_spawn_renames_to_agent_with_stats_and_marker() {
+        let (_tmp, sessions) = fixture(SUMMARY, &background_spawn_updates());
+        write_child_session(&sessions);
+        let detail = GrokParser::with_base_dir(sessions)
+            .get_conversation(PARENT_ID)
+            .unwrap();
+        let (tool_use, tool_result) = spawn_blocks(&detail);
+
+        // The launcher renames to "Agent" (→ AgentToolCallPart) with its
+        // standard input untouched.
+        let ContentBlock::ToolUse {
+            tool_name,
+            input_preview: Some(input),
+            ..
+        } = tool_use
+        else {
+            panic!("spawn ToolUse shape");
+        };
+        assert_eq!(tool_name, "Agent");
+        let input: Value = serde_json::from_str(input).unwrap();
+        assert_eq!(input["subagent_type"], "explore");
+
+        // The ack is replaced by the background-task marker carrying the
+        // settled status + the child's final output, and the child transcript
+        // becomes nested agent_stats.
+        let ContentBlock::ToolResult {
+            output_preview: Some(output),
+            agent_stats: Some(stats),
+            is_error: false,
+            ..
+        } = tool_result
+        else {
+            panic!("spawn ToolResult shape");
+        };
+        let payload = output
+            .strip_prefix(BACKGROUND_TASK_MARKER)
+            .expect("background ack folded into the marker");
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(payload["task_id"], CHILD_ID);
+        assert_eq!(payload["status"], "completed");
+        assert!(payload["result"]
+            .as_str()
+            .unwrap()
+            .starts_with("## Codebase exploration summary"));
+
+        assert_eq!(stats.agent_type.as_deref(), Some("explore"));
+        assert_eq!(stats.status.as_deref(), Some("completed"));
+        assert_eq!(stats.total_duration_ms, Some(63775));
+        assert_eq!(stats.total_tokens, Some(29477));
+        assert_eq!(stats.total_tool_use_count, Some(2));
+        assert_eq!(stats.tool_calls.len(), 2);
+        assert_eq!(stats.tool_calls[0].tool_name, "list_dir");
+        assert!(!stats.tool_calls[0].is_error);
+        assert_eq!(stats.tool_calls[1].tool_name, "read_file");
+        assert!(stats.tool_calls[1].is_error);
+        // The child's own session travels with the stats so the Agent card can
+        // offer to open its transcript (grok runs every child as a full
+        // session; `get_conversation` resolves it despite the sidebar hiding
+        // `session_kind: "subagent"`).
+        assert_eq!(stats.child_session_id.as_deref(), Some(CHILD_ID));
+    }
+
+    /// The 0.2.11x subagent poll (`rawOutput.type == "SubagentCompleted"`)
+    /// must reach the frontend as the verbatim envelope — it previously
+    /// matched none of the output paths and the poll card streamed empty.
+    #[test]
+    fn subagent_poll_surfaces_subagent_completed_envelope() {
+        let (_tmp, sessions) = fixture(SUMMARY, &background_spawn_updates());
+        let detail = GrokParser::with_base_dir(sessions)
+            .get_conversation(PARENT_ID)
+            .unwrap();
+        let output = detail
+            .turns
+            .iter()
+            .flat_map(|t| &t.blocks)
+            .find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    output_preview,
+                    ..
+                } if tool_use_id.as_deref() == Some("call-p1") => output_preview.clone(),
+                _ => None,
+            })
+            .expect("poll ToolResult output");
+        let env: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(env["type"], "SubagentCompleted");
+        assert_eq!(env["subagent_id"], CHILD_ID);
+        assert_eq!(env["output"], "## Codebase exploration summary");
+    }
+
+    /// A `session_kind: "subagent"` child session never appears in the sidebar
+    /// list (it renders INSIDE the parent's Agent card), but stays openable by
+    /// direct id.
+    #[test]
+    fn subagent_child_sessions_are_hidden_from_list_but_openable() {
+        let (_tmp, sessions) = fixture(SUMMARY, &background_spawn_updates());
+        write_child_session(&sessions);
+        let parser = GrokParser::with_base_dir(sessions);
+        let list = parser.list_conversations().unwrap();
+        assert_eq!(
+            list.len(),
+            1,
+            "child must not pollute the conversation list"
+        );
+        assert_eq!(list[0].id, PARENT_ID);
+        let child = parser.get_conversation(CHILD_ID).unwrap();
+        assert!(
+            !child.turns.is_empty(),
+            "direct open still parses the child"
+        );
+    }
+
+    /// A BLOCKING spawn (no background ack): the lifecycle pairs positionally,
+    /// stats attach, and the recorded output — the child's own final text — is
+    /// left untouched (no marker). An interrupted session missing the
+    /// completion frame still gets the child's output from the lifecycle.
+    #[test]
+    fn blocking_spawn_keeps_output_and_attaches_stats() {
+        let updates = [
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"探索"},"_meta":{"promptIndex":0}}},"timestamp":1784897780}"#.to_string(),
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"call-s1","title":"spawn_subagent","rawInput":{"description":"Explore","prompt":"Explore this","subagent_type":"explore"},"_meta":{"x.ai/tool":{"name":"spawn_subagent","kind":"task"}}}},"timestamp":1784897790}"#.to_string(),
+            format!(
+                r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_spawned","subagent_id":"{CHILD_ID}","child_session_id":"{CHILD_ID}","subagent_type":"explore"}}}},"timestamp":1784897791}}"#
+            ),
+            format!(
+                r###"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_finished","subagent_id":"{CHILD_ID}","child_session_id":"{CHILD_ID}","status":"completed","tool_calls":2,"duration_ms":1000,"output":"## Findings"}}}},"timestamp":1784897853}}"###
+            ),
+            // No completion frame for call-s1 (interrupted session).
+        ]
+        .join("\n");
+        let (_tmp, sessions) = fixture(SUMMARY, &updates);
+        write_child_session(&sessions);
+        let detail = GrokParser::with_base_dir(sessions)
+            .get_conversation(PARENT_ID)
+            .unwrap();
+        let (tool_use, tool_result) = spawn_blocks(&detail);
+        assert!(matches!(
+            tool_use,
+            ContentBlock::ToolUse { tool_name, .. } if tool_name == "Agent"
+        ));
+        let ContentBlock::ToolResult {
+            output_preview: Some(output),
+            agent_stats: Some(stats),
+            ..
+        } = tool_result
+        else {
+            panic!("blocking spawn result should carry output + stats");
+        };
+        assert_eq!(
+            output, "## Findings",
+            "lifecycle output fills the gap, no marker"
+        );
+        assert_eq!(stats.tool_calls.len(), 2);
+    }
+
+    /// A hostile `child_session_id` must never escape the sessions directory;
+    /// the lifecycle's own totals still attach (no file access needed).
+    #[test]
+    fn hostile_subagent_ids_never_touch_the_filesystem() {
+        let updates = [
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"go"},"_meta":{"promptIndex":0}}},"timestamp":1784897780}"#.to_string(),
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"call-s1","title":"spawn_subagent","rawInput":{"description":"X","prompt":"Y","subagent_type":"explore"},"_meta":{"x.ai/tool":{"name":"spawn_subagent","kind":"task"}}}},"timestamp":1784897790}"#.to_string(),
+            r#"{"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"subagent_spawned","subagent_id":"../evil","child_session_id":"../../etc","subagent_type":"explore"}},"timestamp":1784897791}"#.to_string(),
+            r#"{"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"subagent_finished","subagent_id":"../evil","status":"completed","duration_ms":5,"output":"out"}},"timestamp":1784897792}"#.to_string(),
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}},"timestamp":1784897793}"#.to_string(),
+        ]
+        .join("\n");
+        let (_tmp, sessions) = fixture(SUMMARY, &updates);
+        let detail = GrokParser::with_base_dir(sessions)
+            .get_conversation(PARENT_ID)
+            .unwrap();
+        let (_, tool_result) = spawn_blocks(&detail);
+        let ContentBlock::ToolResult {
+            agent_stats: Some(stats),
+            ..
+        } = tool_result
+        else {
+            panic!("lifecycle totals still attach");
+        };
+        assert!(
+            stats.tool_calls.is_empty(),
+            "no transcript may load from a hostile id"
+        );
+        assert_eq!(stats.total_duration_ms, Some(5));
+        // …and the id is not handed to the frontend either: the card's "open
+        // the child's session" action would feed it straight back into a
+        // session-directory lookup.
+        assert_eq!(stats.child_session_id, None);
+    }
+
+    /// An errored spawn (depth limit, config) consumes no lifecycle, so a
+    /// following successful spawn still pairs with ITS OWN lifecycle.
+    #[test]
+    fn failed_spawn_does_not_shift_lifecycle_pairing() {
+        let updates = [
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"go"},"_meta":{"promptIndex":0}}},"timestamp":1784897780}"#.to_string(),
+            // Spawn #1 fails outright — grok emits no subagent_spawned for it.
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"call-s1","title":"spawn_subagent","rawInput":{"description":"A","prompt":"PA","subagent_type":"explore"},"_meta":{"x.ai/tool":{"name":"spawn_subagent","kind":"task"}}}},"timestamp":1784897790}"#.to_string(),
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-s1","status":"failed","content":[{"type":"content","content":{"type":"text","text":"subagents cannot spawn subagents"}}]}},"timestamp":1784897791}"#.to_string(),
+            // Spawn #2 succeeds (blocking) and finishes.
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"call-s2","title":"spawn_subagent","rawInput":{"description":"B","prompt":"PB","subagent_type":"plan"},"_meta":{"x.ai/tool":{"name":"spawn_subagent","kind":"task"}}}},"timestamp":1784897792}"#.to_string(),
+            format!(
+                r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_spawned","subagent_id":"{CHILD_ID}","child_session_id":"{CHILD_ID}","subagent_type":"plan"}}}},"timestamp":1784897793}}"#
+            ),
+            format!(
+                r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_finished","subagent_id":"{CHILD_ID}","status":"completed","tool_calls":1,"duration_ms":9,"output":"plan done"}}}},"timestamp":1784897794}}"#
+            ),
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-s2","status":"completed","content":[{"type":"content","content":{"type":"text","text":"plan done"}}]}},"timestamp":1784897795}"#.to_string(),
+            r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn"}},"timestamp":1784897796}"#.to_string(),
+        ]
+        .join("\n");
+        let (_tmp, sessions) = fixture(SUMMARY, &updates);
+        let detail = GrokParser::with_base_dir(sessions)
+            .get_conversation(PARENT_ID)
+            .unwrap();
+        let results: std::collections::HashMap<String, Option<AgentExecutionStats>> = detail
+            .turns
+            .iter()
+            .flat_map(|t| &t.blocks)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id: Some(id),
+                    agent_stats,
+                    ..
+                } if id.starts_with("call-s") => Some((id.clone(), agent_stats.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            results["call-s1"].is_none(),
+            "the failed spawn must not steal the next lifecycle"
+        );
+        let stats = results["call-s2"]
+            .as_ref()
+            .expect("stats on the real spawn");
+        assert_eq!(stats.agent_type.as_deref(), Some("plan"));
+        assert_eq!(stats.status.as_deref(), Some("completed"));
+    }
+
+    // ── per-call status: the only honest "is it still working?" signal ──────
+    //
+    // A grok sub-agent's transcript is read WHILE the child writes it
+    // (`SubagentSessionDialog` polls the file). The paired placeholder
+    // `ToolResult` cannot answer that question — it stays `output_preview:
+    // None` for an empty completion too, and `apply_tool_result` only backfills
+    // non-empty output — so the call's own status has to be recorded.
+
+    fn status_of<'a>(detail: &'a ConversationDetail, id: &str) -> Option<&'a str> {
+        detail
+            .turns
+            .iter()
+            .flat_map(|t| &t.blocks)
+            .find_map(|b| match b {
+                ContentBlock::ToolUse {
+                    tool_use_id: Some(tid),
+                    status,
+                    ..
+                } if tid == id => Some(status.as_deref()),
+                _ => None,
+            })
+            .expect("ToolUse block")
+    }
+
+    // The REAL wire shape, measured across every grok transcript on this
+    // machine (486 `tool_call` lines): the initial update NEVER carries
+    // `update.status`; the affirmative `"Pending"` sits in the LINE-level
+    // `params._meta.updateParams.status` (a sibling of `params.update`, with
+    // capitalized values). Terminal `tool_call_update`s carry both (inner
+    // lowercase + meta capitalized); mid-run cumulative updates carry neither.
+    const STATUS_UPDATES: &str = concat!(
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c-run","title":"read_file","rawInput":{"target_file":"a.rs"}},"_meta":{"updateParams":{"toolCallId":"c-run","status":"Pending"}}},"timestamp":1784897790}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c-done","title":"read_file","rawInput":{"target_file":"b.rs"}},"_meta":{"updateParams":{"toolCallId":"c-done","status":"Pending"}}},"timestamp":1784897791}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"c-done","content":[{"type":"content","content":{"type":"text","text":"partial"}}]}},"timestamp":1784897792}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"c-done","status":"completed","content":[{"type":"content","content":{"type":"text","text":"ok"}}]},"_meta":{"updateParams":{"toolCallId":"c-done","status":"Completed"}}},"timestamp":1784897793}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c-empty","title":"write_file","rawInput":{"target_file":"c.rs"}},"_meta":{"updateParams":{"toolCallId":"c-empty","status":"Pending"}}},"timestamp":1784897794}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"c-empty","status":"completed"},"_meta":{"updateParams":{"toolCallId":"c-empty","status":"Completed"}}},"timestamp":1784897795}"#,
+        "\n",
+        r#"{"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c-silent","title":"read_file","rawInput":{"target_file":"d.rs"}}},"timestamp":1784897796}"#,
+        "\n",
+    );
+
+    #[test]
+    fn tool_use_records_the_calls_own_status() {
+        let (_tmp, sessions) = fixture(SUMMARY, STATUS_UPDATES);
+        let detail = GrokParser::with_base_dir(sessions)
+            .get_conversation("019f45e3-e1ef-7690-a29f-fe2554382b49")
+            .unwrap();
+
+        // Initial status comes from the line-level meta ("Pending", lowercased)
+        // — the inner update has none. This is the running call, and the status
+        // is the ONLY thing that says so: its placeholder result looks
+        // identical to an empty completion's.
+        assert_eq!(status_of(&detail, "c-run"), Some("pending"));
+        // A content-only update states no status and must not clear it; the
+        // terminal update then wins.
+        assert_eq!(status_of(&detail, "c-done"), Some("completed"));
+        // A completion carrying NO output is still a completion: this is the
+        // case that makes "empty output" useless as a liveness signal.
+        assert_eq!(status_of(&detail, "c-empty"), Some("completed"));
+        // Absent everywhere stays absent — unknown, never a guess.
+        assert_eq!(status_of(&detail, "c-silent"), None);
     }
 }

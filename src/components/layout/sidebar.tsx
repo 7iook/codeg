@@ -46,18 +46,24 @@ import { isDesktop } from "@/lib/platform"
 import { leftChromeReserve } from "@/lib/window-chrome"
 import {
   loadShowCompleted,
+  loadShowRecent,
   loadShowWorktrees,
   loadShowSubsessions,
   loadSortMode,
   loadSectionOrder,
+  moveSectionInOrder,
   saveShowCompleted,
+  saveShowRecent,
   saveShowWorktrees,
   saveShowSubsessions,
   saveSortMode,
   saveSectionOrder,
+  DEFAULT_SECTION_ORDER,
+  type SidebarSectionId,
   type SidebarSortMode,
   type SidebarSectionOrder,
 } from "@/lib/sidebar-view-mode-storage"
+import { SidebarSectionOrderControl } from "./sidebar-section-order-control"
 import { cn } from "@/lib/utils"
 
 // Keyboard-shortcut hint at the trailing edge of the New chat / Search rows.
@@ -74,6 +80,13 @@ const SHORTCUT_BADGE_CLASS = cn(
   "opacity-0 transition-opacity duration-150",
   "group-hover:opacity-100 group-focus-visible:opacity-100"
 )
+
+// Which sections the order editor should render as switched-off. Module
+// constants rather than a per-render `new Set`, so the reference is stable and
+// the two states are spelled out once. "Recent" is the only section with a
+// visibility toggle today.
+const NO_HIDDEN_SECTIONS: ReadonlySet<SidebarSectionId> = new Set()
+const RECENT_HIDDEN: ReadonlySet<SidebarSectionId> = new Set(["recent"])
 
 /**
  * A fixed top-of-sidebar action / route row. `active` marks the row as the
@@ -137,17 +150,19 @@ export function Sidebar() {
   // rem-sized overlay buttons. Mobile has no overlay (the sidebar is a Sheet).
   const leftReserve = leftChromeReserve(platformIsMac && isDesktop(), zoomLevel)
 
-  // `showCompleted` defaults OFF, `showWorktrees` defaults ON, and
+  // `showCompleted` defaults OFF; `showWorktrees` and `showRecent` default ON;
   // `showSubsessions` defaults OFF (delegation subtrees only render once the
-  // user opts in). The mount effect below reconciles a persisted override. Each
-  // initial value matches its own default so the pre-hydration render doesn't
-  // flash as the stored preference is applied.
+  // user opts in). The mount effect below reconciles a persisted override.
+  // Each initial value matches its own default so the pre-hydration render
+  // doesn't flash as the stored preference is applied.
   const [showCompleted, setShowCompleted] = useState(false)
   const [showWorktrees, setShowWorktrees] = useState(true)
   const [showSubsessions, setShowSubsessions] = useState(false)
+  const [showRecent, setShowRecent] = useState(true)
   const [sortMode, setSortMode] = useState<SidebarSortMode>("created")
-  const [sectionOrder, setSectionOrder] =
-    useState<SidebarSectionOrder>("folders-first")
+  const [sectionOrder, setSectionOrder] = useState<SidebarSectionOrder>(
+    DEFAULT_SECTION_ORDER
+  )
   const [allExpanded, setAllExpanded] = useState(true)
   const searchShortcutLabel = formatShortcutLabel(
     shortcuts.toggle_search,
@@ -164,6 +179,7 @@ export function Sidebar() {
   const toggleExpandLabel = allExpanded
     ? t("collapseAllGroups")
     : t("expandAllGroups")
+  const hiddenSections = showRecent ? NO_HIDDEN_SECTIONS : RECENT_HIDDEN
 
   useEffect(() => {
     // Hydrate from localStorage after mount to keep SSR/CSR markup consistent.
@@ -171,6 +187,7 @@ export function Sidebar() {
     setShowCompleted(loadShowCompleted())
     setShowWorktrees(loadShowWorktrees())
     setShowSubsessions(loadShowSubsessions())
+    setShowRecent(loadShowRecent())
     setSortMode(loadSortMode())
     setSectionOrder(loadSectionOrder())
   }, [])
@@ -190,18 +207,30 @@ export function Sidebar() {
     saveShowSubsessions(value)
   }, [])
 
+  const handleSetShowRecent = useCallback((value: boolean) => {
+    setShowRecent(value)
+    saveShowRecent(value)
+  }, [])
+
   const handleSetSortMode = useCallback((value: string) => {
     const mode: SidebarSortMode = value === "updated" ? "updated" : "created"
     setSortMode(mode)
     saveSortMode(mode)
   }, [])
 
-  const handleSetSectionOrder = useCallback((value: string) => {
-    const next: SidebarSectionOrder =
-      value === "chats-first" ? "chats-first" : "folders-first"
-    setSectionOrder(next)
-    saveSectionOrder(next)
-  }, [])
+  // Nudge one section up/down a slot. `moveSectionInOrder` returns the SAME
+  // array when the move would fall off an end, so a clamped nudge neither
+  // re-renders the list nor rewrites localStorage.
+  const handleMoveSection = useCallback(
+    (id: SidebarSectionId, delta: number) => {
+      setSectionOrder((prev) => {
+        const next = moveSectionInOrder(prev, id, delta)
+        if (next !== prev) saveSectionOrder(next)
+        return next
+      })
+    },
+    []
+  )
 
   const handleToggleExpandAll = useCallback(() => {
     if (allExpanded) {
@@ -328,7 +357,11 @@ export function Sidebar() {
                 <Funnel aria-hidden="true" className="h-3.5 w-3.5" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            {/* Wider than the shared `min-w-48`: the section-order rows carry a
+                position chip and two move buttons beside the name, and the menu
+                clips overflow-x — 48 would start truncating longer localized
+                section names (and already wrapped the checkbox labels). */}
+            <DropdownMenuContent align="end" className="min-w-56">
               {/* Desktop only: expand/collapse lives in this menu (it kept its
                   standalone header button on mobile). */}
               {!isMobile && (
@@ -344,23 +377,38 @@ export function Sidebar() {
                   <DropdownMenuSeparator />
                 </>
               )}
+              {/* Every option below keeps the menu open on select (the default
+                  is to close): this menu is a settings panel, not a command
+                  list, and flipping two of them used to cost two round trips
+                  through the trigger. The expand/collapse-all entry above is
+                  the one real action here, so it still closes. */}
               <DropdownMenuCheckboxItem
                 checked={showCompleted}
                 onCheckedChange={handleSetShowCompleted}
+                onSelect={(event) => event.preventDefault()}
               >
                 {t("showCompleted")}
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
                 checked={showWorktrees}
                 onCheckedChange={handleSetShowWorktrees}
+                onSelect={(event) => event.preventDefault()}
               >
                 {t("showWorktrees")}
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
                 checked={showSubsessions}
                 onCheckedChange={handleSetShowSubsessions}
+                onSelect={(event) => event.preventDefault()}
               >
                 {t("showSubsessions")}
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                checked={showRecent}
+                onCheckedChange={handleSetShowRecent}
+                onSelect={(event) => event.preventDefault()}
+              >
+                {t("showRecent")}
               </DropdownMenuCheckboxItem>
               <DropdownMenuSeparator />
               <DropdownMenuLabel>{t("sortBy")}</DropdownMenuLabel>
@@ -368,26 +416,26 @@ export function Sidebar() {
                 value={sortMode}
                 onValueChange={handleSetSortMode}
               >
-                <DropdownMenuRadioItem value="created">
+                <DropdownMenuRadioItem
+                  value="created"
+                  onSelect={(event) => event.preventDefault()}
+                >
                   {t("sortByCreatedAt")}
                 </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="updated">
+                <DropdownMenuRadioItem
+                  value="updated"
+                  onSelect={(event) => event.preventDefault()}
+                >
                   {t("sortByUpdatedAt")}
                 </DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
               <DropdownMenuSeparator />
               <DropdownMenuLabel>{t("sectionOrder")}</DropdownMenuLabel>
-              <DropdownMenuRadioGroup
-                value={sectionOrder}
-                onValueChange={handleSetSectionOrder}
-              >
-                <DropdownMenuRadioItem value="folders-first">
-                  {t("sectionOrderFoldersFirst")}
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="chats-first">
-                  {t("sectionOrderChatsFirst")}
-                </DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
+              <SidebarSectionOrderControl
+                order={sectionOrder}
+                onMove={handleMoveSection}
+                hiddenSections={hiddenSections}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -484,6 +532,7 @@ export function Sidebar() {
           showCompleted={showCompleted}
           showWorktrees={showWorktrees}
           showSubsessions={showSubsessions}
+          showRecent={showRecent}
           sortMode={sortMode}
           sectionOrder={sectionOrder}
         />

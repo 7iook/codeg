@@ -708,10 +708,18 @@ pub struct SessionConfigSelectInfo {
     pub groups: Vec<SessionConfigSelectGroupInfo>,
 }
 
+/// An on/off toggle config option (ACP's `unstable_boolean_config`). Cline
+/// 3.0.50+ ships one as `auto_approve` ("Auto-approve tools").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfigBooleanInfo {
+    pub current_value: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionConfigKindInfo {
     Select(SessionConfigSelectInfo),
+    Boolean(SessionConfigBooleanInfo),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -723,14 +731,17 @@ pub struct SessionConfigOptionInfo {
     pub kind: SessionConfigKindInfo,
 }
 
-/// Grok's per-model reasoning-effort capability, parsed from a session
-/// response's top-level `models.availableModels[]._meta` (only reachable via the
-/// raw JSON, since the `unstable_session_model` feature that would surface the
-/// typed `models` field is intentionally off). Drives the model-reactive
-/// composer effort selector: `supports == false` ⇒ the model shows NO effort
-/// selector. Backend-internal — NOT serialized onto the wire.
+/// What Grok says about ONE of its models, parsed from a session response's
+/// top-level `models.availableModels[]._meta` (only reachable via the raw JSON,
+/// since the `unstable_session_model` feature that would surface the typed
+/// `models` field is intentionally off). Backend-internal — NOT serialized onto
+/// the wire.
+///
+/// Two consumers: the model-reactive composer effort selector (`supports ==
+/// false` ⇒ the model shows NO effort selector) and the live context ring, which
+/// pairs `context_window` with Grok's cumulative per-turn token count.
 #[derive(Debug, Clone, Default)]
-pub struct GrokEffortSpec {
+pub struct GrokModelSpec {
     /// Switchable efforts the model advertises: `(id, label, description)`.
     pub options: Vec<(String, String, Option<String>)>,
     /// The model's default/current effort. MAY fall outside `options`
@@ -738,6 +749,11 @@ pub struct GrokEffortSpec {
     pub default: Option<String>,
     /// Whether the model advertises `supportsReasoningEffort`.
     pub supports: bool,
+    /// The model's context window (`totalContextTokens`) — Grok's own number,
+    /// which beats inferring one from the model id. `None` when the entry omits
+    /// it, and the caller falls back to
+    /// [`crate::parsers::infer_context_window_max_tokens`].
+    pub context_window: Option<u64>,
 }
 
 /// Read-only snapshot of the modes + config_options an agent advertises
@@ -759,6 +775,13 @@ pub struct AgentOptionsSnapshot {
     /// `#[serde(default)]` keeps older snapshots deserializable.
     #[serde(default)]
     pub available_commands: Vec<AvailableCommandInfo>,
+    /// What the agent accepts in a prompt, captured from the same probe. A
+    /// composer with no live session (the to-do task boxes) needs this to
+    /// encode an attached image the way THIS agent takes it — natively, or as
+    /// an embedded resource blob for the agents that reject image content.
+    /// `None` when the agent advertised nothing within the probe window.
+    #[serde(default)]
+    pub prompt_capabilities: Option<PromptCapabilitiesInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

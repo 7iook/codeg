@@ -73,6 +73,10 @@ function seedSession(overrides: Partial<ConversationRuntimeSession>) {
     delegationKickoffText: null,
     sessionStats: null,
     historyAssistantBaseline: null,
+    batchBoundaryIndex: null,
+    batchBoundaryPrefixHash: null,
+    loadingOlderTurns: false,
+    olderTurnsPrependEpoch: 0,
     pendingCleanup: false,
     ...overrides,
   }

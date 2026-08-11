@@ -577,6 +577,7 @@ fn content_block(item: &Value, out: &mut ParsedTranscript) -> ContentBlock {
                 .unwrap_or("tool")
                 .to_string(),
             input_preview: tool_input_preview(data.and_then(|d| d.get("input"))),
+            status: None,
             meta: None,
         },
         "toolResult" => tool_result_block(data),
@@ -802,6 +803,7 @@ fn compaction_blocks(data: Option<&Value>, seq: u32) -> Vec<ContentBlock> {
             tool_use_id: Some(id.clone()),
             tool_name: "context_compaction".to_string(),
             input_preview: None,
+            status: None,
             meta: Some(Value::Object(meta)),
         },
         ContentBlock::ToolResult {
