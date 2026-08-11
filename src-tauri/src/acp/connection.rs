@@ -1575,11 +1575,6 @@ pub async fn spawn_agent_connection(
         .spawn(move || {
             let _cleanup = cleanup_guard;
             connection_rt.block_on(async move {
-                // [merge-v0.23.0] union: keep HEAD nested-async structure +
-                // pass upstream's new `stderr_tail` arg into run_connection +
-                // add upstream's `details: None` field on AcpEvent::Error +
-                // keep HEAD's delegation cleanup (revoke token, cancel by
-                // parent for broker / questions / plan_approvals).
                 let delegation_for_cleanup = delegation_injection.clone();
                 let result = run_connection(
                     agent,
@@ -4088,6 +4083,16 @@ async fn run_connection(
                 init_resp.agent_info.as_ref().map(|i| i.version.as_str()),
                 native_steering_available
             );
+            // Persist the self-reported continuation capabilities onto the
+            // session state (design D3.1) — the broker / availability query
+            // reads them via `manager.get_state` to classify a delegated
+            // child as Resumable vs LiveOnly. Previously log-only.
+            {
+                let mut s = state.write().await;
+                s.agent_supports_load_session = init_resp.agent_capabilities.load_session;
+                s.agent_supports_resume = supports_resume;
+                s.agent_supports_fork = supports_fork;
+            }
 
             // Whether this agent accepts MCP server entries over the ACP wire
             // (`session/new`'s `mcpServers`). Almost all do; OpenClaw rejects

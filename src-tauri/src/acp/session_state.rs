@@ -412,10 +412,6 @@ pub struct SessionState {
     /// (possibly later-toggled) global setting.
     pub feedback_tool_available: bool,
 
-    // [merge-v0.23.0] union: BOTH HEAD's agent_supports_load_session/resume/fork/steering
-    // fields (self-reported continuation + steering capabilities) AND upstream/main's
-    // native_steering_available (initialize-time synthesized native push channel gate).
-    // All are set at initialize and read independently.
     /// Continuation capabilities the agent SELF-REPORTED in its `initialize`
     /// response (design D3.1): `agent_capabilities.load_session`,
     /// `session_capabilities.resume` (Claude's raw-meta resume), and
@@ -595,8 +591,6 @@ impl SessionState {
             recent_events: RecentEventsBuffer::new(),
             delegation_token: None,
             feedback_tool_available: false,
-            // [merge-v0.23.0] init BOTH HEAD's self-reported capability fields
-            // AND upstream's native_steering_available (defaults false; set at initialize).
             agent_supports_load_session: false,
             agent_supports_resume: false,
             agent_supports_fork: false,
@@ -1182,8 +1176,8 @@ impl SessionState {
                 // 工具调用寻址，而 active_delegations 以 parent_tool_use_id 为键、
                 // 只装初轮在跑的委派——续聊轮压根不在其中，没有可改的条目。
                 // 事件本身携带该轮的 result（消费方据此判定终态，不再靠"事件到了"
-                // 猜成功）；get_delegation_status 仍是完整报告（子会话正文 / 用量 /
-                // persona）的真源。
+                // 猜成功）；按 Requirement 8.4，get_delegation_status 仍是完整报告
+                // （子会话正文 / 用量 / persona）的状态真源，消费方收到后回查。
             }
         }
         self.last_activity_at = Utc::now();

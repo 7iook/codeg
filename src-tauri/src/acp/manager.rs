@@ -2537,9 +2537,9 @@ impl ConnectionManager {
         if !native && !tool_available {
             return Err(AcpError::FeedbackDisabled);
         }
-        // [merge-v0.23.0] native steering push channel from upstream 9b3131f3: on
-        // native-capable sessions, delegate to `submit_feedback_native` (shield + push
-        // via `_session/steering`); pull path (below) remains for non-native adapters.
+        // Native steering push channel: on native-capable sessions, delegate to
+        // `submit_feedback_native` (shield + push via `_session/steering`); the
+        // pull path (below) remains for non-native adapters.
         if native {
             return Self::submit_feedback_native(conn_id, state, cmd_tx, emitter, text).await;
         }

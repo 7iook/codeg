@@ -406,10 +406,12 @@ pub enum AcpEvent {
     /// `continue_with_session` or the user-side entry) reached a terminal
     /// state. Session-addressed — it replaces the tool-scoped
     /// `DelegationCompleted`, which is emitted ONLY for the original turn (a
-    /// tool call completes exactly once; Requirement 2.8a). `turn_version`
-    /// orders events (drop lower than last applied, re-query on gaps —
-    /// Requirements 8.3/8.4); `get_delegation_status` remains the source a
-    /// consumer polls for the FULL report (child text, token usage, persona).
+    /// tool call completes exactly once; Requirement 2.8a). Consumers treat
+    /// this as an increment NOTIFICATION and re-query the delegation status
+    /// as the authoritative source; `turn_version` orders events (drop lower
+    /// than last applied, re-query on gaps — Requirements 8.3/8.4).
+    /// `get_delegation_status` remains the source a consumer polls for the
+    /// FULL report (child text, token usage, persona).
     DelegationSessionUpdate {
         parent_connection_id: String,
         child_conversation_id: i32,
