@@ -1615,7 +1615,7 @@ fn terminal_fields(
             None,
         ),
         DelegationOutcome::Err { code, message, .. } => {
-            let status = if code == "canceled" {
+            let status = if crate::acp::delegation::types::is_cancel_wire_code(code) {
                 TaskStatus::Canceled
             } else {
                 TaskStatus::Failed
@@ -4262,7 +4262,8 @@ impl DelegationBroker {
                 // during setup keeps it alive for continue_with_session.
                 let is_canceled = matches!(
                     outcome,
-                    DelegationOutcome::Err { code, .. } if code == "canceled"
+                    DelegationOutcome::Err { code, .. }
+                        if crate::acp::delegation::types::is_cancel_wire_code(code)
                 );
                 let keep_conn = (!is_canceled).then(|| child_connection_id.clone());
                 inner.settle_session(&call_id, terminal_fields(outcome).0, keep_conn)
@@ -4531,7 +4532,8 @@ impl DelegationBroker {
     pub async fn complete_call(&self, call_id: &str, mut outcome: DelegationOutcome) {
         let is_canceled = matches!(
             &outcome,
-            DelegationOutcome::Err { code, .. } if code == "canceled"
+            DelegationOutcome::Err { code, .. }
+                if crate::acp::delegation::types::is_cancel_wire_code(code)
         );
         let task = {
             let mut inner = self.pending.inner.lock().await;
@@ -4683,7 +4685,8 @@ impl DelegationBroker {
         // (the cancel_by_* paths run their own teardown).
         let should_disconnect = matches!(
             outcome,
-            DelegationOutcome::Err { code, .. } if code == "canceled"
+            DelegationOutcome::Err { code, .. }
+                if crate::acp::delegation::types::is_cancel_wire_code(code)
         );
         if should_disconnect {
             let _ = self.spawner.disconnect(child_connection_id).await;

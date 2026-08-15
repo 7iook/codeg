@@ -602,6 +602,19 @@ export function deriveBadge(
   return { status: "starting" }
 }
 
+/** Wire codes that mean "torn down" rather than "failed" — the TS mirror of
+ *  Rust `acp::delegation::types::is_cancel_wire_code`. A cancel gained three
+ *  attributable codes; consumers must ask this rather than compare against the
+ *  bare `"canceled"` literal, or a user cancel reads back as a failure.
+ *  `child_upstream_stream_error` is deliberately excluded: it IS a failure. */
+export function isCancelWireCode(code: string | null | undefined): boolean {
+  return (
+    code === "canceled" ||
+    code === "user_canceled" ||
+    code === "parent_mcp_cascade"
+  )
+}
+
 /** Compact human duration: `350ms`, `1.2s`, `12s`, `2m 0s`. Total seconds are
  *  rounded once before splitting so the remainder never rolls to `60s`. */
 export function formatDuration(ms: number): string {

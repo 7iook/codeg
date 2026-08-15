@@ -386,6 +386,31 @@ pub const PARENT_MCP_CASCADE_WIRE_CODE: &str = "parent_mcp_cascade";
 /// source fallback).
 pub const USER_CANCELED_WIRE_CODE: &str = "user_canceled";
 
+/// Wire-stable code for the generic [`DelegationError::Canceled`] — a cancel
+/// whose source could not be attributed. Named because it is no longer the
+/// ONLY cancel code: [`is_cancel_wire_code`] is what consumers must ask.
+pub const CANCELED_WIRE_CODE: &str = "canceled";
+
+/// Does this wire code mean "torn down" rather than "failed"?
+///
+/// The single decision point for the whole cancel family, and the reason it
+/// exists: `8deb5363` split one `canceled` code into four attributable ones but
+/// left every consumer comparing against the bare `"canceled"` literal, so a
+/// user cancel — the most common one — was recorded as `Failed` in the
+/// completed-cache and read back as a failure by both the panel and the parent
+/// LLM. Add a cancel variant here, and status mapping plus child teardown
+/// follow automatically.
+///
+/// [`DelegationError::ChildUpstreamStreamError`] is deliberately NOT a member:
+/// an upstream stream error / rate limit is a genuine failure that happens to
+/// terminate the turn, and reporting it as a cancel would hide it.
+pub fn is_cancel_wire_code(code: &str) -> bool {
+    matches!(
+        code,
+        CANCELED_WIRE_CODE | USER_CANCELED_WIRE_CODE | PARENT_MCP_CASCADE_WIRE_CODE
+    )
+}
+
 /// Reason-string prefix codeg-mcp uses when its parent-PID watchdog fires,
 /// its stdin closes, or its stdin errors — every task drained by
 /// `drain_and_cancel_all` rides one of these strings on the wire, so the
@@ -648,10 +673,10 @@ impl DelegationOutcome {
             DelegationError::ChildEmpty => "child_empty",
             DelegationError::ChildUnknown(_) => "child_unknown",
             DelegationError::ChildUpstreamStreamError(_) => CHILD_UPSTREAM_STREAM_ERROR_WIRE_CODE,
-            DelegationError::Canceled { .. } => "canceled",
+            DelegationError::Canceled { .. } => CANCELED_WIRE_CODE,
             DelegationError::ParentMcpCascade { .. } => PARENT_MCP_CASCADE_WIRE_CODE,
             DelegationError::UserCanceled { .. } => USER_CANCELED_WIRE_CODE,
-            DelegationError::ParentSessionGone => "canceled",
+            DelegationError::ParentSessionGone => CANCELED_WIRE_CODE,
             DelegationError::SessionStillRunning => "session_still_running",
             DelegationError::SessionReleased => "session_released",
             DelegationError::NotContinuable(_) => "not_continuable",
@@ -914,5 +939,47 @@ mod tests {
         assert!(PARENT_MCP_CASCADE_REASON_PREFIXES.contains(&"companion stdio closed"));
         assert!(PARENT_MCP_CASCADE_REASON_PREFIXES.contains(&"companion stdin error"));
         assert_eq!(USER_CANCEL_REASON_PREFIX, "canceled by request");
+    }
+
+    /// Every cancel-family variant must be recognized as a cancel through the
+    /// single predicate, and the upstream-error variant must NOT be.
+    ///
+    /// The regression this locks: `cancel_task_by_id` cancels with the reason
+    /// `"canceled by request"`, which classifies to `UserCanceled` /
+    /// `user_canceled` — and every consumer compared against the bare
+    /// `"canceled"` literal, so the completed-cache recorded the user's own
+    /// cancel as `Failed` and the panel read it back as a failure.
+    #[test]
+    fn every_cancel_variant_is_recognized_as_a_cancel_by_wire_code() {
+        fn code_of(err: DelegationError) -> String {
+            match DelegationOutcome::from_err(err, Some(1)) {
+                DelegationOutcome::Err { code, .. } => code,
+                DelegationOutcome::Ok(_) => unreachable!("from_err never yields Ok"),
+            }
+        }
+
+        for err in [
+            DelegationError::Canceled { reason: "r".into() },
+            DelegationError::UserCanceled {
+                reason: "canceled by request".into(),
+            },
+            DelegationError::ParentMcpCascade {
+                reason: "parent process exited".into(),
+            },
+            DelegationError::ParentSessionGone,
+        ] {
+            let code = code_of(err);
+            assert!(
+                is_cancel_wire_code(&code),
+                "{code} must count as a cancel, not a failure"
+            );
+        }
+        assert!(
+            !is_cancel_wire_code(&code_of(DelegationError::ChildUpstreamStreamError(
+                "529".into()
+            ))),
+            "an upstream stream error is a real failure and must stay one"
+        );
+        assert!(!is_cancel_wire_code("spawn_failed"));
     }
 }

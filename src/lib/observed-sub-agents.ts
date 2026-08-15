@@ -24,6 +24,7 @@
  */
 
 import type { DelegationBinding } from "@/contexts/delegation-context"
+import { isCancelWireCode } from "@/lib/delegation-status"
 import type { SubagentTrackedEntry } from "@/lib/subagent-transcript"
 import type { AgentType } from "@/lib/types"
 
@@ -211,7 +212,7 @@ function delegationLifecycle(
 ): ObservedLifecycle {
   if (status === "ok") return "completed"
   if (status === "err") {
-    return errorCode === "canceled" ? "canceled" : "failed"
+    return isCancelWireCode(errorCode) ? "canceled" : "failed"
   }
   // `running`, and anything unrecognized: treat as live rather than inventing
   // a terminal state for a delegation that may well still be working.
