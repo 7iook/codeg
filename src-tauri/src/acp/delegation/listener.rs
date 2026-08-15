@@ -894,6 +894,7 @@ fn report_canceled(message: &str) -> DelegationTaskReport {
         // Setup-side rejection: nothing was ever spawned, so no model was
         // requested of any child.
         requested_model: None,
+        blocked_on: None,
     }
 }
 
@@ -910,6 +911,7 @@ fn report_failed(error_code: &str, message: &str) -> DelegationTaskReport {
         duration_ms: None,
         applied_persona: None,
         requested_model: None,
+        blocked_on: None,
     }
 }
 
@@ -927,6 +929,7 @@ fn unknown_report(task_id: &str) -> DelegationTaskReport {
         duration_ms: None,
         applied_persona: None,
         requested_model: None,
+        blocked_on: None,
     }
 }
 

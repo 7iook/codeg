@@ -47,6 +47,7 @@ import {
 } from "@/components/message/goal-control-context"
 import { ConversationShell } from "@/components/chat/conversation-shell"
 import { SessionConfigStaleBanner } from "@/components/chat/session-config-stale-banner"
+import { PiProjectTrustBanner } from "@/components/chat/pi-project-trust-banner"
 import { BackgroundTasksChip } from "@/components/chat/background-tasks-chip"
 import { SubAgentObservatoryPanel } from "@/components/chat/sub-agent-observatory-panel"
 import { CancelScopeDialog } from "@/components/chat/cancel-scope-dialog"
@@ -1780,6 +1781,11 @@ const ConversationTabView = memo(function ConversationTabView({
       topBanner={
         <>
           <SessionConfigStaleBanner contextKey={tabId} />
+          <PiProjectTrustBanner
+            contextKey={tabId}
+            agentType={selectedAgent}
+            workingDir={workingDirForConnection}
+          />
           <BackgroundTasksChip contextKey={tabId} />
           {/* Resident sub-agent chip + its panel (R5.9 fixes this order:
               config-stale first — it asks for an action — then the two count

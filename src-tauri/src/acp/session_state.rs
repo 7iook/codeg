@@ -8,6 +8,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::acp::delegation::types::{BlockedKind, BlockedOn};
 use crate::acp::event_stream::{ConnectionEventStream, RecentEventsBuffer};
 use crate::acp::feedback::{FeedbackItem, FeedbackStatus};
 use crate::acp::plan_approval::PendingPlanApprovalState;
@@ -158,6 +159,11 @@ pub struct PendingPermissionState {
     pub tool_call: serde_json::Value,
     pub options: Vec<crate::acp::types::PermissionOptionInfo>,
     pub created_at: DateTime<Utc>,
+    /// Requests queued behind this card, kept live by `PermissionQueueDepth` so
+    /// a client attaching mid-turn sees the same "N more waiting" hint as one
+    /// that was live for the original event.
+    #[serde(default)]
+    pub queued: u32,
 }
 
 /// 上下文 / 模型用量。
@@ -838,6 +844,7 @@ impl SessionState {
                 request_id,
                 tool_call,
                 options,
+                queued,
             } => {
                 let tc_id = extract_tool_call_id(tool_call);
                 self.pending_permission = Some(PendingPermissionState {
@@ -846,7 +853,16 @@ impl SessionState {
                     tool_call: tool_call.clone(),
                     options: options.clone(),
                     created_at: Utc::now(),
+                    queued: *queued,
                 });
+            }
+            AcpEvent::PermissionQueueDepth { depth } => {
+                // Depth-only update: the visible card is unchanged, so touch
+                // nothing else. A no-op when no card is up (a late depth event
+                // after a drain must not resurrect one).
+                if let Some(pending) = self.pending_permission.as_mut() {
+                    pending.queued = *depth;
+                }
             }
             AcpEvent::PermissionResolved { request_id } => {
                 // Drop the snapshot's pending_permission iff the resolved
@@ -1164,6 +1180,7 @@ impl SessionState {
             }
             AcpEvent::ClaudeSdkMessage { .. }
             | AcpEvent::ClaudeSubagentMessage { .. }
+            | AcpEvent::ConfigOptionRejected { .. }
             | AcpEvent::SessionLoadFailed { .. }
             | AcpEvent::TurnRetrying { .. }
             | AcpEvent::UserPromptSent { .. }
@@ -1178,6 +1195,8 @@ impl SessionState {
                 // 事件本身携带该轮的 result（消费方据此判定终态，不再靠"事件到了"
                 // 猜成功）；按 Requirement 8.4，get_delegation_status 仍是完整报告
                 // （子会话正文 / 用量 / persona）的状态真源，消费方收到后回查。
+                // ConfigOptionRejected 是对一次交互的提示（选择器被降级/拒绝），
+                // 权威值已由紧随其后的 SessionConfigOptions 落进快照。
             }
         }
         self.last_activity_at = Utc::now();
@@ -1308,6 +1327,67 @@ impl SessionState {
             ));
         }
 
+        None
+    }
+
+    /// The prompt this session is parked on, if any — a permission, an
+    /// `ask_user_question`, or a plan approval. `None` means nothing is waiting
+    /// on the user.
+    ///
+    /// Sibling of [`Self::latest_live_reply`] and read on the same
+    /// `get_delegation_status` path: for a delegation child, "blocked on the
+    /// user" and "working" are indistinguishable from the outside, and only the
+    /// former means the parent's poll should stop waiting (#447). Precedence
+    /// matches the frontend's: at most one of these surfaces at a time in
+    /// practice, and permission is the one agents raise most.
+    ///
+    /// `title` is a one-line label for whatever needs deciding, capped at
+    /// `max_chars`; it can be `None` when the prompt carries no usable text.
+    pub fn blocking_prompt(&self, max_chars: usize) -> Option<BlockedOn> {
+        if let Some(p) = self.pending_permission.as_ref() {
+            // Every producer serializes the ACP `ToolCall` (or mirrors its
+            // shape), so `title` is the one field reliably present. Absent /
+            // blank degrades to `None` rather than inventing a label.
+            let title = p
+                .tool_call
+                .get("title")
+                .and_then(|v| v.as_str())
+                .and_then(last_nonempty_line)
+                .map(|l| truncate_one_line(l, max_chars));
+            return Some(BlockedOn {
+                kind: BlockedKind::Permission,
+                request_id: p.request_id.clone(),
+                title,
+            });
+        }
+        if let Some(q) = self.pending_question.as_ref() {
+            let title = q
+                .questions
+                .first()
+                .map(|first| first.question.as_str())
+                .and_then(last_nonempty_line)
+                .map(|l| truncate_one_line(l, max_chars));
+            return Some(BlockedOn {
+                kind: BlockedKind::Question,
+                request_id: q.question_id.clone(),
+                title,
+            });
+        }
+        if let Some(a) = self.pending_plan_approval.as_ref() {
+            // The plan's FIRST line is its heading; the last line would be
+            // whatever the plan trails off with, which reads as nonsense here.
+            let title = a
+                .plan_markdown
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(|l| truncate_one_line(l, max_chars));
+            return Some(BlockedOn {
+                kind: BlockedKind::PlanApproval,
+                request_id: a.approval_id.clone(),
+                title,
+            });
+        }
         None
     }
 
@@ -2850,6 +2930,7 @@ mod tests {
             request_id: "p-1".into(),
             tool_call: serde_json::json!({"toolCallId": "tc-1", "title": "danger"}),
             options: vec![],
+            queued: 0,
         });
         assert!(s.live_message.is_some());
         assert!(s.pending_permission.is_some());
@@ -3200,6 +3281,7 @@ mod tests {
             request_id: "p-1".into(),
             tool_call: serde_json::json!({"toolCallId": "tc-1"}),
             options: vec![],
+            queued: 0,
         });
         assert!(s.pending_permission.is_some());
 
@@ -3213,6 +3295,36 @@ mod tests {
     }
 
     #[test]
+    fn permission_queue_depth_updates_the_visible_card_only() {
+        // A request arriving behind the visible card publishes no
+        // `PermissionRequest` of its own, so the depth-only event is what keeps
+        // the card's "N more waiting" hint from going stale — including for a
+        // client that attaches mid-turn and hydrates from this snapshot.
+        let mut s = fresh_state();
+        s.apply_event(&AcpEvent::PermissionRequest {
+            request_id: "p-1".into(),
+            tool_call: serde_json::json!({"toolCallId": "tc-1"}),
+            options: vec![],
+            queued: 0,
+        });
+        s.apply_event(&AcpEvent::PermissionQueueDepth { depth: 2 });
+        let p = s.pending_permission.as_ref().expect("card still up");
+        assert_eq!(p.queued, 2);
+        assert_eq!(
+            p.request_id, "p-1",
+            "depth must not change which card is up"
+        );
+    }
+
+    #[test]
+    fn permission_queue_depth_without_a_card_is_a_noop() {
+        // A depth event that lands after a drain must not resurrect a card.
+        let mut s = fresh_state();
+        s.apply_event(&AcpEvent::PermissionQueueDepth { depth: 3 });
+        assert!(s.pending_permission.is_none());
+    }
+
+    #[test]
     fn permission_resolved_stale_request_is_noop() {
         // A late `PermissionResolved` for an already-replaced request must
         // not wipe out the *new* outstanding permission — id mismatch is
@@ -3223,6 +3335,7 @@ mod tests {
             request_id: "p-2".into(),
             tool_call: serde_json::json!({"toolCallId": "tc-2"}),
             options: vec![],
+            queued: 0,
         });
 
         s.apply_event(&AcpEvent::PermissionResolved {
@@ -3254,6 +3367,7 @@ mod tests {
             request_id: "p-1".into(),
             tool_call: raw_tool_call.clone(),
             options: vec![],
+            queued: 0,
         });
         let p = s.pending_permission.as_ref().expect("permission set");
         assert_eq!(p.request_id, "p-1");

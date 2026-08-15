@@ -51,6 +51,7 @@ pub use token_usage::{
 };
 pub use work_task::{
     FollowUpIntent, WorkTaskChangedFile, WorkTaskConfig, WorkTaskDraft, WorkTaskEventInfo,
-    WorkTaskFolderSettings, WorkTaskInfo, WorkTaskMergeState, WorkTaskPreflight, WorkTaskStatus,
-    WorkTaskTemplateDraft, WorkTaskTemplateInfo, STAGE_PROMPT_ALL,
+    WorkTaskFolderSettings, WorkTaskInfo, WorkTaskMergeState, WorkTaskPreflight,
+    WorkTaskQueuedMerge, WorkTaskStatus, WorkTaskTemplateDraft, WorkTaskTemplateInfo,
+    STAGE_PROMPT_ALL,
 };
