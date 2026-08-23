@@ -3,13 +3,19 @@
 /**
  * Viewer for a delegated sub-agent's full conversation.
  *
- * Opens from `DelegatedSubThread`'s header and renders the same
- * `MessageListView` used by the main conversation panel, but without
- * the input bar, send signal, or reload/new-session handlers — so the
- * user can scroll the transcript without driving the child's turns. The
- * interactions it hosts are the child's blocking prompts that resolve
- * WITHOUT driving a new turn: the permission request (the child runs at
- * the user's configured permission level), the codeg-mcp
+ * Opens from `DelegatedSubThread`'s header. Chrome is the upstream side
+ * Drawer (nests into itself; keeps the parent thread readable). Body stays
+ * HEAD's `SubAgentSessionBody` because it hosts the delegation-continue-
+ * session pieces (`SubAgentContinuationComposer`, Open-in-Tab handoff,
+ * `delegation_session_update` refetch) that `LiveTranscriptView` does not
+ * expose.
+ *
+ * The body renders the same `MessageListView` used by the main conversation
+ * panel, but without the input bar, send signal, or reload/new-session
+ * handlers — so the user can scroll the transcript without driving the
+ * child's turns. The interactions it hosts are the child's blocking prompts
+ * that resolve WITHOUT driving a new turn: the permission request (the child
+ * runs at the user's configured permission level), the codeg-mcp
  * `ask_user_question` multiple-choice card, and (Grok) the plan-approval
  * card. All are answered through the CHILD connection id; the backend
  * routes the response to the child's parked tool call. The parent card
@@ -26,14 +32,17 @@
  * happens. Persistence of completed turns comes from the broker's
  * own DB writes, surfaced via `useConversationDetail`.
  *
- * [merge-v0.23.0] upstream/main v0.23.0 extracted the read-only streaming
- * surface into `LiveTranscriptView` (so the work-task transcript viewer can
- * reuse it). We keep HEAD's inline `SubAgentSessionBody` implementation for
- * this dialog because it hosts the delegation-continue-session pieces
- * (`SubAgentContinuationComposer`, Open-in-Tab handoff,
- * `delegation_session_update` refetch) that `LiveTranscriptView` does not
- * expose — folding those into `LiveTranscriptView` is out of scope for the
- * merge round.
+ * A side drawer rather than a modal dialog, for two reasons:
+ *
+ *  - It is consulted WHILE working in the conversation that spawned the child.
+ *    The wrapper's non-modal default keeps the thread behind it readable and
+ *    clickable, and its `disablePointerDismissal` default keeps that from
+ *    costing the drawer its life on the first click.
+ *  - It nests into itself. The transcript it renders contains that child's own
+ *    `delegate_to_agent` cards, each with its own "查看会话" — so a grandchild
+ *    viewer mounts INSIDE this one's React tree and Base UI stacks it (parent
+ *    scales back, its content fades, Escape unwinds one layer at a time).
+ *    A modal dialog has no such stack: the second one simply buried the first.
  */
 
 // [merge-v0.23.0] HEAD imports for SubAgentSessionBody / ContinuationComposer.
@@ -56,11 +65,12 @@ import {
 import { AgentIcon } from "@/components/agent-icon"
 import { MessageListView } from "@/components/message/message-list-view"
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog"
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerTitle,
+  SIDE_PANEL_CONTENT_CLASS,
+} from "@/components/ui/drawer"
 import { useConversationDetail } from "@/hooks/use-conversation-detail"
 import { useTabActions } from "@/stores/tab-store"
 import { useConversationRuntimeActions } from "@/stores/conversation-runtime-store"
@@ -289,30 +299,48 @@ export function SubAgentSessionDialog({
   const t = useTranslations("Folder.chat.delegation")
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        closeButtonClassName="top-2 right-2"
-        className="flex h-[85vh] w-full max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 lg:max-w-4xl"
+    <Drawer open={open} onOpenChange={onOpenChange} swipeDirection="right">
+      {/* An x-axis drawer is already `inset-y-0`, so the old dialog's explicit
+          height goes away; the width comes from the shared side-panel shape so
+          this stacks flush with whatever it opened over. */}
+      <DrawerContent
+        closeButtonClassName="top-2.5 right-3"
+        className={SIDE_PANEL_CONTENT_CLASS}
       >
-        <DialogTitle className="sr-only">{t("detailTitle")}</DialogTitle>
-        <DialogDescription className="sr-only">
+        <DrawerTitle className="sr-only">{t("detailTitle")}</DrawerTitle>
+        <DrawerDescription className="sr-only">
           {t("detailDescription")}
-        </DialogDescription>
+        </DrawerDescription>
         {open ? (
-          // [merge-v0.23.0] HEAD dispatches to SubAgentSessionBody (below);
-          // upstream/main used the shared LiveTranscriptView inline, but that
-          // would drop this dialog's continuation composer and Open-in-Tab
-          // affordance. See file-level merge note.
-          <SubAgentSessionBody
-            childConversationId={childConversationId}
-            childConnectionId={childConnectionId}
-            agentType={agentType}
-            kickoffTask={kickoffTask}
-            onCloseRequest={() => onOpenChange(false)}
-          />
+          // Drawer chrome (upstream) + SubAgentSessionBody (HEAD continue-
+          // session / Open-in-Tab). LiveTranscriptView would drop those.
+          <div className="flex h-full min-h-0 flex-col">
+            {/* `px-4` and not `px-5`: the transcript below insets its rows by
+                16px, so anything else here leaves the header's icon hanging off
+                the column it titles. `pr-12` clears the close button. */}
+            <div className="flex items-center gap-3 border-b border-border px-4 py-2.5 pr-12">
+              <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-background text-foreground">
+                {agentType ? (
+                  <AgentIcon agentType={agentType} className="h-4 w-4" />
+                ) : (
+                  <span className="h-2 w-2 rounded-sm bg-muted-foreground/60" />
+                )}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                {agentType ? getAgentLabel(agentType) : t("unknownAgent")}
+              </span>
+            </div>
+            <SubAgentSessionBody
+              childConversationId={childConversationId}
+              childConnectionId={childConnectionId}
+              agentType={agentType}
+              kickoffTask={kickoffTask}
+              onCloseRequest={() => onOpenChange(false)}
+            />
+          </div>
         ) : null}
-      </DialogContent>
-    </Dialog>
+      </DrawerContent>
+    </Drawer>
   )
 }
 

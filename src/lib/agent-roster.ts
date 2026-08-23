@@ -12,4 +12,7 @@ export const BUILTIN_AGENT_ROSTER = [
   "grok",
   "cursor",
   "kiro",
+  "deepseek",
+  "qoder",
+  "antigravity",
 ] as const

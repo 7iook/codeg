@@ -1,6 +1,6 @@
 [package]
 name = "codeg"
-version = "0.25.0"
+version = "0.27.0"
 description = "Agent Code Generation App"
 authors = ["feitao"]
 edition = "2021"
@@ -34,6 +34,7 @@ tauri-runtime = [
     "dep:tauri-plugin-process",
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-autostart",
     "dep:keyring",
 ]
 # Exposes test scaffolding (`AppState::new_for_test`, `EventEmitter::test_web_only`,
@@ -90,6 +91,10 @@ futures-lite = "2"
 reqwest = { version = "0.12", features = ["stream", "json", "multipart", "gzip", "brotli"] }
 flate2 = "1"
 bzip2 = "0.5"
+# DeepSeek Harness session logs (`~/.dsh/sessions/**/session.jsonl.zstd`) are a
+# sequence of complete Zstandard frames appended per write batch; the parser
+# only decodes (`zstd::stream::decode_all` walks concatenated frames to EOF).
+zstd = "0.13"
 tar = "0.4"
 zip = "2"
 regex = "1"
@@ -129,7 +134,7 @@ tokio-util = { version = "0.7", features = ["io", "rt"] }
 prost = "0.13"
 rand = "0.8"
 qrcode = "0.14"
-image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg", "gif"] }
 include_dir = "0.7"
 sha2 = "0.10"
 aes-gcm = { version = "0.10", features = ["stream"] }
@@ -147,6 +152,9 @@ tauri-plugin-updater = { version = "2", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
 tauri-plugin-notification = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
+# "Launch at login" toggle. Desktop-only: registry Run key on Windows, a
+# LaunchAgent plist on macOS, an XDG autostart .desktop entry on Linux.
+tauri-plugin-autostart = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"

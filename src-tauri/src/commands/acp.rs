@@ -2367,6 +2367,33 @@ fn annotate_npm_bootstrap_failure(package: &str, err: AcpError) -> AcpError {
     ))
 }
 
+/// Name the proxy when npm refused to parse the proxy address itself.
+///
+/// npm resolves `HTTP(S)_PROXY` with WHATWG `new URL()`, where a scheme may not
+/// start with a digit, so a bare `127.0.0.1:7890` aborts the install with a
+/// context-free `ERR_INVALID_URL` before any network I/O — no mention of a
+/// proxy, no mention of which variable. codeg normalizes the address it exports
+/// from Settings, so what reaches here is an externally-provided value (docker
+/// `-e`, a shell export) that the startup contract leaves untouched.
+fn annotate_npm_proxy_url_failure(err: AcpError) -> AcpError {
+    let AcpError::Protocol(message) = &err else {
+        return err;
+    };
+    if !message.contains("ERR_INVALID_URL") && !message.contains("Invalid URL") {
+        return err;
+    }
+    let offenders = crate::network::proxy::proxy_env_vars_missing_scheme();
+    if offenders.is_empty() {
+        return err;
+    }
+    AcpError::Protocol(format!(
+        "{message}\n\nnpm could not parse the proxy address in {} — it has no scheme. \
+         npm requires one (codeg's own HTTP client does not, which is why updates still \
+         work). Set it to a full URL, e.g. `http://127.0.0.1:7890`.",
+        offenders.join(", ")
+    ))
+}
+
 /// Run an npm command with piped stdout/stderr, streaming each line as a log event.
 /// Returns (success: bool, collected_stderr: String) so callers can inspect errors.
 async fn run_npm_streaming(
@@ -2445,7 +2472,23 @@ async fn run_npm_streaming(
     Ok((status.success(), collected_stderr))
 }
 
+/// Install an npm package globally, streaming progress, with the proxy
+/// diagnostic attached to every failure.
+///
+/// The annotation lives here rather than at the call sites so it covers each
+/// entry point — the pinned npx agents and the `pi` binary prerequisite alike —
+/// and cannot be forgotten by the next one.
 async fn install_npm_global_package_streaming(
+    package: &str,
+    task_id: &str,
+    emitter: &EventEmitter,
+) -> Result<(), AcpError> {
+    install_npm_global_package_streaming_inner(package, task_id, emitter)
+        .await
+        .map_err(annotate_npm_proxy_url_failure)
+}
+
+async fn install_npm_global_package_streaming_inner(
     package: &str,
     task_id: &str,
     emitter: &EventEmitter,
@@ -7186,7 +7229,7 @@ async fn hermes_setup_argvs() -> (Vec<String>, Vec<String>) {
         // Unreachable: Hermes is always an Npx distribution. Fall through to
         // the npx guidance with the same pinned spec so a future match-arm
         // change can't resurrect a stale recipe.
-        _ => "hermes-agent@0.20.1",
+        _ => "hermes-agent@0.20.5",
     };
     let build = |tail: &[&str]| -> Vec<String> {
         let mut argv = vec![
@@ -7787,14 +7830,42 @@ fn agent_local_config_path(agent_type: AgentType) -> Option<PathBuf> {
     match agent_type {
         AgentType::ClaudeCode => Some(home_dir_or_default().join(".claude").join("settings.json")),
         AgentType::Gemini => Some(home_dir_or_default().join(".gemini").join("settings.json")),
+        // Antigravity's ACP server keeps its own `settings.json` under
+        // `<GEMINI_HOME>/antigravity-acp/` — a DIFFERENT file from Gemini
+        // CLI's above, even though both trees default to `~/.gemini`. Exposing
+        // the path lights up "open config file"; the write side is owned by
+        // `acp::connection::sync_antigravity_settings_file` at launch, which
+        // merges only `auth.type` and the `gcp` block and leaves every other
+        // key the user put there alone.
+        AgentType::Antigravity => {
+            Some(crate::parsers::antigravity::resolve_antigravity_acp_dir().join("settings.json"))
+        }
         AgentType::OpenCode => Some(resolve_opencode_config_path()),
         AgentType::Cline => Some(cline_global_state_path()),
         // Kimi Code's native config is `~/.kimi-code/config.toml`. Exposing the
         // path lights up "open config file" + staleness tracking; the actual
         // load/persist are special-cased below (TOML, not the generic JSON path).
         AgentType::KimiCode => Some(kimi_code_config_toml_path()),
+        // Qoder's native config is `<QODER_CONFIG_DIR>/settings.json` (default
+        // `~/.qoder`), plain JSON — so the generic loader above reads it as-is
+        // and the Qoder panel's advanced editor round-trips it through
+        // `config_json`. The WRITE side is special-cased in
+        // `acp_update_agent_config_core` (written verbatim) and never reaches
+        // this module's generic merge-persist, which could not delete a key.
+        //
+        // Note this file has other writers: codeg's own MCP settings page owns
+        // its top-level `mcpServers` (see `commands::mcp::qoder_settings_path`,
+        // which resolves the same path through the same helper).
+        AgentType::Qoder => Some(qoder_settings_json_path()),
         _ => None,
     }
+}
+
+/// `<QODER_CONFIG_DIR>/settings.json` (default `~/.qoder/settings.json`).
+/// Delegates to the parser's resolver, which already honours both
+/// `QODER_CONFIG_DIR` (absolute path) and `QODER_CONFIG_DIR_NAME` (dir rename).
+fn qoder_settings_json_path() -> PathBuf {
+    crate::parsers::qoder::resolve_qoder_config_dir().join("settings.json")
 }
 
 pub(crate) fn load_agent_local_config_json(agent_type: AgentType) -> Option<String> {
@@ -7821,6 +7892,42 @@ pub(crate) fn load_agent_local_config_json(agent_type: AgentType) -> Option<Stri
     serde_json::to_string_pretty(&parsed).ok()
 }
 
+/// What a patch subtree means where the base has nothing to merge it into: a
+/// copy with its nested removal sentinels (`null` object values) dropped, or
+/// `None` when it carried nothing but removals.
+///
+/// Copying such a subtree verbatim is what turned the "remove this key"
+/// sentinel into a literal `null` on disk — and a `null` under
+/// `~/.claude/settings.json`'s `env` is not "unset": the Claude Code CLI
+/// stringifies it into `process.env`, so `ANTHROPIC_DEFAULT_OPUS_MODEL` becomes
+/// the model name `"null"` and every row of the composer's model picker reads
+/// `null`. The trigger is a first provider bind against a settings file that has
+/// no `env` object yet, which is exactly the "no model configured" case: every
+/// `ANTHROPIC_*_MODEL` key in the cascade patch is a removal.
+///
+/// Arrays are copied as-is: `merge_json_values` never treats their elements as
+/// keys, so a `null` inside one is data, not a sentinel.
+fn patch_addition(patch: &serde_json::Value) -> Option<serde_json::Value> {
+    let Some(patch_obj) = patch.as_object() else {
+        return Some(patch.clone());
+    };
+    let mut kept = serde_json::Map::new();
+    for (key, value) in patch_obj {
+        if value.is_null() {
+            continue;
+        }
+        if let Some(value) = patch_addition(value) {
+            kept.insert(key.clone(), value);
+        }
+    }
+    // An object the patch author wrote as empty is a value in its own right; one
+    // left empty by dropping removals asks for nothing and creates nothing.
+    if kept.is_empty() && !patch_obj.is_empty() {
+        return None;
+    }
+    Some(serde_json::Value::Object(kept))
+}
+
 fn merge_json_values(base: &mut serde_json::Value, patch: &serde_json::Value) {
     if let (Some(base_obj), Some(patch_obj)) = (base.as_object_mut(), patch.as_object()) {
         for (key, patch_value) in patch_obj {
@@ -7831,15 +7938,23 @@ fn merge_json_values(base: &mut serde_json::Value, patch: &serde_json::Value) {
             }
             match base_obj.get_mut(key) {
                 Some(base_value) => merge_json_values(base_value, patch_value),
+                // Nothing here to remove, so the subtree's own removal sentinels
+                // must not be materialized alongside its real values.
                 None => {
-                    base_obj.insert(key.clone(), patch_value.clone());
+                    if let Some(value) = patch_addition(patch_value) {
+                        base_obj.insert(key.clone(), value);
+                    }
                 }
             }
         }
         return;
     }
 
-    *base = patch.clone();
+    // Type mismatch (or a non-object base): the patch replaces the base
+    // wholesale, minus its removal sentinels — there is nothing here for them to
+    // remove either. An all-removals object collapses to `{}` rather than
+    // leaving the mistyped value in place.
+    *base = patch_addition(patch).unwrap_or_else(|| serde_json::Value::Object(Default::default()));
 }
 
 fn persist_agent_local_config_json(
@@ -8042,6 +8157,90 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
         // directory — so it has no skill storage. codeg surfaces those agents
         // in the Kiro config panel instead.
         AgentType::Kiro => None,
+        // deepseek-acp mounts the upstream skills chain
+        // (`dsh-skill-filesystem`), which discovers BOTH directory bundles
+        // (`<id>/SKILL.md`) and flat `<id>.md` files — hence Codex's spec
+        // shape. Its roots, highest rank first: `<project>/.dsh/skills`,
+        // `<project>/.agents/skills`, `$DSH_HOME/skills` (default `~/.dsh`),
+        // `$DSH_AGENTS_HOME/skills` (default `~/.agents`). The DeepSeek-native
+        // directory comes first so linking targets it without cross-agent side
+        // effects on the shared `.agents` store — the same ordering rationale
+        // as pi and Cursor.
+        AgentType::DeepSeek => Some(SkillStorageSpec {
+            kind: SkillStorageKind::SkillDirectoryOrMarkdownFile,
+            global_dirs: vec![
+                crate::parsers::deepseek::resolve_dsh_home_dir().join("skills"),
+                crate::parsers::deepseek::resolve_dsh_agents_home_dir().join("skills"),
+            ],
+            project_rel_dirs: vec![".dsh/skills", ".agents/skills"],
+        }),
+        // Qoder discovers directory bundles only — `<id>/SKILL.md`, never flat
+        // `<id>.md` files — hence Claude's spec shape rather than Codex's.
+        //
+        // Roots read verbatim off `SkillCommandHandler.enumerate` in the
+        // qodercli 1.1.23 bundle, which resolves them through
+        // `{projectDir: <workDir>/<projectConfigDirName>, userDir: <globalDir>}`
+        // (both config dir names default to `.qoder`):
+        //
+        //   home       `<globalDir>/skills`            ← relocated by QODER_CONFIG_DIR
+        //   home       `~/.agents/skills`              ← only if loadFromAgentsDirectory
+        //   workspace  `<cwd>/.qoder/skills`
+        //   workspace  `<cwd>/.agents/skills`          ← only if loadFromAgentsDirectory
+        //
+        // Qoder's OWN dirs lead in both scopes because they are the ones it
+        // always scans: the `.agents` pair is gated behind
+        // `loadSkillsFromAgentsDirectory`, which defaults to FALSE. Writing
+        // installs to `.agents` alone (and to a bare `<cwd>/skills`, which
+        // nothing scans) is why this used to install skills the agent never
+        // loaded — while leaving whatever the user already had in
+        // `~/.qoder/skills` invisible to codeg. Both `.agents` roots stay in
+        // the list so a user who did turn the setting on still sees them.
+        AgentType::Qoder => Some(SkillStorageSpec {
+            kind: SkillStorageKind::SkillDirectoryOnly,
+            global_dirs: vec![
+                crate::parsers::qoder::resolve_qoder_config_dir().join("skills"),
+                // `getGlobalAgentsDir()` joins `.agents` onto Qoder's CLI HOME,
+                // not the OS home — the shared store moves with
+                // `QODER_CLI_HOME` even though it lives outside the config dir.
+                crate::parsers::qoder::resolve_qoder_home()
+                    .join(".agents")
+                    .join("skills"),
+            ],
+            project_rel_dirs: vec![
+                crate::parsers::qoder::qoder_project_skills_rel_dir(),
+                ".agents/skills",
+            ],
+        }),
+        // Antigravity's roots are `server.py::resolve_skills_paths`, verbatim
+        // and in its order:
+        //
+        //   home       `<GEMINI_HOME>/config/skills`        ← cross-surface global
+        //   workspace  `<cwd>/.gemini/skills`
+        //   home       `<GEMINI_HOME>/antigravity-cli/skills` ← the CLI's, read too
+        //   workspace  `<cwd>/.agents/skills`
+        //
+        // Both home roots follow the resolved `GEMINI_HOME` on purpose: the
+        // server's own comment records that a `$HOME`-anchored entry here used
+        // to hand the real `~/.gemini` to the agent even when the home had
+        // been relocated. `config/skills` leads because it is the directory
+        // Antigravity itself calls the global one; `antigravity-cli/skills`
+        // belongs to the CLI and is only READ, so installs must not land
+        // there ahead of it.
+        //
+        // `SkillDirectoryOnly`: the discovery docstring says "SKILL.md files
+        // or skill subfolders", which does not distinguish a bundle's
+        // `<id>/SKILL.md` from a flat `<id>.md`, and the actual scan happens
+        // inside the Go harness. The directory bundle is the shape every agent
+        // supports, so codeg installs that rather than guessing at the wider
+        // one and writing skills the agent may never load.
+        AgentType::Antigravity => Some(SkillStorageSpec {
+            kind: SkillStorageKind::SkillDirectoryOnly,
+            global_dirs: vec![
+                crate::parsers::antigravity::resolve_antigravity_shared_config_dir().join("skills"),
+                crate::parsers::antigravity::resolve_antigravity_cli_dir().join("skills"),
+            ],
+            project_rel_dirs: vec![".gemini/skills", ".agents/skills"],
+        }),
         // codeg cannot detect where an arbitrary ACP agent loads skills from,
         // so custom agents are gated on the user's own declaration: that the
         // agent reads the shared `.agents/skills` store (the cross-agent
@@ -8138,11 +8337,43 @@ pub(crate) fn scoped_skill_dirs(
                 .ok_or_else(|| {
                     AcpError::protocol("workspace_path is required for project scoped skills")
                 })?;
+            let base = project_skill_base(agent_type, workspace);
             Ok(spec
                 .project_rel_dirs
                 .iter()
-                .map(|relative| PathBuf::from(workspace).join(relative))
+                .map(|relative| base.join(relative))
                 .collect())
+        }
+    }
+}
+
+/// The directory an agent's PROJECT-relative skill dirs hang off.
+///
+/// Normally the workspace itself. DeepSeek is the exception: its provider
+/// (`dsh-skill-filesystem`'s `findProjectRoot`) walks up from the session cwd
+/// to the nearest ancestor containing `.git` before joining `.dsh/skills` /
+/// `.agents/skills`, falling back to the cwd when it reaches the filesystem
+/// root. Opening a subdirectory of a repo as the workspace would otherwise
+/// make codeg create and list `<subdir>/.dsh/skills` — a directory the agent
+/// never scans, so the skill would simply never load, with nothing on screen
+/// saying so.
+///
+/// `.git` is matched as a plain path, file or directory: in a linked worktree
+/// (which codeg creates routinely) it is a FILE, and upstream's `pathExists`
+/// accepts that too.
+fn project_skill_base(agent_type: AgentType, workspace: &str) -> PathBuf {
+    let workspace = PathBuf::from(workspace);
+    if agent_type != AgentType::DeepSeek {
+        return workspace;
+    }
+    let mut current = workspace.as_path();
+    loop {
+        if current.join(".git").exists() {
+            return current.to_path_buf();
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => return workspace.clone(),
         }
     }
 }
@@ -8266,6 +8497,12 @@ fn is_read_only_skill_path(agent_type: AgentType, skill_path: &Path) -> bool {
         // Cursor's bundled builtin skills; the CLI restores them on update,
         // so editing/deleting through codeg would silently be undone.
         AgentType::Cursor => home_dir_or_default().join(".cursor").join("skills-cursor"),
+        // `dsh-skill-filesystem` sets `skipSystem` on the `$DSH_HOME/skills`
+        // root, so anything under `.system/` there belongs to the DeepSeek
+        // Harness product CLI, not to the user — never write through it.
+        AgentType::DeepSeek => crate::parsers::deepseek::resolve_dsh_home_dir()
+            .join("skills")
+            .join(".system"),
         _ => return false,
     };
     skill_path.starts_with(&ro_root)
@@ -8449,8 +8686,31 @@ struct AgentRuntimeConfig {
     api_key: Option<String>,
     #[serde(default)]
     model: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_env_strings")]
     env: BTreeMap<String, String>,
+}
+
+/// Read an agent config's `env` map, skipping entries whose value is not a
+/// string instead of failing the whole parse.
+///
+/// Both readers of this struct discard the ENTIRE local config on a parse error
+/// (`build_runtime_env_from_setting` and the agent-info env projection), so one
+/// odd value would silently cost the launch env its base URL and key too. The
+/// value seen in the wild is `null` — written by an older
+/// [`merge_json_values`], see [`patch_addition`] — but a hand-edited number or
+/// bool deserves the same containment.
+fn deserialize_env_strings<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(key, value)| match value {
+            serde_json::Value::String(value) => Some((key, value)),
+            _ => None,
+        })
+        .collect())
 }
 
 fn trim_non_empty(value: Option<String>) -> Option<String> {
@@ -8582,6 +8842,193 @@ fn persist_cursor_cli_config(text: &str) -> Result<(), AcpError> {
     }
     fs::write(&path, format!("{text}\n"))
         .map_err(|e| AcpError::protocol(format!("write cursor cli-config failed: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Qoder settings.json helpers
+// ---------------------------------------------------------------------------
+
+/// Validate + write settings.json, whole-document.
+///
+/// The text is whatever the panel's advanced editor holds, which is the file as
+/// codeg last read it plus the user's edits — writing it verbatim is what lets
+/// a key be DELETED, which the generic merge-persist path cannot do.
+///
+/// Note this file has other writers (the Qoder CLI itself, and codeg's MCP
+/// settings page, which owns the top-level `mcpServers`). A verbatim write
+/// therefore reverts anything they wrote since the editor last loaded — the
+/// same last-writer-wins contract every raw editor in this module has.
+fn persist_qoder_settings(text: &str) -> Result<(), AcpError> {
+    let parsed = serde_json::from_str::<serde_json::Value>(text)
+        .map_err(|e| AcpError::protocol(format!("invalid qoder settings.json: {e}")))?;
+    if !parsed.is_object() {
+        return Err(AcpError::protocol(
+            "invalid qoder settings.json: root must be a JSON object",
+        ));
+    }
+    let path = qoder_settings_json_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| AcpError::protocol(format!("create qoder config dir failed: {e}")))?;
+    }
+    fs::write(&path, format!("{text}\n"))
+        .map_err(|e| AcpError::protocol(format!("write qoder settings failed: {e}")))
+}
+
+/// The `qoder` binary codeg would launch: managed cache first, then the user's
+/// own install (PATH / ~/.local/bin) — the same order as `build_agent`.
+fn resolve_qoder_binary() -> Option<PathBuf> {
+    if let Ok(Some((path, _))) =
+        binary_cache::find_best_cached_binary_for_agent(AgentType::Qoder, "qoder")
+    {
+        return Some(path);
+    }
+    resolve_system_agent_binary("qoder")
+}
+
+/// The Qoder agent's effective probe env: the saved env with the settings
+/// form's live personal access token applied on top, so `status` reports on the
+/// credential that is on screen rather than a stale saved one.
+///
+/// `PAT` is always materialized (empty when unset) so `run_qoder_probe` makes
+/// an explicit set-or-remove decision — an inherited token from the user's dev
+/// shell must not make the card claim an account that a launch would not use.
+async fn qoder_probe_env(
+    db: &AppDatabase,
+    personal_access_token: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut env: BTreeMap<String, String> =
+        agent_setting_service::get_by_agent_type(&db.conn, AgentType::Qoder)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|m| m.env_json)
+            .and_then(|raw| serde_json::from_str::<BTreeMap<String, String>>(&raw).ok())
+            .unwrap_or_default();
+    if let Some(token) = personal_access_token {
+        env.insert(
+            "QODER_PERSONAL_ACCESS_TOKEN".to_string(),
+            token.trim().to_string(),
+        );
+    }
+    env.entry("QODER_PERSONAL_ACCESS_TOKEN".to_string())
+        .or_default();
+    env
+}
+
+/// Run a `qoder` subcommand with a timeout, capturing stdout.
+async fn run_qoder_probe(
+    args: &[&str],
+    timeout_secs: u64,
+    extra_env: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let bin = resolve_qoder_binary().ok_or_else(|| "qoder is not installed".to_string())?;
+    let mut cmd = crate::process::tokio_command(&bin);
+    cmd.args(args);
+    for (key, value) in extra_env {
+        if value.trim().is_empty() {
+            // This process's env is inherited by the child; an empty value means
+            // "ensure absent" so a stale inherited token can't leak in.
+            cmd.env_remove(key);
+        } else {
+            cmd.env(key, value);
+        }
+    }
+    let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+        .await
+        .map_err(|_| format!("qoder {} timed out", args.join(" ")))?
+        .map_err(|e| format!("failed to run qoder: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() && stdout.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "qoder {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        ));
+    }
+    Ok(stdout)
+}
+
+/// Probe `qoder status -o json` for the Qoder settings panel's auth card.
+///
+/// The CLI prints one flat object — `{logged_in, version, allow_byok, username,
+/// email, avatar_url, user_type}` — so unlike the Cursor probe there is no
+/// nested `userInfo` to unwrap. A parse failure is reported as `error` with
+/// `logged_in: false`; the panel renders that as "could not check", not as
+/// "signed out", so a CLI output change never reads as a lost session.
+pub(crate) async fn acp_qoder_auth_status_core(
+    db: &AppDatabase,
+    personal_access_token: Option<String>,
+) -> crate::acp::types::QoderAuthStatus {
+    let binary_path = resolve_qoder_binary().map(|p| p.to_string_lossy().to_string());
+    if binary_path.is_none() {
+        return crate::acp::types::QoderAuthStatus {
+            installed: false,
+            logged_in: false,
+            username: None,
+            email: None,
+            user_type: None,
+            version: None,
+            allow_byok: None,
+            error: None,
+            binary_path: None,
+        };
+    }
+    let extra_env = qoder_probe_env(db, personal_access_token.as_deref()).await;
+    let failed = |error: Option<String>| crate::acp::types::QoderAuthStatus {
+        installed: true,
+        logged_in: false,
+        username: None,
+        email: None,
+        user_type: None,
+        version: None,
+        allow_byok: None,
+        error,
+        binary_path: binary_path.clone(),
+    };
+    match run_qoder_probe(&["status", "-o", "json"], 30, &extra_env).await {
+        Ok(stdout) => {
+            // Scan to the first `{` so a leading log/update-notice line can't
+            // break parsing.
+            let json_start = stdout.find('{').unwrap_or(0);
+            match serde_json::from_str::<serde_json::Value>(stdout[json_start..].trim()) {
+                Ok(v) => {
+                    let get_str = |key: &str| {
+                        v.get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    };
+                    crate::acp::types::QoderAuthStatus {
+                        installed: true,
+                        logged_in: v
+                            .get("logged_in")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                        username: get_str("username"),
+                        email: get_str("email"),
+                        user_type: get_str("user_type"),
+                        version: get_str("version"),
+                        // The CLI emits 0/1 here rather than a JSON boolean.
+                        allow_byok: v
+                            .get("allow_byok")
+                            .and_then(|b| b.as_bool().or_else(|| b.as_i64().map(|n| n != 0))),
+                        error: None,
+                        binary_path: binary_path.clone(),
+                    }
+                }
+                Err(e) => crate::acp::types::QoderAuthStatus {
+                    error: Some(format!(
+                        "unexpected status output: {e}: {}",
+                        truncate_probe_output(&stdout)
+                    )),
+                    ..failed(None)
+                },
+            }
+        }
+        Err(err) => failed(Some(err)),
+    }
 }
 
 /// The cursor-agent binary codeg would launch: managed cache first, then the
@@ -8852,6 +9299,15 @@ pub async fn acp_cursor_auth_status(
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn acp_qoder_auth_status(
+    db: State<'_, AppDatabase>,
+    personal_access_token: Option<String>,
+) -> Result<crate::acp::types::QoderAuthStatus, AcpError> {
+    Ok(acp_qoder_auth_status_core(&db, personal_access_token).await)
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn acp_cursor_list_models(
     db: State<'_, AppDatabase>,
     api_key: Option<String>,
@@ -8890,6 +9346,48 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
         // placeholder so the generic cascade never lands on OPENAI_* keys;
         // model selection flows through the Cursor panel / ACP instead.
         AgentType::Cursor => ("CURSOR_API_BASE_URL", "CURSOR_API_KEY", "CURSOR_MODEL"),
+        // The real endpoint knob is `DEEPSEEK_BASE_URL`, read by the
+        // `llm-deepseek` adapter through the launch-environment snapshot —
+        // which, when the host installs none (deepseek-acp does not), falls
+        // back to `process.env`, so codeg's launch env reaches it. It resolves
+        // per request (`config.baseURL ?? env ?? https://api.deepseek.com`),
+        // NOT at load. `DEEPSEEK_ACP_PROVIDER` is a different thing entirely —
+        // the provider ROUTE id (`deepseek-official`), a registry key rather
+        // than a URL — so it must not ride the base-url slot, or binding a
+        // model provider would write an endpoint into the route selector and
+        // break every request. All three keep the generic cascade off the
+        // OPENAI_* keys.
+        AgentType::DeepSeek => (
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_ACP_MODEL",
+        ),
+        // Qoder's non-interactive credential is `QODER_PERSONAL_ACCESS_TOKEN`
+        // — "设置后自动使用 PAT 认证" in the 1.1.23 package's own README, and the
+        // only way to authenticate a headless/server/Docker install, where the
+        // `qoder login` browser flow cannot run. (An interactive login still
+        // outranks it; the credential itself lives in the machine key store.)
+        // `QODER_MODEL` is real too — the README lists it as the env twin of
+        // `-m/--model`. There is NO endpoint override, so the base-url slot
+        // stays an inert `QODER_BASE_URL` placeholder for the same reason
+        // `CURSOR_MODEL` above is one: it keeps the generic cascade off the
+        // OPENAI_* keys. `QODER_API_KEY` was never a thing Qoder reads.
+        AgentType::Qoder => (
+            "QODER_BASE_URL",
+            "QODER_PERSONAL_ACCESS_TOKEN",
+            "QODER_MODEL",
+        ),
+        // Antigravity's credential depends on the auth method the settings
+        // panel picked, and the panel writes the right one directly; the slot
+        // named here is the Gemini Developer API key, which is what
+        // `auth.type = "gemini-api-key"` reads (the server says so in its own
+        // `auth_required` message). `AGY_ACP_DEFAULT_MODEL` is real — it is
+        // the env the server's `get_default_model_id` consults before falling
+        // back to `gemini-3.7-flash-high`. There is NO endpoint override, so
+        // the base-url slot stays an inert `AGY_BASE_URL` placeholder for the
+        // same reason `CURSOR_MODEL`/`QODER_BASE_URL` above are: it keeps the
+        // generic cascade off the `OPENAI_*` keys.
+        AgentType::Antigravity => ("AGY_BASE_URL", "GEMINI_API_KEY", "AGY_ACP_DEFAULT_MODEL"),
         _ => ("OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"),
     }
 }
@@ -9166,6 +9664,7 @@ const CLAUDE_MODEL_KEY_MAP: &[(&str, &str)] = &[
 ///   entry is `None` when the provider's JSON omits that key or has an empty
 ///   value.
 /// - Gemini: returns `GEMINI_MODEL`.
+/// - DeepSeek: returns `DEEPSEEK_ACP_MODEL`.
 /// - Codex: returns `OPENAI_MODEL` so the provider can override env_json (the
 ///   root `model` in `config.toml` is handled separately by
 ///   `provider_codex_model_action`).
@@ -9200,6 +9699,15 @@ pub(crate) fn parse_provider_model(
         AgentType::KimiCode => {
             out.insert(
                 "KIMI_MODEL_NAME".to_string(),
+                trimmed_raw.map(str::to_string),
+            );
+        }
+        // deepseek-acp's launcher reads DEEPSEEK_ACP_MODEL (`readEnv`) and
+        // nothing else; leaving this on the OPENAI_MODEL fallback would apply
+        // a bound provider's URL and key while silently dropping its model.
+        AgentType::DeepSeek => {
+            out.insert(
+                "DEEPSEEK_ACP_MODEL".to_string(),
                 trimmed_raw.map(str::to_string),
             );
         }
@@ -9464,6 +9972,34 @@ fn cascade_update_agent_config(
             // runtime env var through the generic agent settings panel
             // (`acpUpdateAgentEnv`); it does not write provider creds into
             // ~/.grok/config.toml and does not participate in the cascade.
+        }
+        AgentType::DeepSeek => {
+            // deepseek-acp authenticates via `DEEPSEEK_API_KEY` (or
+            // `~/.dsh/.credentials.yaml`, which codeg never writes), injected
+            // as a runtime env var through the generic agent settings panel;
+            // it has no codeg-managed config file and does not participate in
+            // the model-provider credential cascade.
+        }
+        AgentType::Qoder => {
+            // Qoder talks only to Qoder's own service — no endpoint override
+            // and no BYO-provider key — so it stays off the model-provider
+            // credential cascade even though its env slots are real. The PAT
+            // (`QODER_PERSONAL_ACCESS_TOKEN`) is set directly in the agent's
+            // env, and while codeg DOES manage a Qoder config file
+            // (`settings.json`, via the Qoder settings panel), that file holds
+            // no credentials for the cascade to reconcile.
+        }
+        AgentType::Antigravity => {
+            // Antigravity only ever talks to Google's own endpoints (CCPA for
+            // the consumer path, BAIC for Gemini Enterprise, the Gemini
+            // Developer API for a raw key), none of which accepts a custom
+            // base URL — so it stays off the model-provider credential
+            // cascade. Its credentials come from the auth method the settings
+            // panel recorded, which the launch path projects into the process
+            // env and into `antigravity-acp/settings.json` (see
+            // `sync_antigravity_settings_file`); that file carries the chosen
+            // METHOD, never a credential, so there is nothing here to
+            // reconcile either.
         }
         AgentType::Custom(_) => {
             // Custom agents are deliberately configuration-free: codeg writes
@@ -9909,9 +10445,10 @@ pub async fn acp_set_config_option(
 pub async fn acp_goal_control(
     connection_id: String,
     action: crate::acp::connection::GoalControlAction,
+    db: State<'_, AppDatabase>,
     manager: State<'_, ConnectionManager>,
 ) -> Result<(), AcpError> {
-    manager.goal_control(&connection_id, action).await
+    manager.goal_control(&db.conn, &connection_id, action).await
 }
 
 /// Inject `blocks` into the connection's RUNNING turn (`_session/steering`, R1.1)
@@ -10531,7 +11068,6 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
         } else {
             None
         };
-
         agents.push(AcpAgentInfo {
             agent_type,
             registry_id: registry::registry_id_for(agent_type).to_string(),
@@ -10548,6 +11084,8 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
             enabled: setting.map(|m| m.enabled).unwrap_or(true),
             sort_order,
             installed_version: local_installed_version,
+            host_tools_agent_mode: !crate::acp::host_tools_policy::HostToolsPolicy::from_env(&env)
+                .hosts_channels(),
             env,
             config_json,
             config_file_path: agent_local_config_path(agent_type)
@@ -11163,6 +11701,20 @@ pub(crate) async fn acp_update_agent_config_core(
             if !merged.trim().is_empty() {
                 persist_cursor_cli_config(&merged)?;
             }
+        }
+        emit_acp_agents_updated(emitter, "config_updated", Some(agent_type));
+        return Ok(());
+    }
+
+    if agent_type == AgentType::Qoder {
+        // The Qoder panel edits `<QODER_CONFIG_DIR>/settings.json` as a whole
+        // document, and that file IS Qoder's `agent_local_config_path` — so it
+        // arrives through the generic `config_json` channel but must NOT fall
+        // through to the merge-persist at the end of this function, which cannot
+        // delete a key. Hence the early return: the user authored the whole
+        // document, so it is written verbatim.
+        if let Some(text) = config_json.as_deref() {
+            persist_qoder_settings(text)?;
         }
         emit_acp_agents_updated(emitter, "config_updated", Some(agent_type));
         return Ok(());
@@ -12331,8 +12883,13 @@ pub async fn acp_list_agent_skills(
 
     if let Some(workspace) = workspace_path.as_deref().map(str::trim) {
         if !workspace.is_empty() {
+            // Same base the WRITE path resolves through `scoped_skill_dirs` —
+            // for DeepSeek that is the repo root, not the workspace. Joining
+            // onto the workspace here instead would make a skill saved from a
+            // nested workspace vanish from the list that is meant to show it.
+            let base = project_skill_base(agent_type, workspace);
             for relative in &spec.project_rel_dirs {
-                let project_dir = PathBuf::from(workspace).join(relative);
+                let project_dir = base.join(relative);
                 locations.push(AgentSkillLocation {
                     scope: AgentSkillScope::Project,
                     path: project_dir.to_string_lossy().to_string(),
@@ -14983,6 +15540,122 @@ wire_api = "chat"
     }
 
     #[test]
+    fn deepseek_skill_storage_spec_mirrors_dsh_skill_roots() {
+        // Both resolvers read the process-wide `$HOME` when their env override
+        // is unset, and other tests mutate HOME via `temp_env`. Pin it (and
+        // clear both overrides) so the spec and the expected paths resolve
+        // against one consistent home. `expected` comes from the same
+        // production helpers so this stays correct on Windows, where
+        // `dirs::home_dir()` ignores the pinned HOME.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_vars(
+            [
+                ("HOME", Some(tmp.path())),
+                ("DSH_HOME", None::<&std::path::Path>),
+                ("DSH_AGENTS_HOME", None::<&std::path::Path>),
+            ],
+            || {
+                let spec =
+                    skill_storage_spec(AgentType::DeepSeek).expect("DeepSeek supports skills");
+                // `dsh-skill-filesystem` discovers directory bundles AND flat
+                // `.md` files, like Codex and pi.
+                assert_eq!(spec.kind, SkillStorageKind::SkillDirectoryOrMarkdownFile);
+                assert_eq!(spec.project_rel_dirs, vec![".dsh/skills", ".agents/skills"]);
+                // Harness-native dir first (preferred link target), shared
+                // cross-agent store second.
+                let expected = vec![
+                    crate::parsers::deepseek::resolve_dsh_home_dir().join("skills"),
+                    crate::parsers::deepseek::resolve_dsh_agents_home_dir().join("skills"),
+                ];
+                assert_eq!(spec.global_dirs, expected);
+                // The product CLI owns `$DSH_HOME/skills/.system` (the provider
+                // sets `skipSystem` on that root), so codeg never writes there.
+                assert!(is_read_only_skill_path(
+                    AgentType::DeepSeek,
+                    &expected[0].join(".system").join("imagegen")
+                ));
+                assert!(!is_read_only_skill_path(
+                    AgentType::DeepSeek,
+                    &expected[0].join("my-skill")
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn deepseek_project_skills_hang_off_the_git_root() {
+        // `dsh-skill-filesystem` resolves project roots by walking up to the
+        // nearest `.git`, so opening a package subdirectory must still target
+        // the repo root — otherwise codeg writes a skill the agent never scans.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        let nested = repo.join("packages").join("app");
+        std::fs::create_dir_all(&nested).expect("create nested");
+        // A linked worktree records `.git` as a FILE, which upstream's
+        // `pathExists` accepts — so must this.
+        std::fs::write(repo.join(".git"), "gitdir: /elsewhere\n").expect("write .git file");
+
+        let dirs = scoped_skill_dirs(
+            AgentType::DeepSeek,
+            AgentSkillScope::Project,
+            Some(nested.to_str().expect("utf-8 path")),
+        )
+        .expect("project dirs");
+        assert_eq!(
+            dirs,
+            vec![repo.join(".dsh/skills"), repo.join(".agents/skills")]
+        );
+
+        // No `.git` anywhere above ⇒ fall back to the workspace itself.
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).expect("create bare");
+        let fallback = scoped_skill_dirs(
+            AgentType::DeepSeek,
+            AgentSkillScope::Project,
+            Some(bare.to_str().expect("utf-8 path")),
+        )
+        .expect("fallback dirs");
+        assert_eq!(fallback[0], bare.join(".dsh/skills"));
+
+        // Every other agent keeps the plain workspace-relative layout.
+        let codex = scoped_skill_dirs(
+            AgentType::Codex,
+            AgentSkillScope::Project,
+            Some(nested.to_str().expect("utf-8 path")),
+        )
+        .expect("codex dirs");
+        assert_eq!(codex[0], nested.join(".codex/skills"));
+
+        // ...and the LIST path must resolve the same base as the WRITE path:
+        // a skill saved from the nested workspace lands at the repo root, so
+        // listing the workspace directly would show it as missing.
+        let saved = repo.join(".dsh/skills").join("demo");
+        std::fs::create_dir_all(&saved).expect("create skill dir");
+        std::fs::write(saved.join("SKILL.md"), "---\nname: demo\n---\nbody\n")
+            .expect("write SKILL.md");
+        let listed = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(acp_list_agent_skills(
+                AgentType::DeepSeek,
+                Some(nested.to_string_lossy().to_string()),
+            ))
+            .expect("list skills");
+        assert!(
+            listed.skills.iter().any(|s| s.id == "demo"),
+            "skill saved at the git root must be listed from a nested workspace: {:?}",
+            listed.skills
+        );
+        assert!(
+            listed
+                .locations
+                .iter()
+                .any(|l| l.path == repo.join(".dsh/skills").to_string_lossy()),
+            "the listed project location must be the git root: {:?}",
+            listed.locations
+        );
+    }
+
+    #[test]
     fn parse_provider_model_emits_claude_custom_model_option_trio() {
         // A Claude provider that defines the custom model option must surface all
         // three ANTHROPIC_CUSTOM_MODEL_OPTION* env vars (Some => set) alongside
@@ -15074,6 +15747,105 @@ wire_api = "chat"
             env.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()),
             Some("keep-me")
         );
+    }
+
+    #[test]
+    fn merge_json_values_never_materializes_a_removal_into_a_missing_parent() {
+        // The regression: binding a Claude provider that configures NO models
+        // against a ~/.claude/settings.json that has no `env` object yet. Every
+        // ANTHROPIC_*_MODEL entry of the cascade patch is a removal, and the old
+        // merge copied the whole `env` subtree in verbatim because the key was
+        // absent — writing the sentinels out as real JSON nulls. The Claude Code
+        // CLI stringifies settings env into `process.env`, so those became the
+        // model name "null" and every row of the composer's model picker read
+        // `null`.
+        let mut base = serde_json::json!({ "effortLevel": "high" });
+        let patch = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://gw.example",
+                "ANTHROPIC_AUTH_TOKEN": "sk-1",
+                "ANTHROPIC_MODEL": null,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": null,
+                "ANTHROPIC_CUSTOM_MODEL_OPTION": null
+            }
+        });
+        merge_json_values(&mut base, &patch);
+        let env = base
+            .get("env")
+            .and_then(|v| v.as_object())
+            .expect("env object created for the real values");
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()),
+            Some("https://gw.example")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()),
+            Some("sk-1")
+        );
+        // Not "present and null" — absent.
+        assert!(!env.contains_key("ANTHROPIC_MODEL"));
+        assert!(!env.contains_key("ANTHROPIC_DEFAULT_OPUS_MODEL"));
+        assert!(!env.contains_key("ANTHROPIC_CUSTOM_MODEL_OPTION"));
+        // Untouched siblings survive.
+        assert_eq!(
+            base.get("effortLevel").and_then(|v| v.as_str()),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn merge_json_values_skips_a_patch_subtree_that_is_only_removals() {
+        // Same missing-parent case, but the patch has nothing real to add:
+        // creating an empty `env` husk in a config that never had one would be
+        // writing a key the user never asked for.
+        let mut base = serde_json::json!({});
+        merge_json_values(
+            &mut base,
+            &serde_json::json!({ "env": { "ANTHROPIC_MODEL": null } }),
+        );
+        assert!(!base.as_object().expect("object").contains_key("env"));
+
+        // An object the patch author wrote as empty IS a value — it still lands.
+        let mut base = serde_json::json!({});
+        merge_json_values(&mut base, &serde_json::json!({ "env": {} }));
+        assert_eq!(base.get("env"), Some(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn merge_json_values_strips_removals_when_replacing_a_mistyped_base() {
+        // A base whose `env` is not an object can't be merged into, so the patch
+        // replaces it — still without materializing the sentinels.
+        let mut base = serde_json::json!({ "env": "not-an-object" });
+        merge_json_values(
+            &mut base,
+            &serde_json::json!({ "env": { "ANTHROPIC_BASE_URL": "https://gw", "ANTHROPIC_MODEL": null } }),
+        );
+        assert_eq!(
+            base.get("env"),
+            Some(&serde_json::json!({ "ANTHROPIC_BASE_URL": "https://gw" }))
+        );
+
+        // Arrays are data, not key/value maps: a null element is preserved.
+        let mut base = serde_json::json!({});
+        merge_json_values(&mut base, &serde_json::json!({ "xs": [1, null, 2] }));
+        assert_eq!(base.get("xs"), Some(&serde_json::json!([1, null, 2])));
+    }
+
+    #[test]
+    fn agent_runtime_config_env_survives_a_non_string_value() {
+        // A settings.json corrupted by the old merge (env values as JSON null)
+        // must not cost the launch env everything else in the file: the bad
+        // entries are skipped, the rest — including the credentials — still land.
+        let config: AgentRuntimeConfig = serde_json::from_str(
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://gw","ANTHROPIC_MODEL":null,"PORT":8080}}"#,
+        )
+        .expect("a null env value must not fail the whole parse");
+        assert_eq!(
+            config.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://gw")
+        );
+        assert!(!config.env.contains_key("ANTHROPIC_MODEL"));
+        assert!(!config.env.contains_key("PORT"));
     }
 
     #[test]
@@ -15424,6 +16196,33 @@ wire_api = "chat"
             Some(&serde_json::json!(["Shell(npm run build)"]))
         );
         assert_eq!(v.pointer("/permissions/deny"), Some(&serde_json::json!([])));
+    }
+
+    #[tokio::test]
+    async fn qoder_probe_env_materializes_the_token() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+
+        // The form value wins over saved env and is trimmed.
+        let env = qoder_probe_env(&db, Some("  pat-123  ")).await;
+        assert_eq!(
+            env.get("QODER_PERSONAL_ACCESS_TOKEN").map(String::as_str),
+            Some("pat-123")
+        );
+
+        // No token on screen → present but empty, so `run_qoder_probe` strips
+        // any inherited one instead of probing a credential a launch wouldn't use.
+        let cleared = qoder_probe_env(&db, Some("")).await;
+        assert_eq!(
+            cleared
+                .get("QODER_PERSONAL_ACCESS_TOKEN")
+                .map(String::as_str),
+            Some("")
+        );
+        let unset = qoder_probe_env(&db, None).await;
+        assert_eq!(
+            unset.get("QODER_PERSONAL_ACCESS_TOKEN").map(String::as_str),
+            Some("")
+        );
     }
 
     #[tokio::test]
@@ -17295,7 +18094,7 @@ wire_api = "chat"
                     .expect("npx recipe must pin via --package");
                 assert_eq!(
                     argv.get(pkg_idx + 1).map(String::as_str),
-                    Some("hermes-agent@0.20.1")
+                    Some("hermes-agent@0.20.5")
                 );
                 assert_eq!(argv.get(pkg_idx + 2).map(String::as_str), Some("hermes"));
             } else {
@@ -17922,7 +18721,7 @@ model = "gpt"
             )
         };
 
-        let annotated = annotate_npm_bootstrap_failure("hermes-agent@0.20.1", download());
+        let annotated = annotate_npm_bootstrap_failure("hermes-agent@0.20.5", download());
         let text = annotated.to_string();
         assert!(text.contains("fetch failed"), "keeps the original error");
         assert!(text.contains("HTTP(S)_PROXY"), "adds the proxy hint");
@@ -17934,9 +18733,29 @@ model = "gpt"
 
         // A hermes failure that isn't a download stays untouched.
         let permissions = annotate_npm_bootstrap_failure(
-            "hermes-agent@0.20.1",
+            "hermes-agent@0.20.5",
             AcpError::Protocol("failed to install npm package globally: EACCES".to_string()),
         );
         assert!(!permissions.to_string().contains("HTTP(S)_PROXY"));
+    }
+
+    /// The proxy hint is keyed on npm's URL-parse failure, so every other way an
+    /// install can die has to pass through untouched. (The positive branch also
+    /// requires a scheme-less proxy in the process env; asserting that would
+    /// mean mutating env under a parallel test binary.)
+    #[test]
+    fn npm_proxy_url_hint_leaves_unrelated_failures_alone() {
+        for err in [
+            AcpError::Protocol("failed to install npm package globally: EACCES".to_string()),
+            AcpError::Protocol("failed to install npm package globally: ETIMEDOUT".to_string()),
+            AcpError::SdkNotInstalled("npm is not installed".to_string()),
+        ] {
+            let before = err.to_string();
+            assert_eq!(
+                annotate_npm_proxy_url_failure(err).to_string(),
+                before,
+                "only an ERR_INVALID_URL failure may be annotated"
+            );
+        }
     }
 }

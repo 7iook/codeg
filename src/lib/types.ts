@@ -2,7 +2,7 @@ import { BUILTIN_AGENT_ROSTER } from "./agent-roster"
 
 export { BUILTIN_AGENT_ROSTER } from "./agent-roster"
 
-/** The agents codeg ships hand-written support for. */
+/** The sixteen agents codeg ships hand-written support for. */
 export type BuiltinAgentType = (typeof BUILTIN_AGENT_ROSTER)[number]
 
 /**
@@ -784,6 +784,9 @@ export const AGENT_DISPLAY_ORDER: BuiltinAgentType[] = [
   "grok",
   "cursor",
   "kiro",
+  "deepseek",
+  "qoder",
+  "antigravity",
 ]
 
 const AGENT_DISPLAY_ORDER_INDEX = new Map<AgentType, number>(
@@ -1111,6 +1114,9 @@ export const AGENT_LABELS: Record<BuiltinAgentType, string> = {
   grok: "Grok",
   cursor: "Cursor",
   kiro: "Kiro",
+  deepseek: "DeepSeek Harness",
+  qoder: "Qoder",
+  antigravity: "Google Antigravity",
 }
 
 export const AGENT_COLORS: Record<BuiltinAgentType, string> = {
@@ -1130,6 +1136,9 @@ export const AGENT_COLORS: Record<BuiltinAgentType, string> = {
   // this palette is cline's `purple-500` (#A855F7), which is magenta-leaning
   // where Kiro's is blue-leaning violet, so the two stay separable.
   kiro: "bg-[#9046FF]",
+  deepseek: "bg-[#4D6BFE]",
+  qoder: "bg-[#6C4CF1]",
+  antigravity: "bg-[#1A73E8]",
 }
 
 // ACP connection status (matches Rust ConnectionStatus)
@@ -1479,6 +1488,10 @@ export interface WorkTask {
   additions: number | null
   deletions: number | null
   merge_commit: string | null
+  /** How a done task ended: 'merged' | 'delivered_pr' |
+   *  'accepted_without_merge'. Absent on live tasks and on rows finished
+   *  before the column existed. */
+  completion_kind?: string | null
   /** Acceptance red/green light of the current review, if a preflight
    *  command ran. */
   preflight: WorkTaskPreflight | null
@@ -1491,6 +1504,12 @@ export interface WorkTask {
   /** Planned start of a to-do task (ISO); null = no plan. Consumed the moment
    *  the task is claimed, by the scheduler or by hand. */
   scheduled_at: string | null
+  /** Forge provenance ('forge_issue' | 'forge_pr'); absent = not forge-sourced. */
+  source_kind?: string | null
+  /** Canonical source key ({provider}:{host}:{owner_repo}:{kind}:{number}). */
+  source_key?: string | null
+  /** Source snapshot (url, title, numbers …); shape mirrors ForgeSourceMeta. */
+  source_meta?: ForgeSourceMeta | null
   /** Latest agent_progress milestone — present on live (running/awaiting/merging) rows only. */
   latest_progress?: string | null
   created_at: string
@@ -1499,6 +1518,212 @@ export interface WorkTask {
   settled_at: string | null
   finished_at: string | null
 }
+
+/** Provenance snapshot of a forge-triggered task (mirrors Rust ForgeSourceMeta). */
+export interface ForgeSourceMeta {
+  provider: ForgeProviderId
+  server_host: string
+  api_base: string
+  account_id: string
+  owner_repo: string
+  number: number
+  /** Canonical html URL, server-derived. */
+  url: string
+  /** Issue/PR title at trigger time. */
+  title: string
+  /** PR-only fields (absent on issues; filled by trigger-time hydration in M8). */
+  base_ref?: string | null
+  head_ref?: string | null
+  head_sha?: string | null
+  head_repo?: string | null
+  /** URL of the PR created by the delivery acceptance path (P1). */
+  result_pr?: string | null
+  /** The trigger dialog's write-back answer, frozen at trigger time. Absent on
+   *  rows minted before the choice lived here — those stay silent. */
+  writeback?: boolean | null
+}
+
+export type ForgeTab = "issues" | "prs"
+
+/** Normalized across both forges. `merged` only reaches a pull request row —
+ *  GitHub reports merged ones as plain `closed`, so the backend derives it. */
+export type ForgeItemState = "open" | "closed" | "merged"
+
+/** How the workbench list is ordered (mirrors Rust ForgeSort). Four NAMED
+ *  orders rather than a field/direction pair: the two forges spell their sort
+ *  fields differently and accept different sets, so this is the intersection. */
+export type ForgeSort =
+  | "newest"
+  | "oldest"
+  | "recently_updated"
+  | "least_recently_updated"
+
+/** One label as the forge paints it (mirrors Rust ForgeLabel). */
+export interface ForgeLabel {
+  name: string
+  /** `#rrggbb`, normalized from GitHub's bare digits and GitLab's hashed ones —
+   *  or null when the forge sent something that is not hex (GitLab accepts CSS
+   *  colour names on write). Null draws the neutral chip. */
+  color: string | null
+}
+
+/** The repository's label vocabulary (mirrors Rust ForgeLabelList). */
+export interface ForgeLabelList {
+  labels: ForgeLabel[]
+  /** The repository has more labels than one page holds — said out loud so a
+   *  filter list that stops at 100 does not read as complete. */
+  truncated: boolean
+}
+
+/** One row of the forge workbench list (mirrors Rust ForgeIssueRow). */
+export interface ForgeIssueRow {
+  number: number
+  title: string
+  /** Capped body from the list payload — the trigger snapshot's source. */
+  body: string | null
+  state: string
+  /** Draft / work-in-progress pull request. Always false for issues. */
+  draft: boolean
+  labels: ForgeLabel[]
+  author: string | null
+  updated_at: string | null
+  html_url: string
+  is_pr: boolean
+  /** Human comments (GitHub `comments` / GitLab `user_notes_count`) — system
+   *  timeline events are excluded by both, which is what makes it mean
+   *  "there is a discussion here". */
+  comments: number
+}
+
+/** One page of the workbench list (mirrors Rust ForgeIssueList). */
+export interface ForgeIssueList {
+  rows: ForgeIssueRow[]
+  /** 1-based page actually served (already clamped by the backend). */
+  page: number
+  per_page: number
+  /** Matching items, or null when the forge declines to count — GitLab omits
+   *  its totals past 10k rows, and its locally-filtered closed-MR query would
+   *  report a count that includes rows the user cannot see. Null means the UI
+   *  must fall back to previous/next instead of page numbers. */
+  total_count: number | null
+  /** How many of those matches the forge will actually PAGE through, when that
+   *  is fewer than `total_count`. GitHub Search serves only the first 1000
+   *  results and answers 422 past them, so page NUMBERS come from this and the
+   *  "N results" summary from `total_count`. Null means every match is
+   *  reachable (always so on GitLab). */
+  reachable_count: number | null
+  has_next: boolean
+  /** GitHub search timed out; this page is partial. */
+  incomplete: boolean
+}
+
+/** A folder's `origin` remote parsed into forge coordinates. */
+export interface ForgeRemote {
+  server_host: string
+  owner_repo: string
+  remote_url: string
+  /** Which forge this host is — decided by the backend from the configured
+   *  accounts and the hostname, never chosen here. */
+  provider: ForgeProviderId
+}
+
+/** Latest task (any state) for a source key — the row chip's data. */
+export interface ForgeTaskLink {
+  source_key: string
+  task_id: number
+  status: WorkTaskStatus
+  verdict: string | null
+  updated_at: string
+}
+
+/** How the trigger dialog asks the work item to be handled. A template NAME
+ *  the server resolves into its own instruction text — prompt text never
+ *  crosses the wire. `fix`/`investigate`/`plan_first` are issue scenarios,
+ *  `review_fix`/`review_only` are PR/MR scenarios. */
+export type ForgeScenarioId =
+  | "fix"
+  | "investigate"
+  | "plan_first"
+  | "review_fix"
+  | "review_only"
+
+/** Trigger payload (client supplies coordinates + display snapshot only —
+ *  the server derives everything trusted). */
+export interface ForgeTaskDraftInput {
+  folder_id: number
+  source: {
+    kind: "issue" | "pr"
+    provider: ForgeProviderId
+    server_host: string
+    account_id?: string | null
+    owner_repo: string
+    number: number
+  }
+  snapshot: {
+    title: string
+    body?: string | null
+    labels?: string[]
+    author?: string | null
+  }
+  /** Absent/null = the kind's default (`fix` for issues, `review_fix` for
+   *  proposed changes). */
+  scenario?: ForgeScenarioId | null
+  instruction?: string | null
+  /** Comment the outcome back on this item once the task finishes — the
+   *  trigger dialog's own box, recorded on the task and frozen at trigger
+   *  time. Always sent explicitly by the dialog; ABSENT is read server-side as
+   *  "silent", not as the dialog's default, because a request without it came
+   *  from a client that never showed the question. */
+  writeback?: boolean | null
+  agent_type?: string | null
+  force?: boolean
+}
+
+/** One scope's repository-panel preferences — mirrors
+ *  `forge::settings::ForgePanelSettings`.
+ *
+ *  What lives here is the dimension this page adds on top of a folder's
+ *  task-settings stage prompts: how you like an ISSUE handled, and what you
+ *  always want said for a review as opposed to a fix. */
+export interface ForgePanelSettings {
+  /** Scenario the trigger dialog preselects for an issue; null = the built-in
+   *  default. Consumed by the DIALOG — the request it then sends always names
+   *  a scenario outright. */
+  default_issue_scenario?: ForgeScenarioId | null
+  /** Same, for a pull/merge request. */
+  default_pr_scenario?: ForgeScenarioId | null
+  /** What the trigger dialog's write-back switch starts as. Only the starting
+   *  position: the switch is on screen every time, and what it says when the
+   *  user presses Create is what the task records. */
+  writeback_default: boolean
+  /** Standing instructions appended after a scenario's built-in wording,
+   *  keyed by scenario id plus the reserved `all` (every scenario). */
+  scenario_prompts: Record<string, string>
+}
+
+/** Every scope of the panel's preferences — mirrors
+ *  `forge::settings::ForgeSettingsStore`.
+ *
+ *  Scoped the same way task settings are: a global row plus optional per-folder
+ *  overrides, and an override wins WHOLESALE rather than merging field by
+ *  field. Sent as one value because the settings dialog shows one folder while
+ *  saying whether that folder is following the global row, which takes both. */
+export interface ForgeSettingsStore {
+  global: ForgePanelSettings
+  /** Keyed by folder id (JSON has no integer keys, so they arrive as strings).
+   *  A folder with no entry follows `global` — absence IS the answer, so there
+   *  is no separate "follows global" flag to keep in sync. */
+  folders: Record<string, ForgePanelSettings>
+}
+
+/** Reserved `scenario_prompts` key applied to every scenario. */
+export const FORGE_SCENARIO_PROMPT_ALL = "all"
+
+/** Discriminated trigger outcome — duplicate/mismatch are answers, not errors. */
+export type ForgeCreateResult =
+  | { outcome: "created"; task: WorkTask }
+  | { outcome: "duplicate"; existing: WorkTask }
+  | { outcome: "folder_mismatch"; folder_remote: ForgeRemote | null }
 
 /** A merge parked on a reviewed task while its project lands another one. */
 export interface WorkTaskQueuedMerge {
@@ -1797,14 +2022,7 @@ export interface BackgroundSettledInfo {
   summary?: string | null
   tool_use_id?: string | null
   result?: string | null
-  /**
-   * True when this task's reply is/was rendered live on the ACP wire as the
-   * tail of a #870-held turn (the backend derives this from its launched-id
-   * set, which outlives the turn's own status flip). The handler uses it to
-   * skip arming the "Syncing background results…" hint for such a settle — the
-   * reply is already on screen, so there's no gap to bridge. Absent/false for a
-   * genuinely out-of-turn settle (reply arrives later as its own overlay turn).
-   */
+  /** True when the reply is already on the ACP wire as a #870-held turn tail. */
   wire_visible?: boolean
 }
 
@@ -1917,6 +2135,13 @@ export type AcpEvent =
       folder_id: number
     }
   | {
+      // Agent published a live ACP session title. The backend writes the
+      // conversation row and broadcasts `conversation://changed`; the
+      // frontend does not apply this event itself.
+      type: "native_session_title"
+      title: string
+    }
+  | {
       type: "conversation_status_changed"
       conversation_id: number
       status: ConversationStatus
@@ -1991,10 +2216,32 @@ export type AcpEvent =
       // auto-retries). NOT a turn failure — rendered as a transient retry
       // indicator that reuses the Claude API-retry banner and clears at the
       // next turn boundary. `error_status` is the HTTP status when codex's
-      // `codexErrorInfo` carried one.
+      // `codexErrorInfo` carried one. With AIR advertised, codex 1.2+ replaces
+      // this channel with severity-"warning" `session_failure` records, so it
+      // now serves only legacy paths.
+      //
+      // pi shares this channel (#525): pi-acp announces `auto_retry_start` as
+      // ordinary prose, so the backend classifies it out of the transcript and
+      // routes it here. pi sends an EMPTY `message` — it forwards no error text,
+      // only the counters below — and the banner renders its own localized line
+      // in that case. All three counters are absent for codex, which reports
+      // none of them.
       type: "turn_retrying"
       message: string
       error_status?: number
+      attempt?: number
+      max_retries?: number
+      retry_delay_ms?: number
+    }
+  | {
+      // JetBrains AIR typed session failure upsert
+      // (`_meta.jetbrains.air.sessionFailure`, claude-agent-acp 0.67+/
+      // codex-acp 1.2+; published because codeg advertises the client
+      // capability). Wire carries UPSERTS ONLY — the reducer applies the same
+      // monotonic id+revision merge as the backend snapshot store, and infers
+      // resolution (warnings settle at turn boundaries; errors stay active).
+      type: "session_failure"
+      record: SessionFailureRecord
     }
   | {
       type: "session_load_failed"
@@ -2020,7 +2267,7 @@ export type AcpEvent =
    * `turns` are UPSERTs keyed by `MessageTurn.id` into the conversation
    * runtime store's background overlay; `settled` entries each raise one OS
    * notification; `outstanding` mirrors into the connection for the idle-sweep
-   * exemption and the "background tasks running" chip.
+   * exemption (nothing renders the count).
    */
   | {
       type: "background_activity"
@@ -2370,6 +2617,49 @@ export interface SessionLastError {
   details?: string | null
 }
 
+/**
+ * One JetBrains AIR typed session failure record (mirror of Rust
+ * `SessionFailureRecord`; claude-agent-acp 0.67+/codex-acp 1.2+, published
+ * only because codeg advertises `clientCapabilities._meta.jetbrains.air`).
+ *
+ * The wire carries UPSERTS ONLY: a record is revised in place through
+ * `id`+`revision` (per-id, from 1), and adapters never publish resolution —
+ * consumers reject `revision <=` the stored one and infer lifecycle
+ * themselves (see `lib/session-failures.ts`): severity-"warning" records
+ * settle at CLEAN (`end_turn`) turn ends only — a cancelled/failed exit did
+ * not recover, and a failed turn's terminal record arrives just before its
+ * `turn_complete` (riding the prompt response) as a same-id higher-revision
+ * error escalation — while severity-"error" records stay active until the
+ * user acts (a new prompt settles everything; a recurrence re-arms via a
+ * higher revision on the same id). Entries are retained resolved so each
+ * doubles as its id's revision watermark — dropping one would let a delayed
+ * stale upsert resurrect it.
+ */
+export interface SessionFailureRecord {
+  id: string
+  /** Per-id upsert revision, from 1. */
+  revision: number
+  /** AIR category — `connection|access|limit|request|service|unknown` today;
+   *  unrecognized values fall back to the `unknown` rendering. */
+  category: string
+  /** `"warning"` (transient, auto-recovering) or `"error"` (terminal). */
+  severity: string
+  /** Adapter-authored user-facing text; may be empty (the banner then falls
+   *  back to the localized category label). */
+  title: string
+  details?: string | null
+  /** Suggested recovery actions — subset of `retry|login|new_session` today;
+   *  unrecognized entries are not rendered. */
+  actions?: string[]
+  /** Client-inferred lifecycle (never on the wire). */
+  resolved?: boolean
+  /** Set when the USER closed the strip (client-local, never on the wire).
+   *  Implies `resolved`, but must NOT render as "recovered": the incident was
+   *  silenced, not fixed — saying otherwise would be a lie whenever the
+   *  connection is still down. */
+  dismissed?: boolean
+}
+
 export interface LiveSessionSnapshot {
   connection_id: string
   conversation_id: number | null
@@ -2438,6 +2728,16 @@ export interface LiveSessionSnapshot {
   config_stale_kind?: ConfigStaleKind | null
   /** Latest agent/runtime error recoverable after reconnect. */
   last_error?: SessionLastError | null
+  /** AIR typed session failure table — resolved entries and their revision
+   *  watermarks included, so an attaching client seeds the same monotonic
+   *  merge the live path applies. Absent while empty (the common case). */
+  session_failures?: SessionFailureRecord[]
+  /** Goal-control action vocabulary the goal card gates its buttons on: the
+   *  advertised `_meta.goal.actions` for neutral-goal adapters (claude has no
+   *  "pause"), else the legacy ["pause","clear"] pair. `null` while the
+   *  connection is still initializing (nothing known yet — stay fail-closed
+   *  and re-read); absent only on a server too old to carry the field. */
+  goal_actions?: string[] | null
   event_seq: number
 }
 
@@ -2491,6 +2791,14 @@ export interface AcpAgentInfo {
   sort_order: number
   installed_version: string | null
   env: Record<string, string>
+  /**
+   * The RESOLVED `CODEG_ACP_HOST_TOOLS` verdict: whether the next launch hands
+   * the `fs/*` + `terminal/*` channels — and, with them, codeg-mcp's delegation
+   * tools — back to the agent. Resolved by the same Rust function the launch
+   * uses, so it covers BOTH the per-agent `env` above and codeg's own process
+   * env; reading `env` here would miss the second.
+   */
+  host_tools_agent_mode: boolean
   config_json: string | null
   config_file_path: string | null
   opencode_auth_json: string | null
@@ -2696,6 +3004,26 @@ export interface CursorModelsResult {
 export interface KiroCustomAgent {
   id: string
   description: string | null
+}
+
+/** Result of probing `qoder status -o json` (auth card). A probe that could
+ * not run reports `error` with `logged_in: false`; the panel renders that as
+ * "could not check", never as "signed out". */
+export interface QoderAuthStatus {
+  installed: boolean
+  logged_in: boolean
+  username: string | null
+  email: string | null
+  /** Account tier, e.g. `personal_standard`. */
+  user_type: string | null
+  /** Version the probed binary reports — the one that would actually launch,
+   * not necessarily the version codeg's registry pins. */
+  version: string | null
+  allow_byok: boolean | null
+  error: string | null
+  /** Absolute path to the qoder binary codeg would launch; the panel builds a
+   * copy-pasteable `"<binary_path>" login` command from it. */
+  binary_path?: string | null
 }
 
 // Lightweight agent status returned by acp_get_agent_status
@@ -2968,6 +3296,13 @@ export interface SystemRenderingSettings {
   disable_hardware_acceleration: boolean
 }
 
+/** "Launch at login". The OS registration is the source of truth, so an update
+ * returns the state the system actually settled on — which can differ from what
+ * was requested (e.g. Windows Task Manager vetoing the Run entry). */
+export interface SystemAutostartSettings {
+  enabled: boolean
+}
+
 // --- Logging ---
 
 export type LogLevel = "off" | "error" | "warn" | "info" | "debug" | "trace"
@@ -3050,6 +3385,8 @@ export interface GitSettings {
   custom_path: string | null
 }
 
+/** A stored forge credential. Despite the name (kept for the wire format),
+ *  this is any host's account — GitHub, GitLab, or a plain git remote. */
 export interface GitHubAccount {
   id: string
   server_url: string
@@ -3058,7 +3395,13 @@ export interface GitHubAccount {
   avatar_url: string | null
   is_default: boolean
   created_at: string
+  /** Which forge the token is for. Absent on accounts stored before GitLab
+   *  support (and on plain git credentials), where it keeps meaning "a
+   *  credential for this host, whichever forge lives there". */
+  provider?: ForgeProviderId | null
 }
+
+export type ForgeProviderId = "github" | "gitlab"
 
 export interface GitHubAccountsSettings {
   accounts: GitHubAccount[]
@@ -3085,6 +3428,9 @@ export type McpAppType =
   | "grok"
   | "cursor"
   | "kiro"
+  | "deepseek"
+  | "qoder"
+  | "antigravity"
 
 export interface LocalMcpServer {
   id: string
@@ -3575,7 +3921,7 @@ export interface CheckItem {
  * owns the version card's copy.
  */
 export interface AdapterInfo {
-  /** npm spec codeg installs, e.g. "@agentclientprotocol/codex-acp@1.1.9". */
+  /** npm spec codeg installs, e.g. "@agentclientprotocol/codex-acp@1.3.0". */
   adapter_package: string
   /** Command the launch gate resolves, e.g. "codex-acp". */
   adapter_cmd: string

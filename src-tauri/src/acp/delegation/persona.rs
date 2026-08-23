@@ -691,6 +691,9 @@ pub fn provider_for(agent_type: AgentType) -> &'static dyn PersonaCapability {
         | AgentType::Pi
         | AgentType::Grok
         | AgentType::Cursor
+        | AgentType::DeepSeek
+        | AgentType::Qoder
+        | AgentType::Antigravity
         | AgentType::Custom(_) => &UNSUPPORTED_PROVIDER,
     }
 }
@@ -1251,6 +1254,9 @@ mod tests {
             AgentType::Pi,
             AgentType::Grok,
             AgentType::Cursor,
+            AgentType::DeepSeek,
+            AgentType::Qoder,
+            AgentType::Antigravity,
         ];
         for agent in unsupported {
             let provider = provider_for(agent);

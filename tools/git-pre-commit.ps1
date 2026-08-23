@@ -34,7 +34,13 @@ $ExtraBlocked = @()
 
 # --- universal structural gates ---
 $F = @()
-$F += Test-BlockedFiles  -Staged $Staged -Extra $ExtraBlocked
+# Upstream ships agent-session SQLite dumps under tests/fixtures (Antigravity,
+# etc.). Those are replay inputs, not live databases — keep the global .db
+# block, but do not reject vendor test fixtures.
+$BlockedStaged = @($Staged | Where-Object {
+    $_ -notmatch '(^|/)tests?/fixtures/.+\.(db|sqlite)(-shm|-wal|-journal)?$'
+})
+$F += Test-BlockedFiles  -Staged $BlockedStaged -Extra $ExtraBlocked
 $F += Test-BigFile       -Staged $Staged -Repo $Repo -Baseline $Baseline -Warn
 $F += Test-SilentSwallow -Staged $Staged -Warn
 $F += Test-AdrIndex      -Staged $Staged -Repo $Repo

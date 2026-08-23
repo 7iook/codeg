@@ -51,6 +51,16 @@ function rustDelegationAgentTypes(): string[] {
 }
 
 describe("built-in agent roster", () => {
+  it("lists sixteen built-ins with kiro then the three upstream agents after cursor", () => {
+    expect(BUILTIN_AGENT_ROSTER).toHaveLength(16)
+    expect(BUILTIN_AGENT_ROSTER.slice(-4)).toEqual([
+      "kiro",
+      "deepseek",
+      "qoder",
+      "antigravity",
+    ])
+  })
+
   it("matches the Rust delegation schema membership", () => {
     // This gate inherits authority from the Rust schema/registry equality gate.
     // If that Rust gate is removed, both layers can drift together undetected.

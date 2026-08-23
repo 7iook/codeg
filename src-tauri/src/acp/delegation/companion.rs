@@ -1863,6 +1863,10 @@ mod tests {
         assert!(agents.iter().any(|a| a == "pi"));
         assert!(agents.iter().any(|a| a == "grok"));
         assert!(agents.iter().any(|a| a == "cursor"));
+        assert!(agents.iter().any(|a| a == "kiro"));
+        assert!(agents.iter().any(|a| a == "deepseek"));
+        assert!(agents.iter().any(|a| a == "qoder"));
+        assert!(agents.iter().any(|a| a == "antigravity"));
         // get_delegation_status takes a single id param — task_ids (required) —
         // plus wait_ms. The legacy single `task_id` param is gone.
         let status = tools
@@ -2015,6 +2019,8 @@ mod tests {
              missing {missing:?}, unexpected {extra:?} — add the new agent to \
              tool_schema.json (a built-in absent here can never be delegated to)"
         );
+        assert_eq!(agents[0], "claude_code");
+        assert_eq!(agents[agents.len() - 1], "antigravity");
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ import type { AdaptedContentPart } from "@/lib/adapters/ai-elements-adapter"
 import type { AgentToolCall, AgentType } from "@/lib/types"
 import { tryParseJson, extractJsonField } from "./content-parts-renderer"
 import { SubagentSessionDialog } from "./subagent-session-dialog"
+import { useSessionViewerHost } from "./session-viewer-host"
 import { shortAgentId } from "@/lib/collab-tool"
 import { MessageResponse } from "@/components/ai-elements/message"
 import { Shimmer } from "@/components/ai-elements/shimmer"
@@ -279,6 +280,14 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
     [parsed, part.input]
   )
 
+  // codex 0.147's native team-of-agents marks its capsules as LAUNCH-only
+  // (`CODEX_SUBAGENT_LAUNCH_KEY`, written by both the live path and the rollout
+  // parser). The card settles when codex acknowledges the spawn, which is not
+  // when the child finishes — codex forwards no further progress, and an
+  // asynchronous child can still be working long after. Say so, rather than let
+  // a green "completed" claim the sub-agent is done.
+  const isLaunchOnly = parsed?.__codegCodexSubagentLaunch === true
+
   // codex spawn capsules carry the sub-agent's UUID (`agent_id`); show it in the
   // pill so the execution capsule reads uniformly with the live/wait collab
   // capsules. Other agents (e.g. Claude Task) have no `agent_id` → no badge.
@@ -372,6 +381,7 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
     () => parseChildSessionId(part.meta, agentStats?.child_session_id),
     [part.meta, agentStats?.child_session_id]
   )
+  const viewerHost = useSessionViewerHost()
   const [sessionOpen, setSessionOpen] = useState(false)
   const grokProgressLine = useMemo(() => {
     if (!grokProgress) return null
@@ -495,6 +505,15 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
           </div>
         )}
 
+        {/* codex native sub-agent: the card is the LAUNCH, not the run. Shown
+          once it settles, where "completed" would otherwise read as "the
+          sub-agent finished". */}
+        {isLaunchOnly && !isRunning && (
+          <div className="text-xs text-muted-foreground">
+            {t("agentCodexLaunchOnly")}
+          </div>
+        )}
+
         {/* Grok live sub-agent ticker (`subagent_progress`) — only while the
           child is still running; the settled card renders stats/result. */}
         {(isRunning || isLiveBackgroundLaunch) && grokProgressLine && (
@@ -510,13 +529,32 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
           <>
             <button
               type="button"
-              onClick={() => setSessionOpen(true)}
+              onClick={() =>
+                // Preferred: the transcript-level host, which survives this card
+                // scrolling out of the virtual list. Falls back to owning the
+                // drawer here when there is no host (this part also renders
+                // inside the grok child transcript, which is not virtualized).
+                viewerHost
+                  ? viewerHost.open({
+                      kind: "agentSession",
+                      sessionId: childSession.sessionId,
+                      agentType: childSession.agentType,
+                      subagentType,
+                      description,
+                      // Keep re-reading the child's transcript from disk while
+                      // its launch call is unsettled or the background child is
+                      // still out. A snapshot once handed over — see the note on
+                      // `AgentSessionRequest.live`.
+                      live: isRunning || isLiveBackgroundLaunch,
+                    })
+                  : setSessionOpen(true)
+              }
               className="flex w-fit items-center gap-1.5 text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
             >
               <MessagesSquare aria-hidden className="size-3.5 shrink-0" />
               {t("agentSessionAction")}
             </button>
-            {sessionOpen && (
+            {viewerHost == null && sessionOpen && (
               <SubagentSessionDialog
                 open={sessionOpen}
                 onOpenChange={setSessionOpen}
@@ -524,8 +562,6 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
                 agentType={childSession.agentType}
                 subagentType={subagentType}
                 description={description}
-                // Keep re-reading the child's transcript from disk while its
-                // launch call is unsettled or the background child is still out.
                 live={isRunning || isLiveBackgroundLaunch}
               />
             )}

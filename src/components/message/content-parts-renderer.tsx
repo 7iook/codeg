@@ -9,6 +9,7 @@ import type { MessageRole, PlanEntryInfo } from "@/lib/types"
 import {
   aliasToolInputKeys,
   extractClaudeCodeMetaTitle,
+  extractClaudeCodeSkillName,
   normalizeToolName,
 } from "@/lib/tool-call-normalization"
 import { parseBackgroundLaunch } from "@/lib/background-task"
@@ -46,6 +47,7 @@ import {
 } from "@/components/ai-elements/reasoning"
 import { AgentToolCallPart } from "./agent-tool-call"
 import { AskQuestionResultCard } from "./ask-question-result-card"
+import { CodegMcpToolCard } from "./codeg-mcp-tool-card"
 import { CollabAgentCard } from "./collab-agent-card"
 import {
   ContextCompactionCard,
@@ -68,6 +70,7 @@ import {
   WAIT_TOOL_NAME,
 } from "@/lib/shell-session-tool"
 import { COLLAB_AGENT_TOOL_NAME } from "@/lib/collab-tool"
+import { isCodegMcpWorkbenchTool } from "@/lib/codeg-mcp-tool"
 import { DelegatedSubThread } from "./delegated-sub-thread"
 import { DelegationStatusCard } from "./delegation-status-card"
 import { DelegationStatusGroupCard } from "./delegation-status-group-card"
@@ -418,6 +421,13 @@ function commandFromUnknownValue(value: unknown): string | null {
     "command",
     "cmd",
     "script",
+    // Antigravity's terminal arguments — `command_line` on the executed call,
+    // PascalCase `CommandLine` on the model's own envelope (the shape a
+    // permission-prompt frame and the stored trajectory both carry). Ahead of
+    // the argv-style keys so an envelope that has both keeps the full command
+    // line. See `inferFromInput` in `tool-call-normalization.ts`.
+    "command_line",
+    "CommandLine",
     "args",
     "argv",
     "command_args",
@@ -2291,7 +2301,13 @@ const ToolCallPart = memo(function ToolCallPart({
     // jitters when the input lands. Same 80-char ellipsis as the derived
     // path for identical truncation behavior.
     const metaTitle = extractClaudeCodeMetaTitle(part.meta)
+    // claude-agent-acp ≥0.67 (#986): the invoked skill's name rides
+    // `_meta.claudeCode.skill` — authoritative over the input-derived
+    // "Skill: …" (same shape, so it flows through the same localization),
+    // and present from frame 1 before `rawInput` streams.
+    const metaSkillName = extractClaudeCodeSkillName(part.meta)
     const rawTitle =
+      (metaSkillName ? `Skill: ${metaSkillName}` : null) ??
       (metaTitle ? ellipsis(metaTitle, 80) : null) ??
       deriveToolTitle(
         normalizedToolName,
@@ -2712,6 +2728,22 @@ const ToolCallPart = memo(function ToolCallPart({
   if (toolNameLower === "check_user_feedback") {
     return (
       <FeedbackCheckResultCard
+        output={part.output ?? null}
+        errorText={part.errorText ?? null}
+        state={part.state}
+      />
+    )
+  }
+
+  // The remaining codeg-mcp workbench companions (session lookup, work-task
+  // reporting, chat authoring). One compact line stating what the call was
+  // about, in the same visual language as the delegation cards, instead of the
+  // generic tool shell's raw argument dump.
+  if (isCodegMcpWorkbenchTool(toolNameLower)) {
+    return (
+      <CodegMcpToolCard
+        tool={toolNameLower}
+        input={part.input ?? null}
         output={part.output ?? null}
         errorText={part.errorText ?? null}
         state={part.state}

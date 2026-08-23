@@ -47,7 +47,8 @@ use crate::acp::types::{
     PermissionOptionInfo, PlanEntryInfo, PromptCapabilitiesInfo, PromptInputBlock,
     SessionConfigBooleanInfo, SessionConfigKindInfo, SessionConfigOptionInfo,
     SessionConfigSelectGroupInfo, SessionConfigSelectInfo, SessionConfigSelectOptionInfo,
-    SessionModeInfo, SessionModeStateInfo, SteerOutcome, ToolCallImageInfo, UserMessageBlock,
+    SessionFailureRecord, SessionModeInfo, SessionModeStateInfo, SteerOutcome, ToolCallImageInfo,
+    UserMessageBlock,
 };
 use crate::logging::throttle::LeadingEdgeThrottle;
 use crate::models::agent::AgentType;
@@ -319,6 +320,336 @@ fn apply_kiro_env_policy(
 /// `agent_setting.env_json` and injected verbatim into the child.
 pub(crate) const KIRO_API_KEY_ENVS: &[&str] = &["KIRO_API_KEY"];
 
+/// codeg-side knob recording which Antigravity auth method the settings panel
+/// chose. It is NOT read by the agent — the server takes its auth intent from
+/// `auth.type` in `antigravity-acp/settings.json` — so the launch path uses it
+/// twice: to decide which credential env vars may reach the process
+/// ([`apply_antigravity_env_policy`]) and to write that file
+/// ([`sync_antigravity_settings_file`]).
+const ANTIGRAVITY_AUTH_METHOD_ENV: &str = "AGY_AUTH_METHOD";
+
+/// The four `auth.type` values Antigravity's ACP server accepts, canonical
+/// spellings only. `vertex-ai` is the pre-rebrand alias for `agent-platform`;
+/// the server still accepts it, but codeg never writes it.
+const ANTIGRAVITY_AUTH_METHODS: &[&str] = &[
+    "oauth-personal",
+    "oauth-business",
+    "gemini-api-key",
+    "agent-platform",
+];
+
+/// Credential env vars the Antigravity server reads, grouped by the auth method
+/// that actually uses them. Anything outside the selected method's group is
+/// cleared at launch so a value inherited from the developer's shell cannot
+/// silently take over.
+const ANTIGRAVITY_CREDENTIAL_ENV_VARS: &[&str] = &[
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+];
+
+/// Which of [`ANTIGRAVITY_CREDENTIAL_ENV_VARS`] the given method consumes.
+fn antigravity_env_vars_for_method(method: &str) -> &'static [&'static str] {
+    match method {
+        // `auth.type = gemini-api-key` reads the key from GEMINI_API_KEY and
+        // nothing else (the server's own auth_required message says so).
+        "gemini-api-key" => &["GEMINI_API_KEY"],
+        // Agent Platform (formerly Vertex AI) takes GOOGLE_API_KEY, or a
+        // project + location from the GOOGLE_CLOUD_* pair (with the
+        // settings.json `gcp` block as a per-value fallback behind them).
+        "agent-platform" => &[
+            "GOOGLE_API_KEY",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+        ],
+        // Both OAuth paths authenticate through the browser; Gemini Enterprise
+        // additionally reads gcp.project/location from settings.json ONLY,
+        // never from the environment.
+        _ => &[],
+    }
+}
+
+/// Antigravity's launch credential policy, in the spirit of
+/// [`apply_cursor_env_policy`] but strictly stronger.
+///
+/// Once the panel has recorded a method, every credential var the OTHER methods
+/// use is cleared — an empty value tells the spawn layer (vendored sacp-tokio)
+/// to `env_remove` the inherited one.
+///
+/// UNCONDITIONALLY, unlike Cursor's version, which skips a key the caller's own
+/// `runtime_env` already set to a non-empty value. That guard makes sense when
+/// the credential and the mode are independent; here they are not. A
+/// `GEMINI_API_KEY` sitting in `merged` on an `oauth-personal` session can only
+/// come from a stale panel row (the user switched away from API-key auth) or a
+/// shell/container export — and in both cases honoring it authenticates as
+/// something other than what the user picked, silently. Keeping it would also
+/// disagree with the `auth.type` this same launch writes to settings.json.
+///
+/// Legacy rows with no recorded method — and any unrecognized value — are left
+/// completely untouched, so nothing changes for a config codeg does not
+/// understand.
+fn apply_antigravity_env_policy(
+    merged: &mut Vec<(String, String)>,
+    runtime_env: &BTreeMap<String, String>,
+) {
+    let Some(method) = runtime_env
+        .get(ANTIGRAVITY_AUTH_METHOD_ENV)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|method| ANTIGRAVITY_AUTH_METHODS.contains(method))
+    else {
+        return;
+    };
+    let keep = antigravity_env_vars_for_method(method);
+    for key in ANTIGRAVITY_CREDENTIAL_ENV_VARS {
+        if keep.contains(key) {
+            continue;
+        }
+        merged.retain(|(k, _)| k != key);
+        merged.push(((*key).to_string(), String::new()));
+    }
+}
+
+/// Project the panel's Antigravity auth choice into
+/// `<GEMINI_HOME>/antigravity-acp/settings.json`, the ONLY place the server
+/// looks for it.
+///
+/// This is load-bearing, not a convenience: `session/new` fails outright with
+/// `-32000 Authentication required` when that file declares no `auth.type`
+/// (environment-based selection was removed upstream), and codeg does not
+/// implement the ACP `authenticate` request that would otherwise set it. With
+/// the file in place the server runs its own browser OAuth loopback flow inside
+/// `session/new`, so writing it is what makes the agent usable at all.
+///
+/// Deliberately a READ-MODIFY-WRITE merge of only three keys. The file is the
+/// user's (the server parses it as Hjson and documents it as user-provided), so
+/// unknown keys and any hand-written `gcp` block survive a codeg write.
+///
+/// FAILS CLOSED, exactly like the server's own `settings_writer`: "a file that
+/// cannot be parsed is left alone, since rewriting it would delete content we
+/// could not read." A missing file means "create"; a read error, a parse error
+/// or a non-object root all mean "give up". The one place codeg is stricter is
+/// the dialect — the server parses Hjson (comments, trailing commas) and codeg
+/// only strict JSON, so a hand-commented file lands in the give-up branch
+/// rather than being flattened. The warning names the file so the user can set
+/// `auth.type` there themselves; the panel shows that same path.
+///
+/// Every failure is a warning, never a spawn failure: an `auth.type` already in
+/// the file (written by hand, by an earlier launch, or by the server's own auth
+/// picker) may well still be valid.
+fn sync_antigravity_settings_file(
+    merged_env: &[(String, String)],
+    runtime_env: &BTreeMap<String, String>,
+) {
+    let recorded = runtime_env
+        .get(ANTIGRAVITY_AUTH_METHOD_ENV)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|method| ANTIGRAVITY_AUTH_METHODS.contains(method));
+
+    // Honor a `GEMINI_HOME` the launch env relocates the tree with, so codeg
+    // writes the settings file the spawned process will actually read.
+    let home_override = merged_env
+        .iter()
+        .find(|(k, _)| k == "GEMINI_HOME")
+        .map(|(_, v)| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let acp_dir = match home_override {
+        Some(home) => home.join("antigravity-acp"),
+        None => crate::parsers::antigravity::resolve_antigravity_acp_dir(),
+    };
+    let path = acp_dir.join("settings.json");
+
+    let existing = match read_antigravity_settings(&path) {
+        Ok(existing) => existing,
+        Err(reason) => {
+            tracing::warn!(
+                "[ACP][Antigravity] not editing {}: {reason}. \
+                 Set `auth.type` in it yourself, or move it aside.",
+                path.display()
+            );
+            return;
+        }
+    };
+
+    // Fall back to the method the settings panel DISPLAYS as selected, but only
+    // when the file names none: the agent cannot start a single session without
+    // an `auth.type`, and erroring out on a user who never opened the panel
+    // would be a dead end. `oauth-personal` is the free-tier default and merely
+    // makes the server open a browser — itself a consent step — so it is safe
+    // to imply. An `auth.type` already in the file is NEVER overridden by it.
+    let existing_auth_type = existing
+        .as_ref()
+        .and_then(|root| root.get("auth"))
+        .and_then(|auth| auth.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let method = match (recorded, existing_auth_type) {
+        (Some(method), _) => method,
+        (None, Some(_)) => return,
+        (None, None) => "oauth-personal",
+    };
+
+    // Gemini Enterprise reads project/location from this file ONLY (never the
+    // environment), so the panel's values ride along for that path.
+    let gcp_project = runtime_env
+        .get("GOOGLE_CLOUD_PROJECT")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let gcp_location = runtime_env
+        .get("GOOGLE_CLOUD_LOCATION")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    let updated = match merge_antigravity_settings(existing, method, gcp_project, gcp_location) {
+        Ok(Some(updated)) => updated,
+        // Already says exactly this; skip the write so a running server's file
+        // is not needlessly rewritten.
+        Ok(None) => return,
+        Err(reason) => {
+            tracing::warn!(
+                "[ACP][Antigravity] not editing {}: {reason}. \
+                 Set `auth.type` in it yourself, or move it aside.",
+                path.display()
+            );
+            return;
+        }
+    };
+
+    match write_antigravity_settings(&acp_dir, &path, &updated) {
+        Ok(()) => tracing::info!(
+            "[ACP][Antigravity] auth.type={method} recorded in {}",
+            path.display()
+        ),
+        Err(err) => tracing::warn!("[ACP][Antigravity] cannot write {}: {err}", path.display()),
+    }
+}
+
+/// Read `settings.json` for editing.
+///
+/// `Ok(None)` means "no file, safe to create". `Err` means "do not touch it" —
+/// unreadable, not JSON codeg can parse, or not a JSON object.
+fn read_antigravity_settings(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("could not read it ({err})")),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
+        format!("it is not strict JSON codeg can rewrite without losing content ({err})")
+    })?;
+    if !parsed.is_object() {
+        return Err("it does not hold a JSON object".to_string());
+    }
+    Ok(Some(parsed))
+}
+
+/// Serialize over `path` through a temp file in the same directory, mirroring
+/// the server's own writer: symlinks are resolved first (dotfile managers like
+/// Stow and chezmoi symlink settings.json, and replacing the link with a
+/// regular file would break their setup — it also keeps the temp file on the
+/// same filesystem, without which the rename is not atomic).
+fn write_antigravity_settings(
+    acp_dir: &Path,
+    path: &Path,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let body = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let parent = target.parent().unwrap_or(acp_dir);
+    std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+
+    let temp = parent.join(format!(".settings.json.codeg-{}.tmp", std::process::id()));
+    std::fs::write(&temp, format!("{body}\n")).map_err(|err| err.to_string())?;
+    if let Err(err) = std::fs::rename(&temp, &target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err.to_string());
+    }
+    Ok(())
+}
+
+/// Merge the panel's choice into a parsed `settings.json`.
+///
+/// `Ok(None)` means the file already says exactly this, so the caller can skip
+/// the write. `Err` means a block codeg would have to edit is not the shape it
+/// expects — the same fail-closed rule the read side applies to the whole
+/// document, and the same one the server's own `settings_writer` applies here
+/// ("not editing %r because `auth` is not an object"). Replacing a non-object
+/// `auth` with an object would delete whatever the user meant by it.
+///
+/// `existing` is `None` only for a file that does not exist — the caller
+/// refuses to touch one it could not read or parse — so creating a fresh object
+/// here never destroys anything.
+fn merge_antigravity_settings(
+    existing: Option<serde_json::Value>,
+    method: &str,
+    gcp_project: Option<&str>,
+    gcp_location: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
+    let mut root = match existing {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        _ => serde_json::json!({}),
+    };
+    let before = root.clone();
+
+    {
+        let obj = root
+            .as_object_mut()
+            .ok_or_else(|| "it does not hold a JSON object".to_string())?;
+
+        // Absent is fine (create it); present-but-not-an-object is not.
+        match obj.get("auth") {
+            None | Some(serde_json::Value::Null) => {
+                obj.insert("auth".into(), serde_json::json!({}));
+            }
+            Some(serde_json::Value::Object(_)) => {}
+            Some(_) => return Err("`auth` is not an object".to_string()),
+        }
+        obj.get_mut("auth")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| "`auth` is not an object".to_string())?
+            .insert("type".into(), serde_json::Value::String(method.to_string()));
+
+        // Only touch the `gcp` block when the panel actually has a value:
+        // clearing a field the user typed straight into the file would be a
+        // surprise, and a partial config is still meaningful to Agent Platform.
+        // With nothing to write, a strange `gcp` is left alone rather than
+        // blocking an `auth.type` update that does not depend on it.
+        if gcp_project.is_some() || gcp_location.is_some() {
+            match obj.get("gcp") {
+                None | Some(serde_json::Value::Null) => {
+                    obj.insert("gcp".into(), serde_json::json!({}));
+                }
+                Some(serde_json::Value::Object(_)) => {}
+                Some(_) => return Err("`gcp` is not an object".to_string()),
+            }
+            let gcp = obj
+                .get_mut("gcp")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| "`gcp` is not an object".to_string())?;
+            if let Some(project) = gcp_project {
+                gcp.insert(
+                    "project".into(),
+                    serde_json::Value::String(project.to_string()),
+                );
+            }
+            if let Some(location) = gcp_location {
+                gcp.insert(
+                    "location".into(),
+                    serde_json::Value::String(location.to_string()),
+                );
+            }
+        }
+    }
+
+    Ok((root != before).then_some(root))
+}
+
 /// Codex-only launch policy: force codex-acp's MCP name-conflict de-duplication
 /// OFF. codeg injects its companion server (`codeg-mcp`) over ACP
 /// `session/new.mcpServers`; codex-acp otherwise drops any ACP-passed server
@@ -472,6 +803,12 @@ pub enum ConnectionCommand {
     },
     GoalControl {
         action: GoalControlAction,
+        /// Did the goal-control request LAND? Attached only by a caller that
+        /// intends to follow a successful control with an interrupt
+        /// (`ConnectionManager::goal_control`), because aborting the turn is
+        /// destructive and must not happen on the strength of a request the
+        /// agent rejected. `None` = fire-and-forget, nobody is listening.
+        reply: Option<tokio::sync::oneshot::Sender<bool>>,
     },
     /// Inject a message into the RUNNING turn via `_session/steering` (R1.1).
     ///
@@ -726,7 +1063,7 @@ fn transcript_dir_for(agent_type: AgentType) -> Option<&'static str> {
 /// built-ins, and idempotent per session (a reconnect keeps the original
 /// header, so the session's original cwd/start time survive).
 fn record_transcript_header(agent_type: AgentType, session_id: &str, cwd: &str) {
-    record_transcript_header_continuing(agent_type, session_id, cwd, None);
+    drop(queue_transcript_header(agent_type, session_id, cwd, None));
 }
 
 /// [`record_transcript_header`] for a session that carries an existing
@@ -736,15 +1073,46 @@ fn record_transcript_header(agent_type: AgentType, session_id: &str, cwd: &str) 
 /// agent session for the same conversation: the earlier turns stay where they
 /// are and this header links back to them, so the reader still sees one
 /// history. See [`crate::acp_transcript::TranscriptHeader::continues_from`].
-fn record_transcript_header_continuing(
+async fn record_transcript_header_continuing(
     agent_type: AgentType,
     session_id: &str,
     cwd: &str,
     continues_from: Option<&str>,
 ) {
-    let Some(dir) = transcript_dir_for(agent_type) else {
+    let Some(ack) = queue_transcript_header(agent_type, session_id, cwd, continues_from) else {
         return;
     };
+    // Wait for the link to be DURABLE before returning, so it is on disk before
+    // the caller emits `SessionStarted`. Same shape and same reason as
+    // `record_prompt` below: the writer is a background thread, and readers go
+    // to the file.
+    //
+    // The specific reader here is `acp::continued_session_ids`, which the
+    // session-binding guard consults to tell "this conversation continues under
+    // a new agent session" from "an unrelated session landed on this row". Emit
+    // first and a subscriber can read an empty chain, conclude the sessions are
+    // unrelated, and split the conversation in two — and nothing removes that
+    // row once the header lands, so the duplicate is permanent.
+    //
+    // Costs one disk write per continuation, i.e. per restart of a conversation
+    // whose agent forgot it. `record_prompt` accepts the same cost per TURN.
+    // A stalled writer falls back to the old racy behaviour after the timeout
+    // rather than blocking the session: the failure mode there is a duplicate
+    // row, never lost history.
+    if continues_from.is_some() {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(2000), ack).await;
+    }
+}
+
+/// Build and enqueue the header write. `None` for agents with their own store
+/// (nothing is recorded); otherwise the writer's completion ack.
+fn queue_transcript_header(
+    agent_type: AgentType,
+    session_id: &str,
+    cwd: &str,
+    continues_from: Option<&str>,
+) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    let dir = transcript_dir_for(agent_type)?;
     let mut header = crate::acp_transcript::TranscriptHeader::new(
         &agent_type.as_wire(),
         session_id,
@@ -754,7 +1122,7 @@ fn record_transcript_header_continuing(
     if let Some(previous) = continues_from.filter(|p| !p.is_empty() && *p != session_id) {
         header = header.continuing(previous);
     }
-    drop(crate::acp_transcript::record_header(dir, &header));
+    Some(crate::acp_transcript::record_header(dir, &header))
 }
 
 /// Record an outgoing prompt for a custom agent, and wait (briefly) for it to
@@ -1238,6 +1606,14 @@ async fn build_agent(
                 apply_cursor_env_policy(&mut merged_env, runtime_env);
             } else if agent_type == AgentType::Grok {
                 apply_grok_env_policy(&mut merged_env, runtime_env);
+            } else if agent_type == AgentType::Antigravity {
+                apply_antigravity_env_policy(&mut merged_env, runtime_env);
+                // Kept separate from the env policy above: the other
+                // `apply_*_env_policy`s are pure, and this one WRITES the
+                // server's settings.json. It has to happen before the spawn —
+                // the file is read during `session/new`, and without it that
+                // call fails with `Authentication required`.
+                sync_antigravity_settings_file(&merged_env, runtime_env);
             }
             let env_key_list: Vec<&str> = merged_env.iter().map(|(k, _)| k.as_str()).collect();
             if !merged_env.is_empty() {
@@ -3393,16 +3769,64 @@ fn build_client_capabilities(
                 .read_text_file(true)
                 .write_text_file(true));
     }
-    if agent_type == AgentType::Codex {
+    // Form elicitation is advertised only to agents that are KNOWN to send
+    // spec-conformant `elicitation/create` forms `classify_elicitation` can
+    // bridge: codex-acp (Plan-mode `request_user_input`, MCP forms/approvals)
+    // and deepseek-acp (its `ask_user_question` + plan-review both build
+    // standard oneOf/anyOf forms, and decode a free-text answer that is not in
+    // the option set as a custom answer — the card's "Other" input round-trips
+    // cleanly). Agents without the bit fall back to their own
+    // `request_permission` button path.
+    if matches!(agent_type, AgentType::Codex | AgentType::DeepSeek) {
         client_capabilities = client_capabilities
             .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
     }
+    // Client `_meta` extensions, per agent. `jetbrains.air` opts codeg into
+    // JetBrains AIR typed session-failure records (claude-agent-acp 0.67+,
+    // codex-acp 1.2+) — both adapters gate publication on EXACTLY this
+    // advertisement (integer version >= 1 and "sessionFailure" in the
+    // capabilities array). Advertising REPLACES codex's legacy failure
+    // surfaces for the connection (`_meta.codex.error` → TurnRetrying,
+    // warning/config-warning text chunks), so this ships together with the
+    // `SessionFailure` consumer (`air_session_failure` + the frontend
+    // banner). Only the two known AIR speakers get it: the capability-gate
+    // convention is to advertise nothing an agent hasn't implemented.
+    let mut meta = serde_json::Map::new();
     if agent_type == AgentType::ClaudeCode {
-        let mut meta = serde_json::Map::new();
         meta.insert(
             "subagent-transcript".to_string(),
             serde_json::Value::Bool(true),
         );
+    }
+    // The capabilities array is deliberately "sessionFailure" ONLY.
+    // claude-agent-acp 0.69.0 and codex-acp 1.4.0 added a second AIR
+    // capability, "agentFileChangeReport": advertise it and every prompt may
+    // carry `_meta.jetbrains.air.agentFileChangeReportRequest = {version: 1,
+    // requestId}`, after which the agent runs an EXTRA model round-trip at the
+    // end of the turn (claude: a Stop hook plus a hidden continuation calling
+    // `mcp__claude_agent_acp__report_changed_files`; codex: an ephemeral
+    // read-only `thread/fork`) and answers on
+    // `session_info_update._meta.jetbrains.air.agentFileChangeReport`.
+    //
+    // codeg does not ask for it, and the reason is not cost alone: both
+    // adapters CLAMP the reported paths to `cwd` + `additionalDirectories`
+    // (anything outside a root is dropped as truncated), which is exactly the
+    // tree `workspace_state` already watches recursively via `notify`. So the
+    // report can only ever name a SUBSET of what the watcher sees, less
+    // reliably — it is a model self-report that declares `complete: false`
+    // when unsure and truncates at 1024 paths / 256KB. It exists for clients
+    // with no filesystem watcher; codeg is not one. Nothing else in either
+    // release depends on it, and both adapters no-op without the
+    // advertisement, so staying out costs us nothing.
+    if matches!(agent_type, AgentType::ClaudeCode | AgentType::Codex) {
+        meta.insert(
+            "jetbrains".to_string(),
+            serde_json::json!({
+                "air": { "version": 1, "capabilities": ["sessionFailure"] }
+            }),
+        );
+    }
+    if !meta.is_empty() {
         client_capabilities = client_capabilities.meta(meta);
     }
     client_capabilities
@@ -3570,6 +3994,22 @@ fn load_mcp_servers_for_agent(agent_type: AgentType) -> Vec<McpServer> {
     // ACP wire here would double-register them — skip it. (The built-in
     // `codeg-mcp` companion is injected separately by `inject_codeg_mcp`, so
     // it still reaches them.)
+    //
+    // DeepSeek is deliberately NOT in this set: deepseek-acp reads no MCP file
+    // at all, so `$DSH_HOME/mcp.json` (codeg's own store) reaches it ONLY
+    // through the wire — skipping it would silently drop every user server.
+    //
+    // Qoder joins the skip set: the CLI reads `mcpServers` out of its own
+    // `~/.qoder/settings.json` (gemini-schema settings file) at startup, which
+    // codeg's MCP settings UI manages directly — forwarding the same servers
+    // over the wire would double-mount them.
+    //
+    // Antigravity joins it too, for the same reason with one nuance: its ACP
+    // server reads `<GEMINI_HOME>/config/mcp_config.json` (which codeg's MCP
+    // settings UI manages) and MERGES it with the wire list BY NAME, wire
+    // winning — so forwarding would not actually double-mount. It is skipped
+    // anyway because defining one server through two channels is noise, and
+    // because the `codeg-mcp` companion is injected separately regardless.
     if matches!(
         agent_type,
         AgentType::Hermes
@@ -3577,6 +4017,8 @@ fn load_mcp_servers_for_agent(agent_type: AgentType) -> Vec<McpServer> {
             | AgentType::Grok
             | AgentType::Cursor
             | AgentType::Kiro
+            | AgentType::Qoder
+            | AgentType::Antigravity
     ) {
         return Vec::new();
     }
@@ -3873,8 +4315,20 @@ async fn inject_codeg_mcp(
     // withholds this group too. The other groups stay: they surface codeg's own
     // state (feedback, ask, session info, task reporting), not arbitrary file
     // or command execution on the user's machine.
-    let delegation_enabled =
-        injection.broker.config_snapshot().await.enabled && host_tools.hosts_channels();
+    let delegation_configured = injection.broker.config_snapshot().await.enabled;
+    let delegation_enabled = delegation_configured && host_tools.hosts_channels();
+    if delegation_configured && !delegation_enabled {
+        // The one combination that looks like a bug from the settings UI: the
+        // multi-agent switch reads "on" and the tools are still absent. Say so
+        // once per launch, naming the knob, so the log answers the question the
+        // user actually asks ("why did delegate_to_agent disappear?").
+        tracing::info!(
+            "[delegation] multi-agent delegation is enabled in settings but withheld from \
+             connection {parent_connection_id}: {HOST_TOOLS_ENV}=agent hands fs/terminal back \
+             to this agent, and delegate_to_agent would route the same work through codeg \
+             anyway. Turn that per-agent switch off to restore the delegation tools."
+        );
+    }
     let flags = CompanionFeatureFlags {
         delegation: delegation_enabled,
         feedback: feedback_enabled,
@@ -4598,6 +5052,22 @@ async fn run_connection(
                 s.agent_supports_fork = supports_fork;
             }
 
+            // Goal channel selection, pinned for the whole connection: an
+            // adapter advertising the provider-neutral goal extension
+            // (`_meta.goal`, claude-agent-acp 0.66+/codex-acp 1.2+) publishes
+            // goal snapshots ONLY there — and codex dropped the legacy
+            // `_meta.codex.goal` key in the same release, so honoring the
+            // advertisement is what keeps GoalCard alive across the bump (see
+            // `session_info_goal_value`).
+            let neutral_goal_channel = init_advertises_goal(init_resp.meta.as_ref());
+            if neutral_goal_channel {
+                tracing::info!("[ACP][{}] goal channel: provider-neutral (_meta.goal)", agent_type);
+            }
+            // Advertised goal-control surface (method + action vocabulary);
+            // None keeps the legacy codex method and resolves the vocabulary to
+            // the legacy pair — see the SessionState field docs.
+            let goal_control = goal_advertised_control(init_resp.meta.as_ref());
+
             // Whether this agent accepts MCP server entries over the ACP wire
             // (`session/new`'s `mcpServers`). Almost all do; OpenClaw rejects
             // any server entry and fails session creation, so it must receive
@@ -4689,6 +5159,17 @@ async fn run_connection(
                 // that needs no tool; OpenClaw-style `supports_mcp: false`
                 // agents could ship it someday).
                 s.native_steering_available = native_steering_available;
+                s.neutral_goal_channel = neutral_goal_channel;
+                // The vocabulary is decided HERE for every adapter, advertising
+                // or not — this assignment is what flips it from "unknown" to
+                // known, and a client reading the snapshot before it lands must
+                // see `None` rather than a legacy pair it would latch (a claude
+                // session offering a Pause the adapter rejects).
+                let (goal_method, goal_actions) = resolve_goal_control(goal_control);
+                if let Some(method) = goal_method {
+                    s.goal_control_method = method;
+                }
+                s.goal_actions = Some(goal_actions);
                 if let Some(ref injected) = delegate_injection {
                     s.delegation_token = Some(injected.token.clone());
                     // The agent's actual feedback capability for this session
@@ -5179,12 +5660,17 @@ async fn run_connection(
                         // Same conversation, new agent session: link the fresh
                         // transcript to the one the failed load was for, so the
                         // turns codeg already recorded keep rendering.
+                        // Awaited: the link must be on disk before
+                        // `SessionStarted` goes out, or the session-binding
+                        // guard can read an empty chain and split this
+                        // conversation into a permanent duplicate.
                         record_transcript_header_continuing(
                             agent_type,
                             &fallback_sid,
                             &cwd.to_string_lossy(),
                             Some(sid.as_str()),
-                        );
+                        )
+                        .await;
                         emit_with_state(
                             &state,
                             &emitter_clone,
@@ -6072,14 +6558,21 @@ async fn set_session_config_option_inner(
     Ok(response.config_options)
 }
 
-/// Send codex's bespoke `_codex/session/goal_control` extension request to pause
-/// or clear the session's active goal (codex-acp #293, v1.1.4). Start / resume /
-/// re-objective are NOT this method — they go through the `/goal` prompt.
+/// Send the connection's goal-control extension request to pause or clear the
+/// session's active goal — the advertised `_session/goal` (claude 0.66+ / codex
+/// 1.2+) or codex's bespoke `_codex/session/goal_control` (#293, v1.1.4) it
+/// still accepts as an alias. Start / resume / re-objective are NOT this method
+/// — they go through the `/goal` prompt.
 ///
-/// codex replies with an empty object and then pushes the resulting goal
-/// snapshot as a normal `session_info_update` (`_meta.codex.goal`, or `null` for
-/// a clear), which the existing goal-card path renders — so the response value
-/// carries nothing to parse and is intentionally discarded.
+/// The agent replies with an empty object and then pushes the resulting goal
+/// snapshot as a normal `session_info_update` (`_meta.goal`, the legacy
+/// `_meta.codex.goal`, or `null` for a clear), which the existing goal-card
+/// path renders — so the response value carries nothing to parse and is
+/// intentionally discarded.
+///
+/// This request does NOT stop a running turn on either adapter; that is the
+/// manager's call (see `ConnectionManager::goal_control`), because whether an
+/// interrupt is safe depends on how the adapter delivers the control.
 ///
 /// Sent via `UntypedMessage` because `_codex/…` is a codex-private extension
 /// method with no sacp typed variant — the same escape hatch used for
@@ -6088,12 +6581,17 @@ async fn send_goal_control(
     cx: &ConnectionTo<Agent>,
     session_id: &SessionId,
     action: GoalControlAction,
+    method: &str,
 ) -> Result<(), sacp::Error> {
+    // `method` is the connection's stored `goal_control_method`: the
+    // advertised provider-neutral `_session/goal` (claude 0.66+/codex 1.2+)
+    // or the legacy `_codex/session/goal_control` default. Both take the
+    // same `{sessionId, action}` request shape.
     let params = serde_json::json!({
         "sessionId": session_id,
         "action": action,
     });
-    let untyped_req = UntypedMessage::new("_codex/session/goal_control", params).map_err(|e| {
+    let untyped_req = UntypedMessage::new(method, params).map_err(|e| {
         sacp::util::internal_error(format!("Failed to build goal_control request: {e}"))
     })?;
     cx.send_request_to(Agent, untyped_req).block_task().await?;
@@ -6728,10 +7226,32 @@ fn extract_terminal_ids(content: &[ToolCallContent]) -> Vec<String> {
     terminal_ids
 }
 
+/// Register the terminals a tool call names so `poll_tracked_terminal_tool_calls`
+/// can stream their output, returning whether the poller should run now.
+///
+/// A terminal pi hosts itself is excluded: pi names it by its own tool-call id
+/// (see `pi_terminal_meta_marks_bash`), so it can never resolve against
+/// `TerminalRuntime`. Tracking one bought a map entry plus ten 200 ms polls per
+/// bash call that could only ever miss — the misses are swallowed as
+/// `InvalidParams` in `poll_terminal_tool_call_output`, so the entry just aged
+/// out silently at `TERMINAL_POLL_MISSING_LIMIT`. pi's output arrives on its
+/// `_meta` channel instead and is bridged in `emit_conversation_update`.
+///
+/// Keyed off pi's own marker rather than off `AgentType::Pi` wholesale, so a
+/// future pi-acp that DOES delegate `terminal/*` is polled normally.
 fn track_terminal_tool_calls(
+    agent_type: AgentType,
     update: &SessionUpdate,
     tracked: &mut HashMap<String, TrackedTerminalToolCall>,
 ) -> bool {
+    let meta = match update {
+        SessionUpdate::ToolCall(tc) => tc.meta.as_ref(),
+        SessionUpdate::ToolCallUpdate(tcu) => tcu.meta.as_ref(),
+        _ => None,
+    };
+    if pi_terminal_meta_marks_bash(agent_type, meta) {
+        return false;
+    }
     match update {
         SessionUpdate::ToolCall(tc) => {
             let terminal_ids = extract_terminal_ids(&tc.content);
@@ -7392,7 +7912,28 @@ fn recovers_load_failure_locally(agent_type: AgentType, classified: Option<&'sta
 /// (`UserMessageChunk`, `Plan`, `*ModeUpdate`, `ConfigOptionUpdate`,
 /// `SessionInfoUpdate`, `AvailableCommandsUpdate`, `UsageUpdate`) do not
 /// count.
-fn is_agent_output_update(update: &SessionUpdate) -> bool {
+///
+/// `agent_type` is here for pi, whose lifecycle announcements ride the
+/// `agent_message_chunk` channel (issue #525). Those chunks are not rendered, so
+/// counting them as output would let a status-only turn end BOTH blank and
+/// "successful" — the exact silent-blank-turn failure this predicate exists to
+/// catch. Asking [`pi_message_chunk_route`] — the same classifier the renderer
+/// uses — is what keeps the two from disagreeing; a dropped or retry chunk falls
+/// through to `saw_metadata_update`, so such a turn reports
+/// `turn_failed_empty_metadata` ("pi sent only status updates this turn and no
+/// reply"). In practice this is a backstop rather than a common path: pi's retry
+/// and compaction both continue into prose or tools.
+fn is_agent_output_update(agent_type: AgentType, update: &SessionUpdate) -> bool {
+    if let SessionUpdate::AgentMessageChunk(ContentChunk {
+        content: ContentBlock::Text(text),
+        meta,
+        ..
+    }) = update
+    {
+        if pi_message_chunk_route(agent_type, &text.text, meta.as_ref()) != PiChunkRoute::Prose {
+            return false;
+        }
+    }
     matches!(
         update,
         SessionUpdate::AgentMessageChunk(_)
@@ -7428,8 +7969,9 @@ async fn handle_turn_notification(
     cb_state: &mut CodeBuddyLiveState,
     probe: &mut TurnOutputProbe,
 ) {
-    let should_poll_now = track_terminal_tool_calls(&notif.update, tracked_terminal_tool_calls);
-    probe.note_update(&notif.update);
+    let should_poll_now =
+        track_terminal_tool_calls(agent_type, &notif.update, tracked_terminal_tool_calls);
+    probe.note_update(agent_type, &notif.update);
     // Custom agents have no store of their own to parse later.
     record_transcript_update(agent_type, &session_id.0, &notif.update);
     emit_conversation_update(
@@ -7552,8 +8094,8 @@ impl TurnOutputProbe {
         }
     }
 
-    fn note_update(&mut self, update: &SessionUpdate) {
-        if is_agent_output_update(update) {
+    fn note_update(&mut self, agent_type: AgentType, update: &SessionUpdate) {
+        if is_agent_output_update(agent_type, update) {
             self.saw_agent_output = true;
         } else {
             self.saw_metadata_update = true;
@@ -8034,6 +8576,16 @@ async fn run_conversation_loop<'a>(
                 // background children legitimately span turns.
                 cb_state.grok_progress_eligible.clear();
                 cb_state.grok_pending_spawn_ids.clear();
+                // Same one-turn argument as the sub-agent sets above: a pi bash
+                // call's whole lifecycle (`tool_execution_start` → `_update`* →
+                // `_end`) happens inside one turn, so nothing here can still be
+                // owed output when the next turn opens. Without this, a turn
+                // canceled mid-command leaves an entry that never sees a final
+                // status and so lives until the connection tears down. The
+                // `session/load` replay path is unaffected: it runs on the
+                // out-of-turn pump and its calls settle on the update that
+                // immediately follows, before any turn starts.
+                cb_state.pi_terminal_calls.clear();
                 // Grok's context ring needs the active model's window paired
                 // with the cumulative token count riding each update. Resolve it
                 // once here (the model can't change mid-turn) so the per-update
@@ -8247,7 +8799,26 @@ async fn run_conversation_loop<'a>(
                             }
                         }
                         prompt_result = &mut prompt_response => {
-                            let reason = prompt_result?.stop_reason;
+                            let response = prompt_result?;
+                            // A turn's terminal AIR failure rides on the
+                            // response `_meta` (see `response_session_failure`
+                            // — the update channel only carries the retry
+                            // warnings). Emit it BEFORE `TurnComplete`: the
+                            // same-id higher-revision severity-"error" upsert
+                            // must land before `apply_event`'s turn-boundary
+                            // settle, or the retry warnings it escalates would
+                            // be marked recovered while the failure is live.
+                            let terminal_failure =
+                                response_session_failure(response.meta.as_ref());
+                            if let Some(record) = &terminal_failure {
+                                emit_with_state(
+                                    state,
+                                    emitter,
+                                    AcpEvent::SessionFailure { record: record.clone() },
+                                )
+                                .await;
+                            }
+                            let reason = response.stop_reason;
                             if !tracked_terminal_tool_calls.is_empty() {
                                 poll_tracked_terminal_tool_calls(
                                     terminal_runtime.as_ref(),
@@ -8262,8 +8833,21 @@ async fn run_conversation_loop<'a>(
                             // Same pure helper as the StopReason-message exit,
                             // so the two can't drift. This exit keeps its own
                             // extra side effect (`record_turn_end` below).
-                            let (reason_str, empty_report) =
-                                finish_turn_reason(&probe, raw_reason_str, stderr_tail);
+                            //
+                            // Exception: a response carrying a typed terminal
+                            // ERROR is a failed turn wearing the adapters'
+                            // disguised `end_turn` — its blank output is
+                            // explained by the AIR banner, so synthesizing an
+                            // "empty" toast on top would misdiagnose a dead
+                            // connection as "the agent produced nothing".
+                            let (reason_str, empty_report) = if terminal_failure
+                                .as_ref()
+                                .is_some_and(|record| record.severity == "error")
+                            {
+                                (raw_reason_str, None)
+                            } else {
+                                finish_turn_reason(&probe, raw_reason_str, stderr_tail)
+                            };
                             if let Some(err_event) =
                                 turn_failure_error_event(reason_str, agent_type, empty_report.as_ref())
                             {
@@ -8399,21 +8983,38 @@ async fn run_conversation_loop<'a>(
                                         .await;
                                     }
                                 }
-                                Some(ConnectionCommand::GoalControl { action }) => {
-                                    if let Err(e) = send_goal_control(&cx, &sid, action).await {
-                                        emit_with_state(
-                                            state,
-                                            emitter,
-                                            AcpEvent::Error {
-                                                message: format!("Failed to control goal: {e}"),
-                                                agent_type: agent_type.to_string(),
-                                                code: None,
-                                                details: None,
-                                                // Recoverable: a failed pause/clear leaves the turn alive.
-                                                terminal: false,
-                                            },
-                                        )
-                                        .await;
+                                Some(ConnectionCommand::GoalControl { action, reply }) => {
+                                    let method = state.read().await.goal_control_method.clone();
+                                    let landed =
+                                        match send_goal_control(&cx, &sid, action, &method).await {
+                                            Ok(()) => true,
+                                            Err(e) => {
+                                                emit_with_state(
+                                                    state,
+                                                    emitter,
+                                                    AcpEvent::Error {
+                                                        message: format!(
+                                                            "Failed to control goal: {e}"
+                                                        ),
+                                                        agent_type: agent_type.to_string(),
+                                                        code: None,
+                                                        details: None,
+                                                        // Recoverable: the goal
+                                                        // is unchanged and the
+                                                        // session is untouched.
+                                                        terminal: false,
+                                                    },
+                                                )
+                                                .await;
+                                                false
+                                            }
+                                        };
+                                    if let Some(reply) = reply {
+                                        // A dead receiver is fine — the caller
+                                        // that wanted to follow up with an
+                                        // interrupt went away, and the control
+                                        // itself already happened.
+                                        let _ = reply.send(landed);
                                     }
                                 }
                                 // [merge-v0.23.4] union: HEAD's native
@@ -8713,24 +9314,37 @@ async fn run_conversation_loop<'a>(
                     .await;
                 }
             }
-            Some(ConnectionCommand::GoalControl { action }) => {
+            Some(ConnectionCommand::GoalControl { action, reply }) => {
                 let cx = session.connection();
                 let sid = session.session_id().clone();
-                if let Err(e) = send_goal_control(&cx, &sid, action).await {
-                    emit_with_state(
-                        state,
-                        emitter,
-                        AcpEvent::Error {
-                            message: format!("Failed to control goal: {e}"),
-                            agent_type: agent_type.to_string(),
-                            code: None,
-                            details: None,
-                            // Recoverable: an idle pause/clear failure leaves the
-                            // connection alive.
-                            terminal: false,
-                        },
-                    )
-                    .await;
+                let method = state.read().await.goal_control_method.clone();
+                let landed = match send_goal_control(&cx, &sid, action, &method).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        emit_with_state(
+                            state,
+                            emitter,
+                            AcpEvent::Error {
+                                message: format!("Failed to control goal: {e}"),
+                                agent_type: agent_type.to_string(),
+                                code: None,
+                                details: None,
+                                // Recoverable: an idle pause/clear failure leaves the
+                                // connection alive.
+                                terminal: false,
+                            },
+                        )
+                        .await;
+                        false
+                    }
+                };
+                if let Some(reply) = reply {
+                    // Reply — never drop — for the same reason the Steer arm
+                    // below does: the manager awaits this oneshot to decide
+                    // whether to follow up, and a dropped sender would hang it.
+                    // (Its follow-up is an interrupt, which this idle arm's
+                    // caller won't get anyway: there is no turn to stop.)
+                    let _ = reply.send(landed);
                 }
             }
             // [merge-v0.23.0] union: same choice as the in-turn arm above —
@@ -8993,6 +9607,27 @@ pub(crate) fn synthesize_edit_input_from_diffs(content: &[ToolCallContent]) -> O
     }
 }
 
+/// Drop every `Terminal` block from a tool call's `content`, keeping the rest
+/// in order.
+///
+/// Used on the pi path only (see `pi_terminal_meta_marks_bash`). A
+/// `ToolCallContent::Terminal` serializes to the bare `[Terminal: <id>]`
+/// placeholder, which is meaningful ONLY while codeg's own `TerminalRuntime`
+/// owns that terminal and `poll_tracked_terminal_tool_calls` streams the real
+/// output over it (`raw_output_chunks` then wins over `content` in the
+/// frontend store). pi's terminal is agent-hosted, so nothing ever supersedes
+/// the placeholder from the terminal channel — it would be the ONLY thing on
+/// screen for the whole runtime of the command. The pi bridge supplies the
+/// output instead; strip the dead placeholder so a slow command shows an empty
+/// running card rather than an opaque id.
+fn strip_terminal_blocks(content: &[ToolCallContent]) -> Vec<ToolCallContent> {
+    content
+        .iter()
+        .filter(|item| !matches!(item, ToolCallContent::Terminal(_)))
+        .cloned()
+        .collect()
+}
+
 /// Build a minimal unified diff for a newly created file: the `--- /dev/null`
 /// header the frontend's `isAddedFileDiff` keys on, then every line of
 /// `new_text` as an addition. Byte-for-byte identical to the frontend `write`
@@ -9170,6 +9805,276 @@ fn grok_live_tool_output(
     // finished MCP call — e.g. the `delegate_to_agent` ack carrying
     // `task_id=…` — would surface no output at all.
     grok_mcp_output_text(raw)
+}
+
+/// Resolve the live `raw_output` string for a pi tool call.
+///
+/// pi-acp hands ACP the pi tool result VERBATIM as `rawOutput` — the MCP-shaped
+/// envelope `{"content":[{"type":"text","text":…}]}` — while putting that very
+/// same text, already flattened, on the `content[]` channel
+/// (`toolResultToText`; both `tool_execution_update` and `tool_execution_end`
+/// emit the pair). Stringifying the envelope shadows the clean text, because the
+/// live renderer's `raw_output_chunks` win over `content`
+/// (`conversation-runtime-store.ts`), and nothing downstream unwraps that shape
+/// (`commandOutputFromJsonString` bails on a `content` array) — so a finished
+/// `bash` painted its terminal body with the JSON source string.
+///
+/// Same parity rule as Grok (see `grok_live_tool_output`): whenever `content`
+/// carries anything, it IS pi-acp's own flattening of this very result — emit
+/// `None` and let it render (that also covers the `details.diff` / `stdout` /
+/// `output` shapes `toolResultToText` flattens, which the envelope alone does
+/// not reach). Only with no `content` is the envelope unwrapped, through the
+/// SAME flattener the history parser uses so both surfaces show one string.
+///
+/// pi's empty opening announcement is excluded up front — emitting anything for
+/// it would strand a placeholder chunk over the whole call (see
+/// `pi_result_is_empty_announcement`). Every OTHER result that carries something
+/// but whose block array holds no text still stringifies exactly as before:
+/// `toolResultToText` reaches `details.diff`, `stdout`/`stderr` and `output` that
+/// the block array alone does not, so dropping those would lose a real result.
+///
+/// (pi ≥0.0.33 routes `bash` through `_meta.terminal_*` and sends no `rawOutput`
+/// for it at all — see `pi_bash_terminal_chunk`. This is the path every OTHER pi
+/// tool takes, and the one `bash` itself takes on earlier pi-acp builds.)
+fn pi_live_tool_output(
+    content: &Option<String>,
+    raw_output: &Option<serde_json::Value>,
+) -> Option<String> {
+    let raw = raw_output.as_ref()?;
+    if pi_result_is_empty_announcement(raw) {
+        return None;
+    }
+    if content.as_deref().is_some_and(|c| !c.trim().is_empty()) {
+        return None;
+    }
+    raw.get("content")
+        .and_then(crate::parsers::pi::tool_result_content_text)
+        .or_else(|| json_value_to_text(raw_output))
+        .map(|text| structurize_live_output(&text))
+}
+
+/// Is this `rawOutput` pi's "I have started, and have nothing yet" announcement —
+/// literally `{"content": []}`?
+///
+/// pi's bash tool fires `onUpdate({content: [], details: undefined})` before the
+/// process writes a byte (`bash.js`), so this is the opening frame of EVERY pi
+/// command. Both channels then carry noise: `rawOutput` is the empty envelope,
+/// and pi-acp — with no text, diff, stdout or stderr to flatten — falls back to
+/// `JSON.stringify(result, null, 2)` for `content[]` (`toolResultToText`), which
+/// puts a literal `{\n  "content": []\n}` in the terminal card until the first
+/// line of real output arrives. Worse, stringifying the envelope into
+/// `raw_output` seeds it as the call's chunk, and since every later frame prefers
+/// `content` and emits `None` — which the reducer treats as "keep the previous
+/// chunks" (`acp-connections-context.tsx`) — that placeholder would outrank the
+/// real output for the rest of the call.
+///
+/// So both channels are suppressed for this frame, and ONLY for this frame: the
+/// predicate is deliberately the narrowest thing that identifies it — an empty
+/// `content` array and no other non-null member. Any richer result (a diff,
+/// `stdout`/`stderr`, an exit code, a truncation record) is something
+/// `toolResultToText` may have flattened into real text, so it is left alone even
+/// when its block array is empty. Keyed off the STRUCTURED payload, never off the
+/// rendered string, so a command whose own output looks like an empty envelope is
+/// untouched.
+fn pi_result_is_empty_announcement(raw_output: &serde_json::Value) -> bool {
+    let Some(obj) = raw_output.as_object() else {
+        return false;
+    };
+    obj.get("content")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|blocks| blocks.is_empty())
+        && obj
+            .iter()
+            .all(|(key, value)| key == "content" || value.is_null())
+}
+
+/// pi-gated wrapper for the `content` channel: see `pi_result_is_empty_announcement`.
+fn pi_result_content_is_stringify_noise(
+    agent_type: AgentType,
+    raw_output: &Option<serde_json::Value>,
+) -> bool {
+    matches!(agent_type, AgentType::Pi)
+        && raw_output
+            .as_ref()
+            .is_some_and(pi_result_is_empty_announcement)
+}
+
+/// What a pi `agent_message_chunk` actually IS (issue #525).
+///
+/// pi-acp puts the assistant's prose AND its own lifecycle announcements on the
+/// same `agent_message_chunk` channel, so a caffeinate extension's notify lands
+/// spliced into the reply: `你好。有什么需要我帮你处理?Released pi-caffeinate
+/// (agent finished).` See [`pi_message_chunk_route`] for the full inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PiChunkRoute {
+    /// The agent's own words — pi's `message_update` / `text_delta`. Renders as
+    /// today's `ContentDelta`. This is what EVERY other agent's chunk resolves
+    /// to, since the classifier is pi-gated.
+    Prose,
+    /// A pi-acp lifecycle announcement with nothing downstream needs it.
+    Drop,
+    /// pi is auto-retrying the model call. Routed to the shared retry banner
+    /// (`AcpEvent::TurnRetrying`) instead of the prose stream. The numbers are
+    /// pi's own, recovered from the sentence it formats them into; all three are
+    /// `None` for pi-acp's shapeless `"Retrying..."` fallback.
+    Retrying {
+        attempt: Option<u32>,
+        max: Option<u32>,
+        delay_ms: Option<u64>,
+    },
+}
+
+/// Tell a pi `agent_message_chunk` that is the ASSISTANT SPEAKING from one that
+/// is pi-acp ANNOUNCING SOMETHING (issue #525).
+///
+/// Real prose reaches this channel from exactly one place: pi-acp's
+/// `message_update` arm, for `assistantMessageEvent.type === "text_delta"`.
+/// Everything below is pi-acp synthesizing a sentence out of a pi RPC lifecycle
+/// event and emitting it on that SAME channel, where the live store appends it
+/// into whatever message is open — which is the whole bug:
+///
+/// | pi-acp `dist/index.js` | text | marker |
+/// |---|---|---|
+/// | L1265 `extension_ui_request` / `notify`   | the extension's own message | `_meta.piAcp.notify` |
+/// | L1169 `auto_retry_start`                  | `Retrying (attempt N/M, waiting Ss)...` | — |
+/// | L1176 `auto_retry_end`                    | `Retry finished, resuming.` | — |
+/// | L1183 `auto_compaction_start`             | `Context nearing limit, running automatic compaction...` | — |
+/// | L1193 `auto_compaction_end`               | `Automatic compaction finished; …` | — |
+/// | L834  `prompt()` queue                    | `Queued message (position N).` | — |
+/// | L1222 `agent_settled` queue               | `Starting queued message. (N remaining)` | — |
+/// | L860  `cancel()` queue                    | `Cleared queued prompts.` | — |
+///
+/// The notify marker is read FIRST and wins outright, because that text is
+/// arbitrary extension content — a pi extension can notify anything, including
+/// something that reads exactly like prose, so the structured marker is the only
+/// trustworthy handle on it. The other seven carry no marker at all, and pi-acp
+/// offers no alternative channel for them, so they are matched as LITERALS.
+/// Three things keep that honest: the whole classifier is gated on
+/// `AgentType::Pi`; every rule matches the WHOLE trimmed chunk, never a
+/// substring; and the adapter version is pinned in `registry.rs`, so a bump is
+/// the natural place to re-check these strings. A false positive would need the
+/// model to emit one of these exact sentences as an entire standalone delta, and
+/// would cost one dropped delta — not a corrupted message.
+///
+/// Two families deliberately stay `Prose`, and must:
+///
+/// - **Slash-command replies** (pi-acp L2080+: `/compact`, `/session`, `/name`,
+///   `/export`, `/follow-up`, `/steering`, `/changelog`) and the startup prelude
+///   (`sendStartupInfoIfPending`). The user ASKED for those; they ride the same
+///   channel and match no rule here, which is exactly the point of matching
+///   whole literals rather than sniffing for "status-looking" text.
+/// - **`Pi <method> UI request is not supported in ACP yet; cancelling it.`**
+///   (L1257). pi asked the user for input and pi-acp auto-cancelled it — a rare,
+///   actionable failure with no better home today. Dropping it would hide the
+///   reason a turn went sideways, which is worse than the noise this fixes.
+///
+/// Used by BOTH the renderer (`emit_conversation_update`) and the empty-turn
+/// probe (`is_agent_output_update`), so the two can never disagree about whether
+/// a chunk was output — a status-only turn must not render blank AND report
+/// success.
+fn pi_message_chunk_route(
+    agent_type: AgentType,
+    text: &str,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> PiChunkRoute {
+    if agent_type != AgentType::Pi {
+        return PiChunkRoute::Prose;
+    }
+    // A pi extension's `ui.notify()`. pi's own semantics for it are a transient
+    // toast (`rpc-mode.js`: "Fire and forget - no response needed"), never
+    // conversation — so it is dropped at every level (`info` / `warning` /
+    // `error`). Keyed off the marker alone: the message is the extension's, and
+    // matching it as text would be matching arbitrary user content.
+    if meta.is_some_and(|meta| {
+        meta.get("piAcp")
+            .and_then(|pi| pi.get("notify"))
+            .is_some_and(serde_json::Value::is_object)
+    }) {
+        return PiChunkRoute::Drop;
+    }
+    let text = text.trim();
+    match text {
+        // `auto_retry_end`. No event of its own: the banner clears at the next
+        // tool call / plan update / turn boundary, exactly as codex's does.
+        "Retry finished, resuming." => PiChunkRoute::Drop,
+        // `formatAutoRetryMessage`'s fallback, when pi's event carried no usable
+        // attempt / maxAttempts / delayMs.
+        "Retrying..." => PiChunkRoute::Retrying {
+            attempt: None,
+            max: None,
+            delay_ms: None,
+        },
+        // Compaction. Dropped rather than rendered as the shared
+        // `_meta.contextCompaction` card: a tool call synthesized at the END of a
+        // turn would land after the reply, and `SessionState`'s "final assistant
+        // text" is the text FOLLOWING the last tool call — so the card would
+        // silently blank the delegation result / work-task summary. Restoring the
+        // card is a follow-up, gated on teaching that extraction to skip
+        // compaction refs (which codex and grok need too).
+        "Context nearing limit, running automatic compaction..."
+        | "Automatic compaction finished; context was summarized to continue the session." => {
+            PiChunkRoute::Drop
+        }
+        // pi-acp's own prompt queue. codeg's turn gate normally makes this
+        // unreachable (`manager.rs` rejects a concurrent prompt), so all three
+        // are handled defensively and together — one of them showing up alone
+        // would be the odd one out.
+        "Cleared queued prompts." => PiChunkRoute::Drop,
+        _ => {
+            if let Some((attempt, max, delay_ms)) = pi_parse_retry_announcement(text) {
+                PiChunkRoute::Retrying {
+                    attempt: Some(attempt),
+                    max: Some(max),
+                    delay_ms: Some(delay_ms),
+                }
+            } else if pi_is_queue_announcement(text) {
+                PiChunkRoute::Drop
+            } else {
+                PiChunkRoute::Prose
+            }
+        }
+    }
+}
+
+/// Recover `(attempt, max, delay_ms)` from `Retrying (attempt 1/3, waiting 2s)...`
+/// — pi-acp's `formatAutoRetryMessage`, which is the only place codeg can reach
+/// these numbers: pi sends them structured to pi-acp, which formats them into a
+/// sentence and forwards nothing else.
+///
+/// Worth recovering rather than shipping the sentence as the banner's message,
+/// because the banner already has localized slots for exactly this data
+/// (`claudeApiRetry.retryingWithMax` / `nextRetryIn`) — so a zh-CN user reads
+/// `正在重试 1/3，2.0 秒后重试` instead of an English sentence with a Chinese
+/// suffix bolted on.
+///
+/// Parsed by hand rather than by regex: the shape is fixed, and every field is
+/// re-validated (`{n}/{n}`, `{n}s`, nothing left over), so a sentence that merely
+/// starts the same way falls through to `Prose` instead of half-matching.
+fn pi_parse_retry_announcement(text: &str) -> Option<(u32, u32, u64)> {
+    let body = text
+        .strip_prefix("Retrying (attempt ")?
+        .strip_suffix("s)...")?;
+    let (attempts, delay_seconds) = body.split_once(", waiting ")?;
+    let (attempt, max) = attempts.split_once('/')?;
+    Some((
+        attempt.parse().ok()?,
+        max.parse().ok()?,
+        delay_seconds.parse::<u64>().ok()?.checked_mul(1000)?,
+    ))
+}
+
+/// `Queued message (position N).` / `Starting queued message. (N remaining)` —
+/// the two pi-acp queue announcements that carry an interpolated count (the
+/// third, `Cleared queued prompts.`, is a plain literal handled by the caller).
+fn pi_is_queue_announcement(text: &str) -> bool {
+    let counted = text
+        .strip_prefix("Queued message (position ")
+        .and_then(|rest| rest.strip_suffix(")."))
+        .or_else(|| {
+            text.strip_prefix("Starting queued message. (")
+                .and_then(|rest| rest.strip_suffix(" remaining)"))
+        });
+    counted.is_some_and(|count| !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Grok wraps every MCP tool invocation in a generic `use_tool` envelope whose
@@ -9400,27 +10305,267 @@ fn codebuddy_meta_marks_subagent(
         .is_some_and(|s| !s.is_empty())
 }
 
-/// True when a Codex live `tool_call` is a `subAgentActivity` mapping
-/// (codex-acp #304, v1.1.3+). codex-acp maps codex `subAgentActivity`
-/// notifications onto ACP `tool_call(kind:other)` carrying
-/// `_meta.codex.subagent = {threadId, path, activity}`. codeg already renders
-/// codex collaboration from the `collabAgentToolCall` path (spawnAgent/wait/
-/// closeAgent — see `collab-tool.ts`) and reconstructs the full nested
-/// transcript on history reload from `agent-<id>.jsonl` (see
-/// `parsers/codex.rs`), so this new live signal is redundant with what codeg
-/// already shows. Suppressed at the emit point (keeping live and DB-reload
-/// consistent — a suppressed event is never persisted) to preserve the current
-/// live behavior. Gated on Codex.
-fn is_codex_subagent_activity(
+/// pi-acp reports a `bash` tool call as an ACP `Terminal` content block whose
+/// `terminalId` is its OWN tool-call id, then streams the command's output over
+/// a bespoke `_meta` channel instead of the ACP terminal channel.
+///
+/// pi-acp's README says it outright: "No ACP filesystem delegation (`fs/*`) and
+/// no ACP terminal delegation (`terminal/*`). pi reads/writes and executes
+/// locally." It never calls `terminal/create`, so the id it names
+/// (`call_Q0KKW…`) can never resolve against `TerminalRuntime` — which only ever
+/// mints `term_<uuid>` ids. Codeg used to render the resulting placeholder and
+/// then poll a terminal that does not exist, so the card stayed at
+/// `[Terminal: call_…]` with no command output, ever (#519).
+///
+/// The wire, per pi-acp 0.0.33 (`emitBashToolCall` / `emitBashOutputUpdate`):
+/// - `tool_call`: `title` = the command, `kind: execute`, the `Terminal` block,
+///   `_meta.terminal_info = {terminal_id, cwd}`, and NO `rawInput`.
+/// - `tool_call_update` ×N: `_meta.terminal_output = {terminal_id, data}` where
+///   `data` is an incremental delta, plus `_meta.terminal_exit =
+///   {terminal_id, exit_code, signal}` on the final frame. No `content`, no
+///   `rawOutput` — this `_meta` is the only channel carrying the output.
+///
+/// These readers bridge that channel into the same `raw_output` stream the
+/// host-terminal poller produces, so a pi bash card reads exactly like every
+/// other agent's.
+///
+/// GATED ON `AgentType::Pi` ON PURPOSE: pi-acp's keys are unnamespaced
+/// (`terminal_output`, not `pi/terminalOutput`), so an ungated reader would be a
+/// collision waiting to happen. Known limitation: `AgentType::Pi` resolves from
+/// the built-in registry id `pi-acp`, so a user who registers pi-acp under a
+/// CUSTOM agent id gets `AgentType::Custom` and keeps the old behaviour. That is
+/// the right trade — an unnamespaced-meta bridge must not apply to arbitrary
+/// agents.
+fn pi_terminal_meta_marks_bash(
     agent_type: AgentType,
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> bool {
-    if agent_type != AgentType::Codex {
+    if agent_type != AgentType::Pi {
         return false;
     }
-    meta.and_then(|m| m.get("codex"))
+    meta.is_some_and(|meta| meta.get("terminal_info").is_some_and(|v| v.is_object()))
+}
+
+/// The incremental output chunk from `_meta.terminal_output.data`, if any.
+///
+/// pi computes this delta itself as `next.startsWith(prev) ? next.slice(prev.len)
+/// : next`, so in the degenerate case where its cumulative text stops being a
+/// prefix extension (stdout still growing AFTER stderr was first folded in) it
+/// re-sends the WHOLE text as a "delta" and we append it, duplicating. Codeg
+/// cannot detect that without holding the full snapshot, which
+/// `ToolCallOutputCache` deliberately does not do (8 KB tail only). Appending is
+/// the correct reading of the wire contract; the duplication is an upstream
+/// residual.
+fn pi_terminal_output_delta(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    if agent_type != AgentType::Pi {
+        return None;
+    }
+    meta?
+        .get("terminal_output")?
+        .get("data")?
+        .as_str()
+        .filter(|data| !data.is_empty())
+        .map(str::to_string)
+}
+
+/// The `[terminal exited: …]` line for `_meta.terminal_exit`, if present.
+///
+/// The values are read key by key and fed to `format_terminal_exit_status`, so
+/// the wording is byte-for-byte what a host-owned terminal produces and can
+/// never drift. Do NOT be tempted to `serde_json::from_value::<TerminalExitStatus>`
+/// the object instead: pi writes SNAKE_case (`exit_code`) while the schema type
+/// is `rename_all = "camelCase"`, and unknown fields are ignored — so it
+/// deserializes CLEANLY into an all-`None` status and silently prints
+/// "[terminal exited: finished]", dropping the exit code the report explicitly
+/// asks for.
+fn pi_terminal_exit_line(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    if agent_type != AgentType::Pi {
+        return None;
+    }
+    let exit = meta?.get("terminal_exit")?.as_object()?;
+    let code = exit.get("exit_code").and_then(serde_json::Value::as_i64);
+    let signal = exit
+        .get("signal")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    // `TerminalExitStatus::exit_code` is `u32`, but pi's is a JS number and some
+    // runtimes report a signal death as a negative. Format those directly rather
+    // than dropping the only failure evidence a killed command leaves behind.
+    let formatted = match code.map(u32::try_from) {
+        Some(Err(_)) => {
+            let mut parts = vec![format!("exit code: {}", code.unwrap_or_default())];
+            if let Some(signal) = &signal {
+                parts.push(format!("signal: {signal}"));
+            }
+            parts.join(", ")
+        }
+        narrowed => format_terminal_exit_status(
+            &TerminalExitStatus::new()
+                .exit_code(narrowed.and_then(Result::ok))
+                .signal(signal),
+        ),
+    };
+    Some(format!("[terminal exited: {formatted}]"))
+}
+
+/// Bridge pi's `_meta` terminal channel onto the `raw_output` stream, returning
+/// the `(payload, append)` pair to emit — or `None` when this frame carries no
+/// terminal data (which is every frame of every other agent, since both readers
+/// are gated on `AgentType::Pi`).
+///
+/// `append` is false for a call's FIRST chunk, so it REPLACES whatever the
+/// opening frame left on the card, and true for every chunk after — the same
+/// rule `poll_terminal_tool_call_output` applies via
+/// `TrackedTerminalToolCall::has_emitted_output`. The payload goes through
+/// `build_emit_payload` for the pipeline-wide ANSI-safe single-event cap.
+///
+/// The exit line is appended on EVERY exit, `exit code: 0` included: for a
+/// command that printed nothing it is the only thing that supersedes the
+/// placeholder, and it is what a host-owned terminal shows.
+///
+/// The entry is created here rather than required up front, so a client that
+/// attached mid-turn (and so never saw the opening `terminal_info` frame) still
+/// gets the output instead of silently dropping it.
+fn pi_bash_terminal_chunk(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    tool_call_id: &str,
+    tracked: &mut HashMap<String, bool>,
+) -> Option<(String, bool)> {
+    let mut chunk = pi_terminal_output_delta(agent_type, meta).unwrap_or_default();
+    if let Some(exit_line) = pi_terminal_exit_line(agent_type, meta) {
+        if !chunk.is_empty() && !chunk.ends_with('\n') {
+            chunk.push('\n');
+        }
+        chunk.push_str(&exit_line);
+    }
+    if chunk.is_empty() {
+        return None;
+    }
+    let has_emitted = tracked.entry(tool_call_id.to_string()).or_insert(false);
+    let append = *has_emitted;
+    *has_emitted = true;
+    Some(build_emit_payload(&chunk, append))
+}
+
+/// pi-acp titles a bash tool call `bashCommand(args) ?? toolName`. On the first
+/// `toolcall_start` frame the arguments are still partial JSON, so the title is
+/// the bare tool name `"bash"` and the real command only lands on a later frame.
+///
+/// Synthesize a canonical `{"command": …}` `raw_input` from a title that IS the
+/// command, so `inferLiveToolName` classifies the call as `bash` and it renders
+/// through the Bash card (`$ <cmd>`) — the same trick
+/// `synthesize_edit_input_from_diffs` plays for codex's input-less diffs. Without
+/// it the input shape is silent and the title fallback makes the card a generic
+/// tool literally NAMED after the command (`node --version`), which is also how
+/// it diverged from pi's own history parser (`parsers/pi.rs`, which builds a real
+/// `bash` call with `{"command": …}`).
+///
+/// Returns `None` for the bare `"bash"` title: `normalizeToolName("bash")`
+/// already resolves that frame to the Bash card, and synthesizing there would
+/// flash `$ bash` for one frame before the real command arrives.
+fn pi_bash_input_from_title(title: Option<&str>) -> Option<String> {
+    let command = title?.trim();
+    if command.is_empty() || command.eq_ignore_ascii_case("bash") {
+        return None;
+    }
+    Some(serde_json::json!({ "command": command }).to_string())
+}
+
+/// Name used when a codex sub-agent's `path` carries no usable segment. Matches
+/// the fallback codex-acp itself uses when building the activity title.
+const CODEX_SUBAGENT_FALLBACK_NAME: &str = "subagent";
+
+/// How a Codex live `subAgentActivity` (codex-acp #304) should be handled.
+///
+/// codex 0.147's native team-of-agents runs sub-agents entirely inside the codex
+/// process. Its orchestration calls (`spawn_agent` / `wait_agent`, the
+/// `collaboration` namespace) never reach the ACP wire, and the inter-agent
+/// message is an opaque encrypted envelope even in the on-disk rollout. The one
+/// thing codex-acp forwards is `subAgentActivity`, as a `tool_call(kind:other)`
+/// carrying `_meta.codex.subagent = {threadId, path, activity}`.
+///
+/// codeg used to DROP every one of these, on the premise that the
+/// `collabAgentToolCall` capsule already showed the same thing. That premise
+/// died with the team-of-agents rewrite: codex raises no `collabAgentToolCall`
+/// for a spawn any more, so dropping this left a codex sub-agent completely
+/// invisible while it ran — nothing appeared in the timeline until the session
+/// was reopened and the rollout re-parsed.
+enum CodexSubagentActivity {
+    /// Not a codex sub-agent activity — handle the call normally.
+    None,
+    /// A sub-agent was launched. Carries the Agent-card input to render it with.
+    Started(String),
+    /// A later lifecycle marker (`interacted` / `interrupted`). Still dropped:
+    /// they carry no content of their own and would each open a SECOND capsule
+    /// with the same name and no way to tell it apart from the launch.
+    Other,
+}
+
+/// Classify a live tool call's `_meta`, building the Agent-card input for a
+/// launch. The three fields are the ones `parsers/codex.rs` writes on reload, so
+/// live and history render the same capsule: the sub-agent's name is the last
+/// segment of its `path` (`/root/pnpm_build` → `pnpm_build`) and `agent_id` is
+/// its codex thread id, which the card renders as a short badge. No `prompt` —
+/// the task text is encrypted on this wire.
+///
+/// The capsule settles as soon as codex acknowledges the launch, NOT when the
+/// child finishes: the activity item's own lifecycle is the spawn's, and codex
+/// forwards nothing else about the child over ACP. A child's eventual result
+/// reaches the timeline as the parent's next message.
+fn classify_codex_subagent_activity(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> CodexSubagentActivity {
+    if agent_type != AgentType::Codex {
+        return CodexSubagentActivity::None;
+    }
+    let Some(subagent) = meta
+        .and_then(|m| m.get("codex"))
         .and_then(|codex| codex.get("subagent"))
-        .is_some()
+    else {
+        return CodexSubagentActivity::None;
+    };
+    // A status-only follow-up carries the same meta with the same `activity`,
+    // so this classification is stable across the call's whole lifetime.
+    if subagent.get("activity").and_then(|v| v.as_str()) != Some("started") {
+        return CodexSubagentActivity::Other;
+    }
+    let name = subagent
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(CODEX_SUBAGENT_FALLBACK_NAME);
+    let mut input = serde_json::Map::new();
+    input.insert(
+        "subagent_type".to_string(),
+        serde_json::Value::String(name.to_string()),
+    );
+    if let Some(thread_id) = subagent
+        .get("threadId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        input.insert(
+            "agent_id".to_string(),
+            serde_json::Value::String(thread_id.to_string()),
+        );
+    }
+    // Say that this card stands for the LAUNCH, so its "completed" is not read
+    // as "the sub-agent finished" (see the constant's doc).
+    input.insert(
+        crate::parsers::codex::CODEX_SUBAGENT_LAUNCH_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    CodexSubagentActivity::Started(serde_json::Value::Object(input).to_string())
 }
 
 /// True when a `session/request_permission` is codex's Plan-mode review gate
@@ -9434,7 +10579,7 @@ fn is_codex_subagent_activity(
 /// `tool_call_update` carrying just a status and `rawOutput`. Without seeding a
 /// tool call from this request that update lands on an unknown id and renders as
 /// an untitled generic tool card, so `handle_permission_request` emits one.
-/// Gated on Codex, mirroring [`is_codex_subagent_activity`].
+/// Gated on Codex, mirroring [`classify_codex_subagent_activity`].
 fn is_codex_plan_review(
     agent_type: AgentType,
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -9461,6 +10606,207 @@ fn init_advertises_steering(meta: Option<&serde_json::Map<String, serde_json::Va
         .and_then(|s| s.get("supported"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Whether the `initialize` response advertises the provider-neutral goal
+/// extension: top-level `_meta.goal = {version: <integer >= 1>, controlMethod,
+/// actions}`. Advertised ⇒ goal state arrives as
+/// `session_info_update._meta.goal` snapshots and the legacy
+/// `_meta.codex.goal` key is ignored for the WHOLE connection — codex-acp
+/// switched to the neutral key silently in 1.2.0 (legacy key gone), and
+/// claude-agent-acp speaks only the neutral form (0.66.0+). Pinning the
+/// channel here, at initialize, makes the selection independent of update
+/// arrival order, so a transitional adapter double-publishing one goal
+/// transition through both namespaces can never produce two goal cards.
+/// Non-integer or sub-1 versions fail closed onto the legacy channel.
+fn init_advertises_goal(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    meta.and_then(|m| m.get("goal"))
+        .and_then(|g| g.get("version"))
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|version| version >= 1)
+}
+
+/// The goal-control surface an `initialize` response advertises:
+/// `(_meta.goal.controlMethod, _meta.goal.actions)` — claude 0.66+ offers
+/// `("_session/goal", ["set","clear"])`, codex 1.2+ the same method with all
+/// four actions. `None` when the neutral goal extension isn't advertised
+/// (see [`init_advertises_goal`]) or carries no usable method string — the
+/// session then keeps the legacy codex method + actions
+/// (`codex_goal::LEGACY_GOAL_CONTROL_METHOD` / `LEGACY_GOAL_ACTIONS`). An
+/// advertised-but-empty actions array is honored as "no controls": the goal
+/// card gates its buttons on this list, so only affordances the adapter
+/// actually implements are offered.
+fn goal_advertised_control(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<(String, Vec<String>)> {
+    if !init_advertises_goal(meta) {
+        return None;
+    }
+    let goal = meta?.get("goal")?;
+    let method = goal
+        .get("controlMethod")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())?
+        .to_string();
+    let actions = goal
+        .get("actions")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((method, actions))
+}
+
+/// Resolve [`goal_advertised_control`]'s answer into what the session state
+/// stores: an OPTIONAL method override (absent ⇒ keep the legacy codex method
+/// the state was built with) and the CONCRETE action vocabulary.
+///
+/// The legacy pair belongs here, at initialize, and not in `SessionState::new`.
+/// A client can read the snapshot during the handshake — `spawn_agent` returns
+/// with `initialize` still in flight — and it latches whatever it finds, so a
+/// construction-time legacy default hands a claude session a Pause its adapter
+/// answers with `Invalid params: goal action must be "set" or "clear"`. Keeping
+/// the field `None` until this runs is what makes "unknown" tellable from
+/// "legacy" on the wire.
+fn resolve_goal_control(
+    advertised: Option<(String, Vec<String>)>,
+) -> (Option<String>, Vec<String>) {
+    match advertised {
+        Some((method, actions)) => (Some(method), actions),
+        None => (
+            None,
+            crate::acp::codex_goal::LEGACY_GOAL_ACTIONS
+                .iter()
+                .map(|a| (*a).to_string())
+                .collect(),
+        ),
+    }
+}
+
+/// Pick the goal payload out of a `session_info_update`'s `_meta` according to
+/// the channel pinned at initialize (see [`init_advertises_goal`]): the
+/// neutral `_meta.goal` for advertising connections, the legacy
+/// `_meta.codex.goal` otherwise — never both. Pure so the either/or contract
+/// is unit-tested without the connection machinery.
+fn session_info_goal_value(
+    neutral_goal_channel: bool,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<&serde_json::Value> {
+    let meta = meta?;
+    if neutral_goal_channel {
+        meta.get("goal")
+    } else {
+        meta.get("codex").and_then(|codex| codex.get("goal"))
+    }
+}
+
+/// The raw `sessionFailure` value out of a `_meta.jetbrains.air` envelope —
+/// present only when the envelope itself is well-formed (integer
+/// `version >= 1`, mirroring the advertisement check the adapters run on
+/// codeg's `clientCapabilities._meta.jetbrains.air`). A malformed or
+/// future-incompatible envelope yields `None` and the carrier is treated as
+/// holding no failure. Records ride TWO carriers with this same envelope: the
+/// per-attempt upserts on `session_info_update._meta`, and a turn's terminal
+/// failure on the prompt RESPONSE `_meta` (see [`response_session_failure`]).
+fn air_session_failure(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<&serde_json::Value> {
+    let air = meta?.get("jetbrains")?.get("air")?;
+    let version = air.get("version").and_then(serde_json::Value::as_i64)?;
+    if version < 1 {
+        return None;
+    }
+    air.get("sessionFailure")
+}
+
+/// Validate one AIR failure upsert into a [`SessionFailureRecord`].
+///
+/// `id` (non-blank string) and `revision` (integer >= 1) are HARD
+/// requirements — without identity there is nothing to merge
+/// deterministically, so a record missing either is dropped (the caller logs
+/// it at debug). Everything else is lenient: `category`/`severity` default to
+/// `"unknown"`/`"error"` and pass through unrecognized values as plain
+/// strings (the frontend falls back per field), `title` may be blank,
+/// non-string `actions` entries are skipped. `resolved` starts `false`; the
+/// stores flip it (see the type docs).
+fn parse_session_failure_record(value: &serde_json::Value) -> Option<SessionFailureRecord> {
+    let id = value.get("id")?.as_str()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let revision = value.get("revision")?.as_u64()?;
+    if revision < 1 {
+        return None;
+    }
+    let text = |key: &str, default: &str| -> String {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default)
+            .to_string()
+    };
+    Some(SessionFailureRecord {
+        id: id.to_string(),
+        revision,
+        category: text("category", "unknown"),
+        severity: text("severity", "error"),
+        title: text("title", ""),
+        details: value
+            .get("details")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        actions: value
+            .get("actions")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        resolved: false,
+    })
+}
+
+/// The terminal AIR failure riding on a prompt RESPONSE's `_meta`, if any.
+///
+/// With `jetbrains.air` negotiated, BOTH adapters deliver a turn's terminal
+/// failure ON the prompt response rather than as another
+/// `session_info_update`: claude-agent-acp's `failActiveWithSessionFailure`
+/// settles the turn with a disguised `end_turn` stop reason and attaches the
+/// record here (its own comment calls the response "the canonical AIR
+/// carrier" — the update channel only ever carries the per-attempt retry
+/// warnings), and codex-acp's `terminalFailurePromptResponse` mirrors the
+/// same shape as the catch-up for a record whose update was missed (the
+/// strict revision merge de-duplicates when both arrive). Field report
+/// 2026-08-15: a mid-turn network drop on claude 0.68.0 published
+/// "Reconnecting to Claude, attempt N of 5" warnings via updates, then the
+/// `transport_lost` error escalation ONLY here — ignoring this carrier lost
+/// the terminal record entirely, so the turn-boundary settle painted the
+/// still-dead connection as a recovered warning.
+fn response_session_failure(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<SessionFailureRecord> {
+    let raw = air_session_failure(meta)?;
+    let record = parse_session_failure_record(raw);
+    if record.is_none() {
+        tracing::debug!(
+            "[ACP] dropped prompt-response AIR sessionFailure without usable id/revision: {raw:?}"
+        );
+    }
+    record
 }
 
 /// Strict SemVer floor check: true when `version >= min` by SemVer
@@ -9803,6 +11149,20 @@ struct CodeBuddyLiveState {
     /// even when the token count hasn't moved yet — otherwise the ring would
     /// keep dividing by the previous model's window.
     grok_last_usage: Option<(u64, u64)>,
+    /// pi bash tool calls whose terminal pi hosts itself → whether any output
+    /// has already been emitted for that call.
+    ///
+    /// Registered from the opening frame's `_meta.terminal_info`
+    /// (see `pi_terminal_meta_marks_bash`), because the frames that actually
+    /// CARRY the output name only the tool-call id — `terminal_info` never
+    /// repeats. The flag is what makes the first bridged chunk a replacement and
+    /// every later one an append, the same rule
+    /// `TrackedTerminalToolCall::has_emitted_output` applies on the host-terminal
+    /// path. Entries are dropped at a final status, alongside
+    /// `ToolCallOutputCache::remove_if_final`, and the whole map is cleared at
+    /// turn start — a bash call whose turn was canceled never sees a final
+    /// status, and its lifecycle cannot span turns anyway.
+    pi_terminal_calls: HashMap<String, bool>,
 }
 
 /// One announced-but-unpaired Grok `spawn_subagent` call. `description` /
@@ -10691,20 +12051,52 @@ async fn emit_conversation_update(
                 !cb_state.open_subagents.is_empty(),
                 meta.as_ref(),
             ) {
-                // Claude subagent chunks (claude-agent-acp ≥0.63 with the
-                // `subagent-transcript` capability) are NOT suppressed: they
-                // emit with their parent id so the frontend can route them
-                // into the live Agent capsule.
-                let parent_tool_use_id = claude_chunk_parent_tool_use_id(agent_type, meta.as_ref());
-                emit_with_state(
-                    state,
-                    emitter,
-                    AcpEvent::ContentDelta {
-                        text: text.text,
-                        parent_tool_use_id,
-                    },
-                )
-                .await;
+                // pi-acp announces its own lifecycle (extension notifies, auto
+                // retry, compaction, prompt queue) on this same prose channel,
+                // where it splices into the reply — issue #525. Classify before
+                // emitting; `Prose` is every other agent's only outcome.
+                match pi_message_chunk_route(agent_type, &text.text, meta.as_ref()) {
+                    PiChunkRoute::Drop => {}
+                    PiChunkRoute::Retrying {
+                        attempt,
+                        max,
+                        delay_ms,
+                    } => {
+                        // The shared retry banner, not the transcript. `message`
+                        // is empty on purpose: pi forwards no error text, and the
+                        // banner renders its own localized line from the numbers
+                        // (see `AcpEvent::TurnRetrying`).
+                        emit_with_state(
+                            state,
+                            emitter,
+                            AcpEvent::TurnRetrying {
+                                message: String::new(),
+                                error_status: None,
+                                attempt,
+                                max_retries: max,
+                                retry_delay_ms: delay_ms,
+                            },
+                        )
+                        .await;
+                    }
+                    PiChunkRoute::Prose => {
+                        // Claude subagent chunks (claude-agent-acp ≥0.63 with the
+                        // `subagent-transcript` capability) are NOT suppressed: they
+                        // emit with their parent id so the frontend can route them
+                        // into the live Agent capsule.
+                        let parent_tool_use_id =
+                            claude_chunk_parent_tool_use_id(agent_type, meta.as_ref());
+                        emit_with_state(
+                            state,
+                            emitter,
+                            AcpEvent::ContentDelta {
+                                text: text.text,
+                                parent_tool_use_id,
+                            },
+                        )
+                        .await;
+                    }
+                }
             }
         }
         SessionUpdate::AgentMessageChunk(_) => {
@@ -10737,13 +12129,17 @@ async fn emit_conversation_update(
             // Non-text thought chunks are currently ignored.
         }
         SessionUpdate::ToolCall(tc) => {
-            // codex-acp #304 (v1.1.3+) surfaces codex `subAgentActivity` as a
-            // live `tool_call`; suppress it — it is redundant with the collab
-            // capsule and the history reconstruction (see
-            // `is_codex_subagent_activity`).
-            if is_codex_subagent_activity(agent_type, tc.meta.as_ref()) {
-                return;
-            }
+            // codex-acp #304 surfaces codex `subAgentActivity` as a live
+            // `tool_call`. A launch becomes an Agent capsule (its own rawInput
+            // is orchestration bookkeeping, so it is replaced wholesale); the
+            // other lifecycle markers stay dropped. See
+            // `classify_codex_subagent_activity`.
+            let codex_subagent =
+                match classify_codex_subagent_activity(agent_type, tc.meta.as_ref()) {
+                    CodexSubagentActivity::None => None,
+                    CodexSubagentActivity::Started(input) => Some(input),
+                    CodexSubagentActivity::Other => return,
+                };
             let tool_call_id = tc.tool_call_id.to_string();
             // Grok emits a redundant `tool_call` for its native ask_user_question
             // alongside the blocking `_x.ai/ask_user_question` ext request codeg
@@ -10772,6 +12168,21 @@ async fn emit_conversation_update(
             } else {
                 None
             };
+            // pi hosts its own terminal and names it by this very tool-call id, so
+            // its `Terminal` block is a placeholder nothing can ever supersede from
+            // the terminal channel — strip it and let the `_meta` bridge below
+            // supply the output. Remember the call: the frames that carry the
+            // output name only the id (see `pi_terminal_meta_marks_bash`).
+            let pi_bash = pi_terminal_meta_marks_bash(agent_type, tc.meta.as_ref());
+            if pi_bash {
+                cb_state
+                    .pi_terminal_calls
+                    .entry(tool_call_id.clone())
+                    .or_insert(false);
+            }
+            let pi_stripped_content = pi_bash.then(|| strip_terminal_blocks(&tc.content));
+            let content_blocks: &[ToolCallContent] =
+                pi_stripped_content.as_deref().unwrap_or(&tc.content);
             let own_raw_input = match &grok_use_tool {
                 Some((_, inner)) => {
                     json_value_to_text(&Some(inner.clone())).filter(|t| !t.trim().is_empty())
@@ -10779,15 +12190,30 @@ async fn emit_conversation_update(
                 None => json_value_to_text(&tc.raw_input).filter(|t| !t.trim().is_empty()),
             };
             let synthesized_edit = if own_raw_input.is_none() {
-                synthesize_edit_input_from_diffs(&tc.content)
+                synthesize_edit_input_from_diffs(content_blocks)
             } else {
                 None
             };
-            let content = serialize_tool_call_content(&tc.content, synthesized_edit.is_none())
-                .map(|c| unwrap_codebuddy_deferred_output(agent_type, &c).unwrap_or(c));
-            let images = extract_tool_call_images(&tc.content);
-            let raw_input = synthesized_edit
+            // pi sends no `rawInput` for bash at all — its command lives in the
+            // title. Synthesize the canonical `{"command"}` shape so the call
+            // classifies as `bash` instead of a generic tool named after the
+            // command (see `pi_bash_input_from_title`).
+            let pi_bash_input = if own_raw_input.is_none() && pi_bash {
+                pi_bash_input_from_title(Some(tc.title.as_str()))
+            } else {
+                None
+            };
+            let content = serialize_tool_call_content(content_blocks, synthesized_edit.is_none())
+                .map(|c| unwrap_codebuddy_deferred_output(agent_type, &c).unwrap_or(c))
+                // pi announces a command with an empty result, which pi-acp
+                // renders as JSON source (see fn doc).
+                .filter(|_| !pi_result_content_is_stringify_noise(agent_type, &tc.raw_output));
+            let images = extract_tool_call_images(content_blocks);
+            let codex_subagent_launch = codex_subagent.is_some();
+            let raw_input = codex_subagent
+                .or(synthesized_edit)
                 .or(own_raw_input)
+                .or(pi_bash_input)
                 .map(|text| resolve_live_tool_input(&text, cwd));
             // Initial tool_call notification — the frontend reducer
             // treats `raw_output` as a full replacement, so we bypass
@@ -10796,6 +12222,11 @@ async fn emit_conversation_update(
                 // Grok's structured rawOutput would shadow `content` and render
                 // empty; take the parity path (see grok_live_tool_output).
                 grok_live_tool_output(&content, &tc.raw_output)
+            } else if matches!(agent_type, AgentType::Pi) {
+                // pi's rawOutput is the MCP envelope around the SAME text
+                // `content` already carries; shipping it shadows the clean text
+                // with JSON source (see pi_live_tool_output).
+                pi_live_tool_output(&content, &tc.raw_output)
             } else {
                 json_value_to_text(&tc.raw_output)
                     .map(|text| unwrap_codebuddy_deferred_output(agent_type, &text).unwrap_or(text))
@@ -10813,7 +12244,13 @@ async fn emit_conversation_update(
             // reliable signal (frame 1) that keeps the Agent pill from flickering;
             // `meta_marks_background` keeps a concurrent sub-agent out of the
             // suppression window (see fn docs).
-            let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tc.meta.as_ref());
+            // `codex_subagent_launch` joins the CodeBuddy meta signal here for
+            // the same reason it exists: it is what records the authoritative
+            // "agent" title, so the status-only follow-up (which carries no
+            // rawInput at all) re-asserts it instead of downgrading the capsule
+            // to a generic tool card.
+            let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tc.meta.as_ref())
+                || codex_subagent_launch;
             let meta_marks_background =
                 codebuddy_meta_marks_background(agent_type, tc.meta.as_ref());
             let grok_spawn = grok_meta_marks_spawn_subagent(agent_type, tc.meta.as_ref());
@@ -10894,12 +12331,16 @@ async fn emit_conversation_update(
             .await;
         }
         SessionUpdate::ToolCallUpdate(tcu) => {
-            // Symmetric with the `ToolCall` arm: a follow-up update for a codex
-            // `subAgentActivity` still carries `_meta.codex.subagent`, so drop
-            // it too (see `is_codex_subagent_activity`).
-            if is_codex_subagent_activity(agent_type, tcu.meta.as_ref()) {
-                return;
-            }
+            // Symmetric with the `ToolCall` arm: the follow-up carries the same
+            // `_meta.codex.subagent`, so it classifies identically — a launch's
+            // completion is forwarded (settling its capsule), any other
+            // lifecycle marker's is dropped like its opening frame was.
+            let codex_subagent =
+                match classify_codex_subagent_activity(agent_type, tcu.meta.as_ref()) {
+                    CodexSubagentActivity::None => None,
+                    CodexSubagentActivity::Started(input) => Some(input),
+                    CodexSubagentActivity::Other => return,
+                };
             let tool_call_id = tcu.tool_call_id.to_string();
             // Suppress the redundant update stream for grok's ask_user_question
             // (see the ToolCall arm): match the tracked id, or the meta on a late
@@ -10924,6 +12365,23 @@ async fn emit_conversation_update(
             } else {
                 None
             };
+            // Symmetric with the ToolCall arm. `terminal_info` only ever rides the
+            // OPENING frame, so the id set is what identifies these updates; the
+            // meta check is a cheap guard for a wire that ever reorders them.
+            let pi_bash = cb_state.pi_terminal_calls.contains_key(&tool_call_id)
+                || pi_terminal_meta_marks_bash(agent_type, tcu.meta.as_ref());
+            if pi_bash {
+                cb_state
+                    .pi_terminal_calls
+                    .entry(tool_call_id.clone())
+                    .or_insert(false);
+            }
+            let pi_stripped_content = pi_bash
+                .then(|| tcu.fields.content.as_deref().map(strip_terminal_blocks))
+                .flatten();
+            let content_blocks: Option<&[ToolCallContent]> = pi_stripped_content
+                .as_deref()
+                .or(tcu.fields.content.as_deref());
             let own_raw_input = match &grok_use_tool {
                 Some((_, inner)) => {
                     json_value_to_text(&Some(inner.clone())).filter(|t| !t.trim().is_empty())
@@ -10931,26 +12389,33 @@ async fn emit_conversation_update(
                 None => json_value_to_text(&tcu.fields.raw_input).filter(|t| !t.trim().is_empty()),
             };
             let synthesized_edit = if own_raw_input.is_none() {
-                tcu.fields
-                    .content
-                    .as_deref()
-                    .and_then(synthesize_edit_input_from_diffs)
+                content_blocks.and_then(synthesize_edit_input_from_diffs)
             } else {
                 None
             };
-            let content = tcu
-                .fields
-                .content
-                .as_deref()
+            // pi's real command usually arrives on an update, not the opening
+            // frame (its first frame's arguments are still partial JSON, so the
+            // title is the bare "bash"). Re-synthesize whenever a titled frame
+            // shows up; the reducer keeps the prior input on the title-less ones.
+            let pi_bash_input = if own_raw_input.is_none() && pi_bash {
+                pi_bash_input_from_title(tcu.fields.title.as_deref())
+            } else {
+                None
+            };
+            let content = content_blocks
                 .and_then(|c| serialize_tool_call_content(c, synthesized_edit.is_none()))
-                .map(|c| unwrap_codebuddy_deferred_output(agent_type, &c).unwrap_or(c));
-            let images = tcu
-                .fields
-                .content
-                .as_deref()
-                .and_then(extract_tool_call_images);
-            let raw_input = synthesized_edit
+                .map(|c| unwrap_codebuddy_deferred_output(agent_type, &c).unwrap_or(c))
+                // Symmetric with the ToolCall arm — and the arm that matters:
+                // pi's empty opening frame is a `tool_call_update`.
+                .filter(|_| {
+                    !pi_result_content_is_stringify_noise(agent_type, &tcu.fields.raw_output)
+                });
+            let images = content_blocks.and_then(extract_tool_call_images);
+            let codex_subagent_launch = codex_subagent.is_some();
+            let raw_input = codex_subagent
+                .or(synthesized_edit)
                 .or(own_raw_input)
+                .or(pi_bash_input)
                 .map(|text| resolve_live_tool_input(&text, cwd));
             // Diff the incoming raw_output against the last snapshot we
             // emitted for this tool call. This turns cumulative snapshots
@@ -10962,6 +12427,10 @@ async fn emit_conversation_update(
                 // Grok's structured rawOutput would shadow `content` and render
                 // empty; take the parity path (see grok_live_tool_output).
                 grok_live_tool_output(&content, &tcu.fields.raw_output)
+            } else if matches!(agent_type, AgentType::Pi) {
+                // Symmetric with the ToolCall arm — and the arm that matters:
+                // pi delivers the result on the update (see pi_live_tool_output).
+                pi_live_tool_output(&content, &tcu.fields.raw_output)
             } else {
                 json_value_to_text(&tcu.fields.raw_output)
                     .map(|text| unwrap_codebuddy_deferred_output(agent_type, &text).unwrap_or(text))
@@ -10974,19 +12443,50 @@ async fn emit_conversation_update(
                 },
                 None => (None, None),
             };
+            // pi's bash output rides `_meta` and nothing else (no `content`, no
+            // `rawOutput`), so bridge it onto the same `raw_output` stream the
+            // host-terminal poller feeds — that channel is what supersedes the
+            // placeholder in the frontend store's output precedence. This
+            // deliberately BYPASSES `raw_output_cache`: the cache diffs cumulative
+            // snapshots, while pi already sends deltas, which is exactly why
+            // `emit_terminal_output_update` bypasses it too. pi never sends
+            // `rawOutput` for a `_meta`-hosted call, so the branch above resolved
+            // to `(None, None)` and nothing is being overwritten. (Older pi-acp
+            // has no `_meta` channel at all: there `bash` streams like any other
+            // tool and `pi_live_tool_output` above is what carries its output.)
+            let (raw_output, raw_output_append) = match pi_bash_terminal_chunk(
+                agent_type,
+                tcu.meta.as_ref(),
+                &tool_call_id,
+                &mut cb_state.pi_terminal_calls,
+            ) {
+                Some((payload, append)) => (Some(payload), Some(append)),
+                None => (raw_output, raw_output_append),
+            };
             let locations = tcu
                 .fields
                 .locations
                 .as_ref()
                 .filter(|l| !l.is_empty())
                 .and_then(|l| serde_json::to_value(l).ok());
-            let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tcu.meta.as_ref());
+            let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tcu.meta.as_ref())
+                || codex_subagent_launch;
             let meta_marks_background =
                 codebuddy_meta_marks_background(agent_type, tcu.meta.as_ref());
             let grok_spawn = grok_meta_marks_spawn_subagent(agent_type, tcu.meta.as_ref());
             let meta = tcu.meta.clone().map(serde_json::Value::Object);
             let status = tcu.fields.status.map(|s| format!("{:?}", s).to_lowercase());
             raw_output_cache.remove_if_final(&tool_call_id, status.as_deref());
+            // Same lifetime as the output cache — and deliberately NOT mirrored in
+            // the ToolCall arm: pi's `session/load` replay opens the call ALREADY
+            // `completed` and delivers the output on the update that follows, so
+            // dropping the entry on the opening frame's status would lose it.
+            if matches!(
+                status.as_deref(),
+                Some("completed" | "failed" | "cancelled" | "error")
+            ) {
+                cb_state.pi_terminal_calls.remove(&tool_call_id);
+            }
             // Symmetric with the ToolCall arm: an update may carry the terminal
             // status (and, on grok, usually re-carries the `x.ai/tool` meta).
             track_grok_spawn_call(
@@ -11171,21 +12671,61 @@ async fn emit_conversation_update(
         }
         SessionUpdate::SessionInfoUpdate(info) => {
             // codex-acp v1.1.0 (#263) reports `/goal` transitions as structured
-            // session metadata instead of live "Goal updated (…)" agent text:
-            // the goal object rides under `_meta.codex.goal`. Map it onto codeg's
-            // canonical create_goal/update_goal synthetic tool call so the
-            // existing goal-card pipeline (groupGoalRuns/GoalCard) renders it —
-            // byte-identical to the history path (parsers/codex.rs). Non-Codex
-            // agents don't populate the `codex` key, so this is a no-op for them.
-            // (`info.title` is Codex's native thread name; it is adopted via the
-            // parser auto-title path on the next conversation fetch, not here, to
-            // keep this DB-agnostic emit path unchanged — see parsers/codex.rs.)
-            if let Some(goal) = info
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("codex"))
-                .and_then(|codex| codex.get("goal"))
-            {
+            // session metadata instead of live "Goal updated (…)" agent text.
+            // The goal object rides under ONE of two meta keys, selected per
+            // connection at initialize (`SessionState.neutral_goal_channel`,
+            // see `session_info_goal_value`): the provider-neutral
+            // `_meta.goal` for adapters advertising the goal extension
+            // (claude-agent-acp 0.66+, codex-acp 1.2+ — which dropped the
+            // legacy key), else the legacy `_meta.codex.goal`. Either way it
+            // maps onto codeg's canonical create_goal/update_goal synthetic
+            // tool call so the existing goal-card pipeline
+            // (groupGoalRuns/GoalCard) renders it — byte-identical to the
+            // history path (parsers/codex.rs). Agents publishing no goal meta
+            // no-op here. The neutral snapshot's status vocabulary
+            // (active|paused|blocked|limited|complete) passes through
+            // `normalize_goal_status` unchanged; its extra fields
+            // (createdAt/updatedAt/iterations/lastReason/controlMethod)
+            // survive inside the marker's raw goal object for the card.
+            // `info.title` is the agent's live session name (Codex thread name,
+            // Claude ACP 0.69+ generated titles, anyone else who publishes the
+            // field). Apply it immediately via a dedicated lifecycle event
+            // rather than waiting for the next conversation fetch. Goal-only
+            // updates leave title undefined and emit nothing. Identical repeats
+            // are skipped (CodeBuddy resends its fallback after every turn).
+            // A title that arrives before the row is bound is dropped, not
+            // remembered, so a later resend is still accepted. If it never
+            // comes back, the next detail load recovers it only for agents
+            // whose own transcript carries the name (Codex's session index,
+            // Claude's `ai-title`) — a custom ACP agent's is gone, because
+            // `parsers/acp_native.rs` records no `session_info_update` and can
+            // only ever title a session by its first prompt.
+            if let Some(title) = crate::acp::session_title::native_title_from_session_info(
+                info.title.value().map(|s| s.as_str()),
+            ) {
+                // Test and set under ONE write lock. Nothing can interleave
+                // here today — a session's notifications are handled serially,
+                // and the only other writer of `last_native_title` is the
+                // `ConversationLinked` arm, which is emitted ONLY while the row
+                // is still unbound and therefore can never race a title this
+                // admits. That safety currently rests on two guards in
+                // different files agreeing; keeping the halves in one critical
+                // section makes it hold by construction instead.
+                let admit = {
+                    let mut s = state.write().await;
+                    let admit = s.conversation_id.is_some()
+                        && s.last_native_title.as_deref() != Some(title.as_str());
+                    if admit {
+                        s.last_native_title = Some(title.clone());
+                    }
+                    admit
+                };
+                if admit {
+                    emit_with_state(state, emitter, AcpEvent::NativeSessionTitle { title }).await;
+                }
+            }
+            let neutral_goal_channel = state.read().await.neutral_goal_channel;
+            if let Some(goal) = session_info_goal_value(neutral_goal_channel, info.meta.as_ref()) {
                 if let Some(marker) =
                     crate::acp::codex_goal::next_goal_marker(&mut cb_state.codex_open_goal, goal)
                 {
@@ -11210,11 +12750,39 @@ async fn emit_conversation_update(
                     )
                     .await;
                 }
+                // Mirror "a goal run is open" (⟺ the last snapshot was active,
+                // see `next_goal_marker`) onto the session state, where
+                // `ConnectionManager::goal_control` can read it: only an ACTIVE
+                // goal justifies following a pause/clear with an interrupt. A
+                // paused goal is not driving anything, so clearing it must
+                // leave whatever the user started themselves alone.
+                state.write().await.goal_active = cb_state.codex_open_goal.is_some();
+            }
+            // JetBrains AIR typed session failure (claude-agent-acp 0.67+/
+            // codex-acp 1.2+): published only because codeg advertises
+            // `clientCapabilities._meta.jetbrains.air` (see
+            // `build_client_capabilities`). Valid upserts are forwarded
+            // verbatim — the monotonic id+revision merge runs identically in
+            // `SessionState::apply_event` and the frontend reducer, so a
+            // stale or replayed record is rejected the same way everywhere.
+            // A record without usable identity cannot merge and is dropped.
+            if let Some(raw) = air_session_failure(info.meta.as_ref()) {
+                match parse_session_failure_record(raw) {
+                    Some(record) => {
+                        emit_with_state(state, emitter, AcpEvent::SessionFailure { record }).await;
+                    }
+                    None => tracing::debug!(
+                        "[ACP] dropped AIR sessionFailure without usable id/revision: {raw:?}"
+                    ),
+                }
             }
             // codex-acp #289 (v1.1.3+): a retryable turn error rides under
             // `_meta.codex.error` (only when `willRetry == true`) and the turn
             // stays alive. Surface a transient retry indicator (the frontend
             // reuses the Claude API-retry banner); it is NOT a turn failure.
+            // With AIR advertised (above), codex 1.2+ REPLACES this channel
+            // with severity-"warning" failure records, so this indicator now
+            // serves only non-advertised/legacy paths.
             if let Some((message, error_status)) = codex_retry_indicator(info.meta.as_ref()) {
                 emit_with_state(
                     state,
@@ -11222,6 +12790,10 @@ async fn emit_conversation_update(
                     AcpEvent::TurnRetrying {
                         message,
                         error_status,
+                        // codex reports no retry counters — only pi does.
+                        attempt: None,
+                        max_retries: None,
+                        retry_delay_ms: None,
                     },
                 )
                 .await;
@@ -11735,27 +13307,96 @@ mod tests {
         v.as_object().expect("object").clone()
     }
 
+    fn subagent_launch_input(
+        agent_type: AgentType,
+        meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Option<serde_json::Value> {
+        match classify_codex_subagent_activity(agent_type, meta) {
+            CodexSubagentActivity::Started(input) => {
+                Some(serde_json::from_str(&input).expect("valid JSON"))
+            }
+            _ => None,
+        }
+    }
+
     #[test]
-    fn codex_subagent_activity_detected_only_for_codex_subagent_meta() {
-        // codex-acp #304: `_meta.codex.subagent` marks the suppressed activity.
+    fn codex_subagent_launch_becomes_an_agent_capsule_input() {
+        // codex 0.147 forwards nothing but this for a native sub-agent, so it is
+        // the whole live signal: name from the path's last segment, thread id as
+        // the card's badge, and no prompt (the task text is encrypted).
         let sub = meta_map(serde_json::json!({
+            "codex": {
+                "subagent": {
+                    "threadId": "01a0098a-7e8a",
+                    "path": "/root/pnpm_build",
+                    "activity": "started",
+                }
+            }
+        }));
+        assert_eq!(
+            subagent_launch_input(AgentType::Codex, Some(&sub)),
+            Some(serde_json::json!({
+                "subagent_type": "pnpm_build",
+                "agent_id": "01a0098a-7e8a",
+                // Says the card stands for the LAUNCH, so its "completed" is
+                // not read as "the sub-agent finished" — the parser writes the
+                // same key on reload.
+                crate::parsers::codex::CODEX_SUBAGENT_LAUNCH_KEY: true,
+            }))
+        );
+        // A trailing slash / empty path must not produce a nameless capsule, and
+        // a missing thread id just drops the badge rather than the whole card.
+        let odd = meta_map(serde_json::json!({
+            "codex": { "subagent": { "path": "/", "activity": "started" } }
+        }));
+        assert_eq!(
+            subagent_launch_input(AgentType::Codex, Some(&odd)),
+            Some(serde_json::json!({
+                "subagent_type": "subagent",
+                crate::parsers::codex::CODEX_SUBAGENT_LAUNCH_KEY: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn codex_subagent_activity_classified_only_for_codex_subagent_meta() {
+        let started = meta_map(serde_json::json!({
             "codex": { "subagent": { "threadId": "t1", "path": "/root/x", "activity": "started" } }
         }));
-        assert!(is_codex_subagent_activity(AgentType::Codex, Some(&sub)));
-        // Only Codex is gated — the same meta never suppresses another agent.
-        assert!(!is_codex_subagent_activity(
-            AgentType::ClaudeCode,
-            Some(&sub)
+        // Only Codex is gated — the same meta never reshapes another agent's call.
+        assert!(matches!(
+            classify_codex_subagent_activity(AgentType::ClaudeCode, Some(&started)),
+            CodexSubagentActivity::None
         ));
+        // Later lifecycle markers stay dropped: they carry no content and would
+        // open a second, indistinguishable capsule for the same sub-agent.
+        for kind in ["interacted", "interrupted"] {
+            let other = meta_map(serde_json::json!({
+                "codex": { "subagent": { "threadId": "t1", "path": "/root/x", "activity": kind } }
+            }));
+            assert!(matches!(
+                classify_codex_subagent_activity(AgentType::Codex, Some(&other)),
+                CodexSubagentActivity::Other
+            ));
+        }
         // Absent meta and sibling codex meta keys (goal / collaboration) are not
         // subagent activity and must render normally.
-        assert!(!is_codex_subagent_activity(AgentType::Codex, None));
+        assert!(matches!(
+            classify_codex_subagent_activity(AgentType::Codex, None),
+            CodexSubagentActivity::None
+        ));
         let goal = meta_map(serde_json::json!({ "codex": { "goal": { "objective": "x" } } }));
-        assert!(!is_codex_subagent_activity(AgentType::Codex, Some(&goal)));
+        assert!(matches!(
+            classify_codex_subagent_activity(AgentType::Codex, Some(&goal)),
+            CodexSubagentActivity::None
+        ));
         let collab = meta_map(serde_json::json!({
             "codex": { "collaboration": { "tool": "spawnAgent" } }
         }));
-        assert!(!is_codex_subagent_activity(AgentType::Codex, Some(&collab)));
+        assert!(matches!(
+            classify_codex_subagent_activity(AgentType::Codex, Some(&collab)),
+            CodexSubagentActivity::None
+        ));
     }
 
     #[test]
@@ -11863,6 +13504,468 @@ mod tests {
         let stringly = meta_map(serde_json::json!({"steering": {"supported": "true"}}));
         assert!(!init_advertises_steering(Some(&stringly)));
         assert!(!init_advertises_steering(None));
+    }
+
+    #[test]
+    fn init_advertises_goal_requires_integer_version_at_least_1() {
+        // The real advertisements: codex-acp 1.2.0+ / claude-agent-acp 0.66.0+.
+        let codex = meta_map(serde_json::json!({"goal": {
+            "version": 1,
+            "controlMethod": "_session/goal",
+            "actions": ["set", "pause", "resume", "clear"],
+        }}));
+        assert!(init_advertises_goal(Some(&codex)));
+        // Future versions must keep selecting the neutral channel.
+        let v2 = meta_map(serde_json::json!({"goal": {"version": 2}}));
+        assert!(init_advertises_goal(Some(&v2)));
+
+        // Fail closed onto the legacy channel: sub-1, non-integer, stringly,
+        // absent, or wrongly-shaped advertisements.
+        for bad in [
+            serde_json::json!({"goal": {"version": 0}}),
+            serde_json::json!({"goal": {"version": 1.5}}),
+            serde_json::json!({"goal": {"version": "1"}}),
+            serde_json::json!({"goal": {}}),
+            serde_json::json!({"goal": true}),
+            serde_json::json!({"steering": {"supported": true}}),
+        ] {
+            let meta = meta_map(bad);
+            assert!(!init_advertises_goal(Some(&meta)));
+        }
+        assert!(!init_advertises_goal(None));
+    }
+
+    #[test]
+    fn session_info_goal_value_reads_exactly_one_channel() {
+        // A transitional adapter double-publishing the same transition through
+        // both namespaces (even across separate updates) must yield the goal
+        // from exactly ONE channel — the one pinned at initialize.
+        let both = meta_map(serde_json::json!({
+            "goal": {"objective": "neutral", "status": "active"},
+            "codex": {"goal": {"objective": "legacy", "status": "active"}},
+        }));
+        let neutral = session_info_goal_value(true, Some(&both)).expect("neutral value");
+        assert_eq!(
+            neutral.get("objective").and_then(|v| v.as_str()),
+            Some("neutral")
+        );
+        let legacy = session_info_goal_value(false, Some(&both)).expect("legacy value");
+        assert_eq!(
+            legacy.get("objective").and_then(|v| v.as_str()),
+            Some("legacy")
+        );
+
+        // Neutral-pinned connections ignore a legacy-only update (and vice
+        // versa) — the two updates of a double-publish collapse to one marker.
+        let legacy_only = meta_map(
+            serde_json::json!({"codex": {"goal": {"objective": "legacy", "status": "active"}}}),
+        );
+        assert!(session_info_goal_value(true, Some(&legacy_only)).is_none());
+        let neutral_only =
+            meta_map(serde_json::json!({"goal": {"objective": "neutral", "status": "active"}}));
+        assert!(session_info_goal_value(false, Some(&neutral_only)).is_none());
+
+        // `goal: null` IS a value (the clear signal), not an absent key.
+        let cleared = meta_map(serde_json::json!({"goal": null}));
+        assert!(matches!(
+            session_info_goal_value(true, Some(&cleared)),
+            Some(v) if v.is_null()
+        ));
+        assert!(session_info_goal_value(false, Some(&cleared)).is_none());
+        assert!(session_info_goal_value(true, None).is_none());
+    }
+
+    // --- live ACP session title (`session_info_update.title`) --------------
+
+    /// Drive one `session_info_update` carrying `title` through
+    /// `emit_conversation_update`.
+    async fn drive_session_info_title(state: &Arc<RwLock<SessionState>>, title: &str) {
+        let update: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "session_info_update",
+            "title": title,
+        }))
+        .expect("valid session_info_update wire shape");
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        emit_conversation_update(
+            state,
+            &EventEmitter::Noop,
+            AgentType::CodeBuddy,
+            update,
+            None,
+            &mut cache,
+            &mut cb,
+        )
+        .await;
+    }
+
+    /// Titles emitted on this connection so far, oldest first.
+    async fn emitted_native_titles(state: &Arc<RwLock<SessionState>>) -> Vec<String> {
+        state
+            .read()
+            .await
+            .recent_events_after(0)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|e| match &e.payload {
+                AcpEvent::NativeSessionTitle { title } => Some(title.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn title_test_state(conversation_id: Option<i32>) -> Arc<RwLock<SessionState>> {
+        let mut st = SessionState::new(
+            "conn-title".to_string(),
+            AgentType::CodeBuddy,
+            None,
+            "win".to_string(),
+            None,
+        );
+        st.conversation_id = conversation_id;
+        Arc::new(RwLock::new(st))
+    }
+
+    /// A changed title emits; the SAME title arriving again does not. CodeBuddy
+    /// (`sendPendingTitleUpdate`) resends its 80-code-unit fallback after every
+    /// completed prompt with no last-sent guard of its own, and that string
+    /// differs from the 100-char title our own parser derives from the same
+    /// first message — so without this skip the sidebar name would flip on
+    /// every turn (live write, then session-file parse, repeat).
+    #[tokio::test]
+    async fn session_info_title_emits_once_and_skips_an_identical_repeat() {
+        let state = title_test_state(Some(7));
+
+        drive_session_info_title(&state, "Fix the login flow").await;
+        drive_session_info_title(&state, "Fix the login flow").await;
+        drive_session_info_title(&state, "  Fix the login flow  ").await; // same after trim
+        drive_session_info_title(&state, "Fix the signup flow").await;
+
+        assert_eq!(
+            emitted_native_titles(&state).await,
+            vec![
+                "Fix the login flow".to_string(),
+                "Fix the signup flow".to_string()
+            ],
+            "only a CHANGED title may reach the lifecycle worker"
+        );
+    }
+
+    /// A title published before the first prompt binds the row has nowhere to
+    /// land, so it is dropped — and deliberately NOT remembered, so the resend
+    /// that follows `ConversationLinked` is still accepted. Guards the
+    /// `conversation_id.is_some()` half of the skip: a stale cache here would
+    /// leave the row "Untitled" for the rest of the connection.
+    #[tokio::test]
+    async fn session_info_title_dropped_while_unbound_is_accepted_after_link() {
+        let state = title_test_state(None);
+
+        drive_session_info_title(&state, "Fix the login flow").await;
+        assert!(
+            emitted_native_titles(&state).await.is_empty(),
+            "no row to write to yet"
+        );
+        assert!(
+            state.read().await.last_native_title.is_none(),
+            "a dropped title must not poison the skip-cache"
+        );
+
+        state
+            .write()
+            .await
+            .apply_event(&AcpEvent::ConversationLinked {
+                conversation_id: 7,
+                folder_id: 1,
+                parent_conversation_id: None,
+                parent_tool_use_id: None,
+            });
+
+        drive_session_info_title(&state, "Fix the login flow").await;
+        assert_eq!(
+            emitted_native_titles(&state).await,
+            vec!["Fix the login flow".to_string()],
+            "the same title must be accepted once the row exists"
+        );
+    }
+
+    /// Goal-only / metadata-only `session_info_update`s (the common case for
+    /// codex `/goal` transitions) carry no title and must not queue the
+    /// lifecycle worker.
+    #[tokio::test]
+    async fn session_info_without_a_title_emits_no_native_title() {
+        let state = title_test_state(Some(7));
+        for wire in [
+            serde_json::json!({"sessionUpdate": "session_info_update"}),
+            serde_json::json!({"sessionUpdate": "session_info_update", "title": null}),
+            serde_json::json!({"sessionUpdate": "session_info_update", "title": "   "}),
+        ] {
+            let update: SessionUpdate =
+                serde_json::from_value(wire).expect("valid session_info_update wire shape");
+            let mut cache = ToolCallOutputCache::default();
+            let mut cb = CodeBuddyLiveState::default();
+            emit_conversation_update(
+                &state,
+                &EventEmitter::Noop,
+                AgentType::Codex,
+                update,
+                None,
+                &mut cache,
+                &mut cb,
+            )
+            .await;
+        }
+        assert!(emitted_native_titles(&state).await.is_empty());
+    }
+
+    #[test]
+    fn goal_advertised_control_reads_method_and_actions_or_falls_back() {
+        // claude 0.66+ / codex 1.2+ advertisements.
+        let claude = meta_map(serde_json::json!({"goal": {
+            "version": 1,
+            "controlMethod": "_session/goal",
+            "actions": ["set", "clear"],
+        }}));
+        assert_eq!(
+            goal_advertised_control(Some(&claude)),
+            Some((
+                "_session/goal".to_string(),
+                vec!["set".to_string(), "clear".to_string()]
+            ))
+        );
+        // Advertised-but-empty actions are honored as "no controls" — the
+        // card must not offer affordances the adapter never implemented.
+        let none_offered = meta_map(serde_json::json!({"goal": {
+            "version": 1,
+            "controlMethod": "_session/goal",
+            "actions": [],
+        }}));
+        assert_eq!(
+            goal_advertised_control(Some(&none_offered)),
+            Some(("_session/goal".to_string(), Vec::new()))
+        );
+        // No neutral advertisement / no usable method ⇒ None (legacy
+        // defaults stay in force).
+        let no_goal = meta_map(serde_json::json!({"steering": {"supported": true}}));
+        assert_eq!(goal_advertised_control(Some(&no_goal)), None);
+        let blank_method = meta_map(serde_json::json!({"goal": {
+            "version": 1,
+            "controlMethod": "   ",
+            "actions": ["clear"],
+        }}));
+        assert_eq!(goal_advertised_control(Some(&blank_method)), None);
+        assert_eq!(goal_advertised_control(None), None);
+    }
+
+    #[test]
+    fn the_legacy_vocabulary_is_resolved_at_initialize_not_at_construction() {
+        // A fresh session knows NOTHING: a snapshot read during the handshake
+        // (which happens — `spawn_agent` returns before `initialize` lands)
+        // must not hand the card a legacy pair it latches forever.
+        let fresh = SessionState::new(
+            "c-goal".to_string(),
+            AgentType::ClaudeCode,
+            None,
+            "w".to_string(),
+            None,
+        );
+        assert_eq!(fresh.goal_actions, None);
+        assert_eq!(fresh.to_snapshot().goal_actions, None);
+        // ... and `None` reaches the client as an explicit null, not as an
+        // absent field — absent is reserved for a server too old to have it,
+        // which the client still maps to the legacy pair.
+        let wire = serde_json::to_value(fresh.to_snapshot()).unwrap();
+        assert_eq!(wire.get("goal_actions"), Some(&serde_json::Value::Null));
+
+        // Initialize is where both cases are decided. Advertised wins…
+        assert_eq!(
+            resolve_goal_control(Some((
+                "_session/goal".to_string(),
+                vec!["set".to_string(), "clear".to_string()],
+            ))),
+            (
+                Some("_session/goal".to_string()),
+                vec!["set".to_string(), "clear".to_string()]
+            )
+        );
+        // …and a non-advertising adapter resolves to the legacy pair, keeping
+        // the method the state was built with.
+        assert_eq!(
+            resolve_goal_control(None),
+            (None, vec!["pause".to_string(), "clear".to_string()])
+        );
+    }
+
+    #[test]
+    fn air_session_failure_requires_wellformed_versioned_envelope() {
+        let ok = meta_map(serde_json::json!({"jetbrains": {"air": {
+            "version": 1,
+            "sessionFailure": {"id": "t1:error", "revision": 1},
+        }}}));
+        assert!(air_session_failure(Some(&ok)).is_some());
+
+        // Missing/zero/stringly version, or a failure outside the air
+        // envelope, must yield nothing.
+        for bad in [
+            serde_json::json!({"jetbrains": {"air": {"sessionFailure": {"id": "x", "revision": 1}}}}),
+            serde_json::json!({"jetbrains": {"air": {"version": 0, "sessionFailure": {}}}}),
+            serde_json::json!({"jetbrains": {"air": {"version": "1", "sessionFailure": {}}}}),
+            serde_json::json!({"jetbrains": {"sessionFailure": {"id": "x", "revision": 1}}}),
+            serde_json::json!({"air": {"version": 1, "sessionFailure": {}}}),
+        ] {
+            let meta = meta_map(bad);
+            assert!(air_session_failure(Some(&meta)).is_none());
+        }
+        assert!(air_session_failure(None).is_none());
+    }
+
+    #[test]
+    fn response_session_failure_reads_the_prompt_response_carrier() {
+        // claude `failActiveWithSessionFailure` / codex
+        // `terminalFailurePromptResponse` both attach a turn's terminal record
+        // to the prompt response `_meta` under the SAME jetbrains.air envelope
+        // the update channel uses, with a disguised `end_turn` stop reason —
+        // this carrier is the only wire delivery of claude terminal failures.
+        let meta = meta_map(serde_json::json!({"jetbrains": {"air": {
+            "version": 1,
+            "sessionFailure": {
+                "id": "prompt-1:error",
+                "revision": 6,
+                "category": "connection",
+                "severity": "error",
+                "title": "The connection to Claude was lost.",
+                "actions": ["new_session"],
+            },
+        }}}));
+        let record = response_session_failure(Some(&meta)).expect("record");
+        assert_eq!(record.id, "prompt-1:error");
+        assert_eq!(record.revision, 6);
+        assert_eq!(record.severity, "error");
+        assert_eq!(record.actions, vec!["new_session".to_string()]);
+
+        // Same gates as the update channel: malformed envelope or missing
+        // identity ⇒ no record (and no synthetic-empty suppression).
+        let unversioned = meta_map(serde_json::json!({"jetbrains": {"air": {
+            "sessionFailure": {"id": "x", "revision": 1},
+        }}}));
+        assert!(response_session_failure(Some(&unversioned)).is_none());
+        let no_identity = meta_map(serde_json::json!({"jetbrains": {"air": {
+            "version": 1,
+            "sessionFailure": {"title": "no id"},
+        }}}));
+        assert!(response_session_failure(Some(&no_identity)).is_none());
+        assert!(response_session_failure(None).is_none());
+    }
+
+    #[test]
+    fn parse_session_failure_record_requires_identity_and_stays_lenient() {
+        // The real codex shape (SESSION_FAILURE_POLICY: auth_required →
+        // access/[login]).
+        let full = serde_json::json!({
+            "id": "turn-9:error",
+            "revision": 2,
+            "category": "access",
+            "severity": "error",
+            "title": "Authentication required.",
+            "details": "Token expired",
+            "actions": ["login"],
+        });
+        let record = parse_session_failure_record(&full).expect("record");
+        assert_eq!(record.id, "turn-9:error");
+        assert_eq!(record.revision, 2);
+        assert_eq!(record.category, "access");
+        assert_eq!(record.severity, "error");
+        assert_eq!(record.title, "Authentication required.");
+        assert_eq!(record.details.as_deref(), Some("Token expired"));
+        assert_eq!(record.actions, vec!["login".to_string()]);
+        assert!(!record.resolved);
+
+        // id + revision are HARD requirements — no identity, no merge.
+        for bad in [
+            serde_json::json!({"revision": 1, "title": "x"}),
+            serde_json::json!({"id": "", "revision": 1}),
+            serde_json::json!({"id": "   ", "revision": 1}),
+            serde_json::json!({"id": "x", "title": "no revision"}),
+            serde_json::json!({"id": "x", "revision": 0}),
+            serde_json::json!({"id": "x", "revision": -1}),
+            serde_json::json!({"id": "x", "revision": "1"}),
+        ] {
+            assert!(parse_session_failure_record(&bad).is_none(), "{bad:?}");
+        }
+
+        // Everything else is lenient: unknown vocabulary passes through as
+        // strings, blanks default, non-string action entries are skipped.
+        let sparse = serde_json::json!({
+            "id": "notice-1",
+            "revision": 1,
+            "category": "quantum",
+            "actions": ["retry", 42, "sing"],
+        });
+        let record = parse_session_failure_record(&sparse).expect("record");
+        assert_eq!(record.category, "quantum");
+        assert_eq!(record.severity, "error");
+        assert_eq!(record.title, "");
+        assert_eq!(record.details, None);
+        assert_eq!(
+            record.actions,
+            vec!["retry".to_string(), "sing".to_string()]
+        );
+    }
+
+    #[test]
+    fn client_capabilities_advertise_air_for_claude_and_codex_only() {
+        // Both AIR speakers must send EXACTLY the shape the adapters gate on:
+        // integer version >= 1 plus "sessionFailure" in the capabilities
+        // array (`clientSupportsTypedSessionFailures` in codex,
+        // `supportsAirSessionFailures` in claude).
+        for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+            let caps =
+                serde_json::to_value(build_client_capabilities(agent, HostToolsPolicy::Default))
+                    .unwrap();
+            let air = caps
+                .get("_meta")
+                .and_then(|m| m.get("jetbrains"))
+                .and_then(|j| j.get("air"))
+                .unwrap_or_else(|| panic!("{agent:?} must advertise jetbrains.air"));
+            assert_eq!(air.get("version").and_then(|v| v.as_i64()), Some(1));
+            let capabilities = air
+                .get("capabilities")
+                .and_then(|c| c.as_array())
+                .unwrap_or_else(|| panic!("{agent:?} must advertise an AIR capabilities array"));
+            assert!(capabilities
+                .iter()
+                .any(|v| v.as_str() == Some("sessionFailure")));
+            // And nothing else. Adding a capability here is not free: it is
+            // what turns a per-prompt request on, and "agentFileChangeReport"
+            // (claude-agent-acp 0.69.0 / codex-acp 1.4.0) buys an extra model
+            // round-trip per turn for a clamped, self-reported subset of what
+            // the `workspace_state` watcher already sees. See the reasoning at
+            // the advertisement site before relaxing this.
+            assert_eq!(
+                capabilities,
+                &vec![serde_json::Value::String("sessionFailure".to_string())],
+                "{agent:?} must advertise ONLY sessionFailure"
+            );
+        }
+        // Claude keeps its subagent-transcript flag alongside.
+        let claude = serde_json::to_value(build_client_capabilities(
+            AgentType::ClaudeCode,
+            HostToolsPolicy::Default,
+        ))
+        .unwrap();
+        assert_eq!(
+            claude
+                .get("_meta")
+                .and_then(|m| m.get("subagent-transcript"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        // Non-AIR agents advertise nothing under jetbrains.
+        for agent in [AgentType::Gemini, AgentType::Grok, AgentType::OpenCode] {
+            let caps =
+                serde_json::to_value(build_client_capabilities(agent, HostToolsPolicy::Default))
+                    .unwrap();
+            assert!(caps.get("_meta").and_then(|m| m.get("jetbrains")).is_none());
+        }
     }
 
     #[test]
@@ -12205,6 +14308,261 @@ mod tests {
         }
     }
 
+    fn antigravity_runtime(method: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(ANTIGRAVITY_AUTH_METHOD_ENV.to_string(), method.to_string())])
+    }
+
+    #[test]
+    fn antigravity_env_policy_scrubs_credentials_the_chosen_method_does_not_use() {
+        // Browser login: a GEMINI_API_KEY (or the Agent Platform trio)
+        // inherited from the developer's shell must be cleared, or the server
+        // silently authenticates as something the user did not pick.
+        let mut env = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("GEMINI_API_KEY".to_string(), "leaked".to_string()),
+            ("GOOGLE_CLOUD_PROJECT".to_string(), "stale".to_string()),
+        ];
+        apply_antigravity_env_policy(&mut env, &antigravity_runtime("oauth-personal"));
+        for key in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT"] {
+            let hits: Vec<_> = env.iter().filter(|(k, _)| k == key).collect();
+            assert_eq!(hits.len(), 1, "{key} must appear exactly once");
+            assert!(hits[0].1.is_empty(), "{key} must be cleared for env_remove");
+        }
+        assert!(env.iter().any(|(k, v)| k == "PATH" && v == "/usr/bin"));
+
+        // gemini-api-key keeps its own credential and clears the rest.
+        let mut env = vec![
+            ("GEMINI_API_KEY".to_string(), "real-key".to_string()),
+            ("GOOGLE_API_KEY".to_string(), "leaked".to_string()),
+        ];
+        apply_antigravity_env_policy(&mut env, &antigravity_runtime("gemini-api-key"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GEMINI_API_KEY" && v == "real-key"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GOOGLE_API_KEY" && v.is_empty()));
+
+        // Agent Platform keeps the GOOGLE_* trio, drops GEMINI_API_KEY.
+        let mut env = vec![
+            ("GOOGLE_CLOUD_PROJECT".to_string(), "p".to_string()),
+            ("GOOGLE_CLOUD_LOCATION".to_string(), "global".to_string()),
+            ("GEMINI_API_KEY".to_string(), "leaked".to_string()),
+        ];
+        apply_antigravity_env_policy(&mut env, &antigravity_runtime("agent-platform"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GOOGLE_CLOUD_PROJECT" && v == "p"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GOOGLE_CLOUD_LOCATION" && v == "global"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GEMINI_API_KEY" && v.is_empty()));
+    }
+
+    #[test]
+    fn antigravity_env_policy_leaves_unrecorded_and_unknown_methods_alone() {
+        // Legacy rows (no recorded method) and a garbage value must not have
+        // an operator-provided container env scrubbed out from under them.
+        for runtime in [BTreeMap::new(), antigravity_runtime("not-a-method")] {
+            let mut env = vec![("GEMINI_API_KEY".to_string(), "operator".to_string())];
+            apply_antigravity_env_policy(&mut env, &runtime);
+            assert_eq!(env.len(), 1);
+            assert_eq!(env[0].1, "operator");
+        }
+    }
+
+    #[test]
+    fn antigravity_settings_read_fails_closed_on_anything_it_cannot_rewrite() {
+        // The vendor's own writer records the rule this mirrors: "a file that
+        // cannot be parsed is left alone, since rewriting it would delete
+        // content we could not read." Only a MISSING file is safe to create.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert!(matches!(read_antigravity_settings(&path), Ok(None)));
+
+        // Hjson: the server accepts comments and trailing commas, codeg's
+        // parser does not — so this lands in the give-up branch instead of
+        // being flattened into strict JSON with the comments (and anything
+        // else codeg misread) gone.
+        std::fs::write(
+            &path,
+            "{\n  // my key\n  \"auth\": { \"type\": \"gemini-api-key\" },\n}\n",
+        )
+        .unwrap();
+        assert!(read_antigravity_settings(&path).is_err());
+
+        // A JSON array/scalar root is not editable either.
+        std::fs::write(&path, "[1, 2]").unwrap();
+        assert!(read_antigravity_settings(&path).is_err());
+
+        std::fs::write(&path, r#"{"auth":{"type":"oauth-business"},"keep":1}"#).unwrap();
+        let parsed = read_antigravity_settings(&path).unwrap().unwrap();
+        assert_eq!(parsed["keep"], 1);
+    }
+
+    #[test]
+    fn antigravity_settings_sync_leaves_an_unparseable_file_untouched() {
+        // End to end: a hand-commented settings.json must survive a launch
+        // byte for byte, warning instead of clobbering.
+        let dir = tempfile::tempdir().unwrap();
+        let acp_dir = dir.path().join("antigravity-acp");
+        std::fs::create_dir_all(&acp_dir).unwrap();
+        let path = acp_dir.join("settings.json");
+        let original = "{\n  // hand written\n  \"gcp\": { \"project\": \"mine\" },\n}\n";
+        std::fs::write(&path, original).unwrap();
+
+        let merged = vec![(
+            "GEMINI_HOME".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        )];
+        let runtime = antigravity_runtime("oauth-business");
+        sync_antigravity_settings_file(&merged, &runtime);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn antigravity_settings_sync_writes_through_gemini_home_and_defaults_the_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("antigravity-acp").join("settings.json");
+        let merged = vec![(
+            "GEMINI_HOME".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        )];
+
+        // No recorded method and no file: fall back to the method the panel
+        // DISPLAYS as selected, so a user who never opened it still gets a
+        // session instead of `Authentication required`.
+        sync_antigravity_settings_file(&merged, &BTreeMap::new());
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["auth"]["type"], "oauth-personal");
+
+        // An `auth.type` already on disk is NEVER overridden by that fallback.
+        std::fs::write(&path, r#"{"auth":{"type":"gemini-api-key"},"keep":7}"#).unwrap();
+        sync_antigravity_settings_file(&merged, &BTreeMap::new());
+        let held: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(held["auth"]["type"], "gemini-api-key");
+        assert_eq!(held["keep"], 7);
+
+        // An explicit panel choice does override it, and keeps foreign keys.
+        let mut runtime = antigravity_runtime("oauth-business");
+        runtime.insert("GOOGLE_CLOUD_PROJECT".to_string(), "acme".to_string());
+        runtime.insert("GOOGLE_CLOUD_LOCATION".to_string(), "eu".to_string());
+        sync_antigravity_settings_file(&merged, &runtime);
+        let updated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(updated["auth"]["type"], "oauth-business");
+        assert_eq!(updated["gcp"]["project"], "acme");
+        assert_eq!(updated["gcp"]["location"], "eu");
+        assert_eq!(updated["keep"], 7);
+    }
+
+    #[test]
+    fn antigravity_settings_merge_preserves_foreign_keys_and_skips_no_op_writes() {
+        // The file is the USER's: the server parses it as Hjson and documents
+        // it as user-provided, so a codeg write may only touch `auth.type` and
+        // the `gcp` block.
+        let existing = serde_json::json!({
+            "auth": { "type": "gemini-api-key" },
+            "gcp": { "project": "hand-written", "location": "eu" },
+            "someFutureKey": { "nested": [1, 2, 3] }
+        });
+        let merged =
+            merge_antigravity_settings(Some(existing.clone()), "oauth-business", None, None)
+                .expect("editable")
+                .expect("auth.type changed, so this is a real write");
+        assert_eq!(merged["auth"]["type"], "oauth-business");
+        // No panel values supplied ⇒ the hand-written gcp block is untouched.
+        assert_eq!(merged["gcp"]["project"], "hand-written");
+        assert_eq!(merged["gcp"]["location"], "eu");
+        assert_eq!(merged["someFutureKey"]["nested"][2], 3);
+
+        // Panel values overwrite only the fields they carry.
+        let merged = merge_antigravity_settings(
+            Some(existing.clone()),
+            "oauth-business",
+            Some("proj"),
+            None,
+        )
+        .expect("editable")
+        .expect("changed");
+        assert_eq!(merged["gcp"]["project"], "proj");
+        assert_eq!(merged["gcp"]["location"], "eu", "location was not supplied");
+
+        // Already says exactly this ⇒ no write.
+        assert!(
+            merge_antigravity_settings(Some(existing), "gemini-api-key", None, None)
+                .expect("editable")
+                .is_none()
+        );
+
+        // No file at all: created from scratch. (A non-object ROOT never gets
+        // here — the read side already refused it.)
+        let created = merge_antigravity_settings(None, "oauth-personal", Some("p"), Some("global"))
+            .expect("editable")
+            .expect("created");
+        assert_eq!(created["auth"]["type"], "oauth-personal");
+        assert_eq!(created["gcp"]["project"], "p");
+        assert_eq!(created["gcp"]["location"], "global");
+    }
+
+    #[test]
+    fn antigravity_settings_merge_refuses_blocks_that_are_not_objects() {
+        // The vendor's `_auth_block` logs "not editing %r because `auth` is not
+        // an object" and gives up. Replacing that value with an object would
+        // delete whatever the user meant by it, so codeg refuses too.
+        let odd_auth = serde_json::json!({ "auth": "managed-elsewhere", "keep": 1 });
+        assert!(merge_antigravity_settings(Some(odd_auth), "oauth-personal", None, None).is_err());
+
+        // Same for `gcp` — but ONLY when there is actually something to write
+        // into it. With no project or location supplied, a strange `gcp` is
+        // none of codeg's business and must not block the `auth.type` update.
+        let odd_gcp = serde_json::json!({ "gcp": ["not", "an", "object"] });
+        assert!(merge_antigravity_settings(
+            Some(odd_gcp.clone()),
+            "oauth-personal",
+            Some("p"),
+            None
+        )
+        .is_err());
+        let untouched = merge_antigravity_settings(Some(odd_gcp), "oauth-personal", None, None)
+            .expect("editable")
+            .expect("auth.type still written");
+        assert_eq!(untouched["auth"]["type"], "oauth-personal");
+        assert_eq!(untouched["gcp"], serde_json::json!(["not", "an", "object"]));
+
+        // An explicit JSON null reads as absent, not as a foreign shape.
+        let null_auth = serde_json::json!({ "auth": null, "keep": 2 });
+        let filled = merge_antigravity_settings(Some(null_auth), "gemini-api-key", None, None)
+            .expect("editable")
+            .expect("changed");
+        assert_eq!(filled["auth"]["type"], "gemini-api-key");
+        assert_eq!(filled["keep"], 2);
+    }
+
+    #[test]
+    fn antigravity_settings_sync_leaves_a_foreign_auth_block_untouched() {
+        // End to end: the refusal must reach the file, not just the merge.
+        let dir = tempfile::tempdir().unwrap();
+        let acp_dir = dir.path().join("antigravity-acp");
+        std::fs::create_dir_all(&acp_dir).unwrap();
+        let path = acp_dir.join("settings.json");
+        let original = r#"{"auth":"managed-elsewhere","keep":1}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let merged = vec![(
+            "GEMINI_HOME".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        )];
+        sync_antigravity_settings_file(&merged, &antigravity_runtime("oauth-personal"));
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
     #[test]
     fn codex_env_policy_forces_mcp_filter_off_and_overrides_user_twin() {
         // Codex gets the flag injected so codex-acp never drops the injected
@@ -12498,10 +14856,19 @@ mod tests {
         );
         assert!(claude.get("elicitation").is_none());
 
-        // Codex: form elicitation, no subagent-transcript meta.
+        // Codex: form elicitation; its `_meta` carries ONLY the AIR
+        // advertisement (no subagent-transcript, which is claude's opt-in).
         let codex = caps_of(AgentType::Codex);
         assert!(codex.get("elicitation").is_some());
-        assert!(codex.get("_meta").is_none());
+        assert!(codex["_meta"].get("subagent-transcript").is_none());
+        assert!(codex["_meta"].get("jetbrains").is_some());
+
+        // DeepSeek: form elicitation too — deepseek-acp routes its
+        // ask_user_question + plan review through `elicitation/create` forms
+        // when the bit is advertised (button fallback otherwise).
+        let deepseek = caps_of(AgentType::DeepSeek);
+        assert!(deepseek.get("elicitation").is_some());
+        assert!(deepseek.get("_meta").is_none());
 
         // Everyone else: neither gate; fs + terminal always advertised.
         let other = caps_of(AgentType::Gemini);
@@ -13904,13 +16271,17 @@ mod tests {
         use sacp::schema::{ContentChunk, Plan};
 
         let mut probe = TurnOutputProbe::new(0);
-        probe.note_update(&SessionUpdate::Plan(Plan::new(Vec::new())));
+        probe.note_update(
+            AgentType::ClaudeCode,
+            &SessionUpdate::Plan(Plan::new(Vec::new())),
+        );
         assert!(!probe.saw_agent_output, "Plan is not agent output");
         assert!(probe.saw_metadata_update);
 
-        probe.note_update(&SessionUpdate::AgentMessageChunk(ContentChunk::new(
-            "hi".into(),
-        )));
+        probe.note_update(
+            AgentType::ClaudeCode,
+            &SessionUpdate::AgentMessageChunk(ContentChunk::new("hi".into())),
+        );
         assert!(probe.saw_agent_output);
     }
 
@@ -16392,6 +18763,992 @@ mod tests {
             raw_output.is_some(),
             "non-Grok agents keep the existing json_value_to_text behavior"
         );
+    }
+
+    /// Drive one `SessionUpdate` through `emit_conversation_update` and return
+    /// the tool-call event fields the pi bridge tests assert on. Shared so each
+    /// case reads as wire-in / card-out.
+    async fn pi_emit(
+        agent_type: AgentType,
+        cache: &mut ToolCallOutputCache,
+        cb: &mut CodeBuddyLiveState,
+        wire: serde_json::Value,
+    ) -> (Option<String>, Option<String>, Option<String>, Option<bool>) {
+        let st = SessionState::new(
+            "conn-pi".to_string(),
+            agent_type,
+            None,
+            "win".to_string(),
+            None,
+        );
+        let state = Arc::new(RwLock::new(st));
+        let emitter = EventEmitter::Noop;
+        let update: SessionUpdate =
+            serde_json::from_value(wire).expect("valid tool-call wire shape");
+
+        emit_conversation_update(&state, &emitter, agent_type, update, None, cache, cb).await;
+
+        let guard = state.read().await;
+        let events = guard.recent_events_after(0).expect("events recorded");
+        events
+            .iter()
+            .find_map(|e| match &e.payload {
+                AcpEvent::ToolCall {
+                    content,
+                    raw_input,
+                    raw_output,
+                    ..
+                } => Some((content.clone(), raw_input.clone(), raw_output.clone(), None)),
+                AcpEvent::ToolCallUpdate {
+                    content,
+                    raw_input,
+                    raw_output,
+                    raw_output_append,
+                    ..
+                } => Some((
+                    content.clone(),
+                    raw_input.clone(),
+                    raw_output.clone(),
+                    *raw_output_append,
+                )),
+                _ => None,
+            })
+            .expect("a tool-call event is emitted")
+    }
+
+    fn pi_open_bash(tool_call_id: &str, title: &str) -> serde_json::Value {
+        serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": tool_call_id,
+            "title": title,
+            "kind": "execute",
+            "status": "pending",
+            "content": [{"type": "terminal", "terminalId": tool_call_id}],
+            "_meta": {"terminal_info": {"terminal_id": tool_call_id, "cwd": "/w"}},
+        })
+    }
+
+    /// #519: pi hosts its own terminal, so the `[Terminal: <id>]` placeholder can
+    /// never be superseded from the terminal channel — it must not be rendered.
+    /// And pi sends no `rawInput`, so the command has to be synthesized from the
+    /// title or the card becomes a generic tool literally NAMED `node --version`.
+    #[tokio::test]
+    async fn pi_bash_open_strips_placeholder_and_synthesizes_command_input() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (content, raw_input, _, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            pi_open_bash("call_Q0KKW", "node --version"),
+        )
+        .await;
+
+        assert!(
+            content.is_none(),
+            "the dead [Terminal: …] placeholder must not reach the card: {content:?}"
+        );
+        assert_eq!(
+            raw_input.as_deref(),
+            Some(r#"{"command":"node --version"}"#),
+            "the command is synthesized so the call classifies as bash"
+        );
+        assert!(
+            cb.pi_terminal_calls.contains_key("call_Q0KKW"),
+            "the call is registered for the later output frames, which carry only its id"
+        );
+    }
+
+    /// pi's first frame titles the call with the bare tool name (its arguments
+    /// are still partial JSON). Synthesizing there would flash `$ bash`.
+    #[tokio::test]
+    async fn pi_bash_open_titled_bash_synthesizes_no_input() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (_, raw_input, _, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            pi_open_bash("call_1", "bash"),
+        )
+        .await;
+        assert!(
+            raw_input.is_none(),
+            "the bare tool-name title is not a command: {raw_input:?}"
+        );
+    }
+
+    /// The whole point of #519: the output lives ONLY in `_meta.terminal_output`,
+    /// and has to reach the card's `raw_output` stream — first chunk replacing,
+    /// later chunks appending.
+    #[tokio::test]
+    async fn pi_terminal_output_meta_streams_as_raw_output() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let _ = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            pi_open_bash("call_1", "node --version"),
+        )
+        .await;
+
+        let (_, _, first, first_append) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "in_progress",
+                "_meta": {"terminal_output": {"terminal_id": "call_1", "data": "v24.14.0\n"}},
+            }),
+        )
+        .await;
+        assert_eq!(first.as_deref(), Some("v24.14.0\n"));
+        assert_eq!(
+            first_append,
+            Some(false),
+            "the first chunk replaces whatever the opening frame left on the card"
+        );
+
+        let (_, _, second, second_append) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "in_progress",
+                "_meta": {"terminal_output": {"terminal_id": "call_1", "data": "more\n"}},
+            }),
+        )
+        .await;
+        assert_eq!(second.as_deref(), Some("more\n"));
+        assert_eq!(second_append, Some(true), "later chunks append");
+    }
+
+    /// A failing command must show its stderr AND its exit code, and the final
+    /// frame must release the tracking entry.
+    #[tokio::test]
+    async fn pi_terminal_exit_meta_appends_exit_line_and_releases_entry() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let _ = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            pi_open_bash("call_1", "some-command"),
+        )
+        .await;
+
+        let (_, _, raw_output, append) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "failed",
+                "_meta": {
+                    "terminal_output": {"terminal_id": "call_1", "data": "command not found"},
+                    "terminal_exit": {"terminal_id": "call_1", "exit_code": 127, "signal": null},
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            raw_output.as_deref(),
+            Some("command not found\n[terminal exited: exit code: 127]"),
+            "stderr and the exit code both reach the card"
+        );
+        assert_eq!(append, Some(false));
+        assert!(
+            !cb.pi_terminal_calls.contains_key("call_1"),
+            "a final status releases the entry"
+        );
+    }
+
+    /// A command that prints nothing still has to supersede the placeholder,
+    /// otherwise the card would sit on `[Terminal: …]` forever.
+    #[tokio::test]
+    async fn pi_silent_command_still_emits_the_exit_line() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let _ = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            pi_open_bash("call_1", "mkdir out"),
+        )
+        .await;
+
+        let (_, _, raw_output, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "completed",
+                "_meta": {
+                    "terminal_exit": {"terminal_id": "call_1", "exit_code": 0, "signal": null},
+                },
+            }),
+        )
+        .await;
+        assert_eq!(
+            raw_output.as_deref(),
+            Some("[terminal exited: exit code: 0]")
+        );
+    }
+
+    /// pi's terminal ids are its own tool-call ids — `TerminalRuntime` only ever
+    /// mints `term_<uuid>`, so registering them bought ten guaranteed-miss polls
+    /// per bash call. Every other agent must keep being tracked, and so must a pi
+    /// terminal that arrives WITHOUT the self-hosted marker (a future pi-acp that
+    /// delegates `terminal/*` for real).
+    #[test]
+    fn pi_virtual_terminals_are_not_registered_for_host_polling() {
+        let wire = pi_open_bash("call_1", "pwd");
+        let update: SessionUpdate =
+            serde_json::from_value(wire.clone()).expect("valid tool_call wire shape");
+        let mut tracked = HashMap::new();
+        assert!(!track_terminal_tool_calls(
+            AgentType::Pi,
+            &update,
+            &mut tracked
+        ));
+        assert!(tracked.is_empty(), "pi's terminals are not host-owned");
+
+        let update: SessionUpdate =
+            serde_json::from_value(wire).expect("valid tool_call wire shape");
+        let mut tracked = HashMap::new();
+        assert!(track_terminal_tool_calls(
+            AgentType::ClaudeCode,
+            &update,
+            &mut tracked
+        ));
+        assert!(
+            tracked.contains_key("call_1"),
+            "a host-owned terminal is still polled"
+        );
+
+        let mut host_owned = pi_open_bash("call_1", "pwd");
+        host_owned
+            .as_object_mut()
+            .expect("wire object")
+            .remove("_meta");
+        let update: SessionUpdate =
+            serde_json::from_value(host_owned).expect("valid tool_call wire shape");
+        let mut tracked = HashMap::new();
+        assert!(track_terminal_tool_calls(
+            AgentType::Pi,
+            &update,
+            &mut tracked
+        ));
+        assert!(
+            tracked.contains_key("call_1"),
+            "an unmarked terminal is polled even on pi — the gate is the marker, not the agent"
+        );
+    }
+
+    /// Collision guard: pi-acp's meta keys are UNNAMESPACED (`terminal_output`,
+    /// not `pi/terminalOutput`), so the bridge must be inert on every other agent.
+    #[tokio::test]
+    async fn non_pi_agents_ignore_the_unnamespaced_terminal_meta() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (content, raw_input, raw_output, _) = pi_emit(
+            AgentType::ClaudeCode,
+            &mut cache,
+            &mut cb,
+            pi_open_bash("call_1", "node --version"),
+        )
+        .await;
+
+        assert_eq!(
+            content.as_deref(),
+            Some("[Terminal: call_1]"),
+            "a host-owned terminal keeps its placeholder until the poller supersedes it"
+        );
+        assert!(raw_input.is_none(), "no command is synthesized for non-pi");
+        assert!(raw_output.is_none());
+
+        let (_, _, raw_output, _) = pi_emit(
+            AgentType::ClaudeCode,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "completed",
+                "_meta": {"terminal_output": {"terminal_id": "call_1", "data": "leak"}},
+            }),
+        )
+        .await;
+        assert!(
+            raw_output.is_none(),
+            "another agent's identically-named meta must not stream: {raw_output:?}"
+        );
+        assert!(cb.pi_terminal_calls.is_empty());
+    }
+
+    /// A pi `bash` that does NOT ride the `_meta` channel (every pi-acp build
+    /// before the terminal bridge — and every non-bash pi tool on all of them)
+    /// reports its result twice: flattened into `content[]`, and verbatim as the
+    /// MCP envelope in `rawOutput`. Regression: the envelope was stringified into
+    /// `raw_output`, which WINS over `content` in the live store, so the terminal
+    /// card printed `{"content":[{"text":"$ next build…","type":"text"}]}`.
+    #[tokio::test]
+    async fn pi_tool_result_envelope_does_not_shadow_content() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (content, _, raw_output, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_fb7",
+                "status": "completed",
+                "content": [{
+                    "type": "content",
+                    "content": {"type": "text", "text": "$ next build\n✓ Compiled\n"},
+                }],
+                "rawOutput": {
+                    "content": [{"type": "text", "text": "$ next build\n✓ Compiled\n"}],
+                },
+            }),
+        )
+        .await;
+
+        assert!(
+            raw_output.is_none(),
+            "the envelope is a second copy of `content` — shipping it renders the \
+             JSON source as the terminal body: {raw_output:?}"
+        );
+        assert_eq!(
+            content.as_deref(),
+            Some("$ next build\n✓ Compiled\n"),
+            "the clean content channel carries the command output"
+        );
+    }
+
+    /// Sequence guard for the whole command, not one frame in isolation.
+    ///
+    /// pi's bash tool fires `onUpdate({content: []})` before the process writes a
+    /// byte, so frame 1 of EVERY command is the empty envelope — and pi-acp, with
+    /// nothing to flatten, puts its own `JSON.stringify(result)` on `content[]`.
+    /// Emitting either one poisons the card: the stringified `{"content":[]}`
+    /// becomes the tool call's raw-output chunk, every later frame prefers
+    /// `content` and emits `None`, the reducer keeps the last chunks, and the
+    /// chunk outranks `content` — so the finished build would render
+    /// `{"content":[]}` instead of its log.
+    #[tokio::test]
+    async fn pi_empty_opening_frame_never_outranks_the_real_output() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (content, _, raw_output, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_fb7",
+                "status": "in_progress",
+                // pi-acp's stringify fallback over the empty envelope, verbatim.
+                "content": [{
+                    "type": "content",
+                    "content": {"type": "text", "text": "{\n  \"content\": []\n}"},
+                }],
+                "rawOutput": {"content": []},
+            }),
+        )
+        .await;
+        assert!(
+            raw_output.is_none(),
+            "the empty envelope must not be seeded as a chunk — it would outrank \
+             every later frame's content: {raw_output:?}"
+        );
+        assert!(
+            content.is_none(),
+            "pi-acp's JSON.stringify fallback is not command output: {content:?}"
+        );
+
+        // Frame 2 — the real result, on the SAME tool call id.
+        let (content, _, raw_output, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_fb7",
+                "status": "completed",
+                "content": [{
+                    "type": "content",
+                    "content": {"type": "text", "text": "$ next build\n✓ Compiled\n"},
+                }],
+                "rawOutput": {"content": [{"type": "text", "text": "$ next build\n✓ Compiled\n"}]},
+            }),
+        )
+        .await;
+        assert_eq!(
+            content.as_deref(),
+            Some("$ next build\n✓ Compiled\n"),
+            "the command output reaches the card"
+        );
+        assert!(
+            raw_output.is_none(),
+            "and nothing is left in the chunk stream to shadow it: {raw_output:?}"
+        );
+    }
+
+    /// A frame whose envelope is empty because pi has produced nothing yet must
+    /// not fall through to the stringify branch even without a `content` channel.
+    #[tokio::test]
+    async fn pi_empty_envelope_is_recognized_by_shape_not_by_yielding_text() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (_, _, raw_output, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_fb7",
+                "status": "in_progress",
+                "rawOutput": {"content": []},
+            }),
+        )
+        .await;
+        assert!(raw_output.is_none(), "{raw_output:?}");
+    }
+
+    /// The suppression must catch ONLY pi's literal `{"content":[]}` opening
+    /// announcement. `toolResultToText` also flattens `details.diff`, `stdout` /
+    /// `stderr` (with the exit code appended) and `output` from BOTH the result
+    /// and its `details` — every one of those reaches real text that the block
+    /// array alone does not, so an empty block array is not by itself evidence
+    /// that pi had nothing to say. Anything else it cannot flatten it dumps as
+    /// JSON, which is ugly but still carries the result, so that is kept too.
+    #[tokio::test]
+    async fn only_pis_empty_opening_announcement_counts_as_noise() {
+        // (label, rawOutput, the text pi-acp's `toolResultToText` flattens)
+        let real_results = [
+            (
+                "details.diff",
+                serde_json::json!({"content": [], "details": {"diff": "--- a\n+++ b\n+line\n"}}),
+                "--- a\n+++ b\n+line\n",
+            ),
+            (
+                "details.stdout + exitCode",
+                serde_json::json!({"content": [], "details": {"stdout": "build succeeded", "exitCode": 0}}),
+                "build succeeded\n\nexit code: 0",
+            ),
+            (
+                "top-level stdout",
+                serde_json::json!({"content": [], "stdout": "ok"}),
+                "ok",
+            ),
+            (
+                "details.output",
+                serde_json::json!({"content": [], "details": {"output": "from details"}}),
+                "from details",
+            ),
+            (
+                "top-level output",
+                serde_json::json!({"content": [], "output": "from result"}),
+                "from result",
+            ),
+            (
+                "stderr + exitCode",
+                serde_json::json!({"content": [], "details": {"stderr": "boom", "exitCode": 3}}),
+                "stderr:\nboom\n\nexit code: 3",
+            ),
+            (
+                // Nothing flattenable: pi-acp dumps the JSON. Ugly, but it is the
+                // result — the exit code would be lost if we called it noise.
+                "exit-code-only stringify fallback",
+                serde_json::json!({"content": [], "details": {"exitCode": 3}}),
+                "{\n  \"content\": [],\n  \"details\": {\n    \"exitCode\": 3\n  }\n}",
+            ),
+        ];
+
+        for (label, raw_output, flattened) in real_results {
+            for (surface, wire) in [
+                (
+                    "tool_call",
+                    serde_json::json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "call_x",
+                        "title": "bash",
+                        "kind": "execute",
+                        "status": "completed",
+                        "content": [{
+                            "type": "content",
+                            "content": {"type": "text", "text": flattened},
+                        }],
+                        "rawOutput": raw_output.clone(),
+                    }),
+                ),
+                (
+                    "tool_call_update",
+                    serde_json::json!({
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "call_x",
+                        "status": "completed",
+                        "content": [{
+                            "type": "content",
+                            "content": {"type": "text", "text": flattened},
+                        }],
+                        "rawOutput": raw_output.clone(),
+                    }),
+                ),
+            ] {
+                let mut cache = ToolCallOutputCache::default();
+                let mut cb = CodeBuddyLiveState::default();
+                let (content, _, _, _) = pi_emit(AgentType::Pi, &mut cache, &mut cb, wire).await;
+                assert_eq!(
+                    content.as_deref(),
+                    Some(flattened),
+                    "{label} is a real result, not pi's empty announcement ({surface})"
+                );
+            }
+        }
+
+        // The one shape that IS the announcement — and only in its exact form.
+        assert!(pi_result_is_empty_announcement(&serde_json::json!({
+            "content": []
+        })));
+        assert!(
+            pi_result_is_empty_announcement(&serde_json::json!({"content": [], "details": null})),
+            "an explicit null `details` is the same announcement"
+        );
+        assert!(
+            !pi_result_is_empty_announcement(&serde_json::json!({"content": [], "details": {}})),
+            "any other non-null member means pi is reporting something"
+        );
+        assert!(
+            !pi_result_is_empty_announcement(&serde_json::json!({
+                "content": [{"type": "text", "text": ""}]
+            })),
+            "a populated block array is not the announcement, empty text or not"
+        );
+        assert!(!pi_result_is_empty_announcement(&serde_json::json!({})));
+        assert!(!pi_result_is_empty_announcement(&serde_json::json!("text")));
+    }
+
+    /// With no `content` the envelope IS the result, so it must be unwrapped to
+    /// the same text the history parser produces — not dropped, and not shipped
+    /// as JSON.
+    #[tokio::test]
+    async fn pi_tool_result_envelope_unwrapped_when_content_absent() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (_, _, raw_output, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_fb7",
+                "status": "completed",
+                "rawOutput": {"content": [{"type": "text", "text": "v24.14.0\n"}]},
+            }),
+        )
+        .await;
+        assert_eq!(raw_output.as_deref(), Some("v24.14.0\n"));
+
+        // An unrecognized shape keeps the generic stringified behavior rather
+        // than silently dropping output we have never seen on this wire.
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (_, _, raw_output, _) = pi_emit(
+            AgentType::Pi,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_other",
+                "status": "completed",
+                "rawOutput": {"details": {"exitCode": 0}},
+            }),
+        )
+        .await;
+        assert_eq!(raw_output.as_deref(), Some(r#"{"details":{"exitCode":0}}"#));
+    }
+
+    /// Contrast guard: the unwrap is pi-gated — `{"content":[…]}` is a generic
+    /// MCP shape, and another agent's identical `rawOutput` still stringifies.
+    #[tokio::test]
+    async fn non_pi_agents_keep_the_stringified_mcp_envelope() {
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let (_, _, raw_output, _) = pi_emit(
+            AgentType::ClaudeCode,
+            &mut cache,
+            &mut cb,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "completed",
+                "rawOutput": {"content": [{"type": "text", "text": "ok"}]},
+            }),
+        )
+        .await;
+        assert_eq!(
+            raw_output.as_deref(),
+            Some(r#"{"content":[{"text":"ok","type":"text"}]}"#),
+            "non-pi agents keep the existing json_value_to_text behavior"
+        );
+    }
+
+    // ---- #525: pi's lifecycle announcements ride the prose channel ----------
+
+    /// Wire-in / events-out for a pi `agent_message_chunk`, the counterpart of
+    /// `pi_emit` for the message channel. Returns EVERY event the update
+    /// produced, so a test can assert on "nothing at all" as easily as on a
+    /// specific event.
+    async fn pi_emit_chunk(agent_type: AgentType, wire: serde_json::Value) -> Vec<AcpEvent> {
+        let st = SessionState::new(
+            "conn-pi".to_string(),
+            agent_type,
+            None,
+            "win".to_string(),
+            None,
+        );
+        let state = Arc::new(RwLock::new(st));
+        let emitter = EventEmitter::Noop;
+        let mut cache = ToolCallOutputCache::default();
+        let mut cb = CodeBuddyLiveState::default();
+        let update: SessionUpdate =
+            serde_json::from_value(wire).expect("valid agent_message_chunk wire shape");
+
+        emit_conversation_update(
+            &state, &emitter, agent_type, update, None, &mut cache, &mut cb,
+        )
+        .await;
+
+        let guard = state.read().await;
+        guard
+            .recent_events_after(0)
+            .map(|events| events.iter().map(|e| e.payload.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn pi_chunk(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": text},
+        })
+    }
+
+    fn pi_notify_chunk(text: &str, level: &str) -> serde_json::Value {
+        serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": text},
+            "_meta": {"piAcp": {"notify": {"level": level}}},
+        })
+    }
+
+    /// Every announcement pi-acp puts on the prose channel, classified. This is
+    /// the inventory the fix is built from — if pi-acp reworks its wording, this
+    /// is the test that says so.
+    #[test]
+    fn pi_chunk_route_classifies_every_pi_acp_announcement() {
+        let route = |text: &str| pi_message_chunk_route(AgentType::Pi, text, None);
+
+        // auto_retry_start, both shapes.
+        assert_eq!(
+            route("Retrying (attempt 1/3, waiting 2s)..."),
+            PiChunkRoute::Retrying {
+                attempt: Some(1),
+                max: Some(3),
+                delay_ms: Some(2000),
+            }
+        );
+        assert_eq!(
+            route("Retrying..."),
+            PiChunkRoute::Retrying {
+                attempt: None,
+                max: None,
+                delay_ms: None,
+            },
+            "pi-acp's shapeless fallback still opens the banner, just without counters"
+        );
+        // auto_retry_end + both compaction sentences + all three queue messages.
+        for text in [
+            "Retry finished, resuming.",
+            "Context nearing limit, running automatic compaction...",
+            "Automatic compaction finished; context was summarized to continue the session.",
+            "Queued message (position 2).",
+            "Starting queued message. (1 remaining)",
+            "Cleared queued prompts.",
+        ] {
+            assert_eq!(
+                route(text),
+                PiChunkRoute::Drop,
+                "{text:?} must not be prose"
+            );
+        }
+    }
+
+    /// The notify marker is authoritative and level-independent: an extension's
+    /// message is arbitrary text, so nothing but `_meta` can identify it. This is
+    /// the exact frame from the issue screenshot.
+    #[test]
+    fn pi_extension_notify_is_dropped_by_marker_at_every_level() {
+        for level in ["info", "warning", "error"] {
+            let meta = serde_json::json!({"piAcp": {"notify": {"level": level}}});
+            let meta = meta.as_object().cloned().expect("object meta");
+            assert_eq!(
+                pi_message_chunk_route(
+                    AgentType::Pi,
+                    "Released pi-caffeinate (agent finished).",
+                    Some(&meta)
+                ),
+                PiChunkRoute::Drop,
+                "level {level}"
+            );
+            // …even when the extension's text reads exactly like an answer.
+            assert_eq!(
+                pi_message_chunk_route(AgentType::Pi, "是的，插件已加载。", Some(&meta)),
+                PiChunkRoute::Drop,
+                "the marker wins over the text, level {level}"
+            );
+        }
+    }
+
+    /// The far more dangerous direction: text that must survive. pi-acp's
+    /// slash-command replies and prelude ride the SAME channel, and the model
+    /// itself can say anything.
+    #[test]
+    fn pi_chunk_route_leaves_real_prose_and_command_replies_alone() {
+        for text in [
+            // The model's own words, including the reply from the screenshot.
+            "你好。有什么需要我帮你处理?",
+            "是的，OV（OpenViking）插件当前已正式加载并可用。",
+            // Slash-command output (pi-acp `handleCommand`): the user asked.
+            "Usage: /name <name>",
+            "Cleared queued prompts. Session exported: /tmp/x.md",
+            "Session: abc\nMessages: 12",
+            "Compaction completed.",
+            // A rare but real failure notice, deliberately kept (see fn doc).
+            "Pi input UI request is not supported in ACP yet; cancelling it.",
+            // Near-misses: same opening, not the announcement.
+            "Retrying the request by hand is also an option.",
+            "Retrying (attempt one of three)...",
+            "Queued message (position two).",
+            // A whole-chunk match means an embedded sentence is still prose.
+            "I will say: Retry finished, resuming. Then continue.",
+        ] {
+            assert_eq!(
+                pi_message_chunk_route(AgentType::Pi, text, None),
+                PiChunkRoute::Prose,
+                "{text:?} is the agent speaking"
+            );
+        }
+    }
+
+    /// Contrast guard: the classifier is pi-gated, so another agent that happens
+    /// to say one of these sentences — or that uses a `piAcp` meta key of its own
+    /// — keeps today's behavior.
+    #[test]
+    fn pi_chunk_route_is_inert_for_other_agents() {
+        let meta = serde_json::json!({"piAcp": {"notify": {"level": "info"}}});
+        let meta = meta.as_object().cloned().expect("object meta");
+        for agent in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::Grok,
+            // Same known limitation the rest of the pi bridge carries: pi-acp
+            // registered under a CUSTOM id is not `AgentType::Pi`, so it keeps
+            // the old behavior rather than an unnamespaced marker applying to
+            // arbitrary agents (see `pi_terminal_meta_marks_bash`).
+            AgentType::Custom("my-pi"),
+        ] {
+            for text in [
+                "Retry finished, resuming.",
+                "Retrying (attempt 1/3, waiting 2s)...",
+                "Cleared queued prompts.",
+            ] {
+                assert_eq!(
+                    pi_message_chunk_route(agent, text, Some(&meta)),
+                    PiChunkRoute::Prose,
+                    "{agent:?} must be unaffected by the pi bridge"
+                );
+            }
+        }
+    }
+
+    /// #525 proper: the caffeinate frame must produce NO event, so it can neither
+    /// paint a bubble of its own nor splice into the reply already on screen.
+    #[tokio::test]
+    async fn pi_notify_chunk_emits_nothing_at_all() {
+        let events = pi_emit_chunk(
+            AgentType::Pi,
+            pi_notify_chunk("Released pi-caffeinate (agent finished).", "info"),
+        )
+        .await;
+        assert!(
+            events.is_empty(),
+            "an extension notify must not reach any channel: {events:?}"
+        );
+    }
+
+    /// Retry leaves the transcript and lands on the shared banner, carrying pi's
+    /// own counters so the banner can render its localized line.
+    #[tokio::test]
+    async fn pi_retry_chunk_becomes_the_retry_banner_with_counters() {
+        let events = pi_emit_chunk(
+            AgentType::Pi,
+            pi_chunk("Retrying (attempt 2/3, waiting 4s)..."),
+        )
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AcpEvent::ContentDelta { .. })),
+            "the retry sentence must not reach the transcript: {events:?}"
+        );
+        let retrying = events
+            .iter()
+            .find_map(|e| match e {
+                AcpEvent::TurnRetrying {
+                    message,
+                    attempt,
+                    max_retries,
+                    retry_delay_ms,
+                    ..
+                } => Some((message.clone(), *attempt, *max_retries, *retry_delay_ms)),
+                _ => None,
+            })
+            .expect("a TurnRetrying event is emitted");
+        assert_eq!(retrying, (String::new(), Some(2), Some(3), Some(4000)));
+    }
+
+    /// The other half of the contract: ordinary pi prose is untouched.
+    #[tokio::test]
+    async fn pi_prose_chunk_still_emits_content_delta() {
+        let events = pi_emit_chunk(AgentType::Pi, pi_chunk("你好。有什么需要我帮你处理?")).await;
+        let text = events
+            .iter()
+            .find_map(|e| match e {
+                AcpEvent::ContentDelta { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("prose still reaches the transcript");
+        assert_eq!(text, "你好。有什么需要我帮你处理?");
+    }
+
+    /// The invariant that keeps the renderer and the empty-turn diagnosis in
+    /// agreement: a chunk codeg does not render must not count as the agent
+    /// having produced output, or a status-only turn ends blank AND successful.
+    #[test]
+    fn pi_status_chunks_do_not_count_as_agent_output() {
+        let status: SessionUpdate = serde_json::from_value(pi_notify_chunk(
+            "Keeping computer awake (display-awake).",
+            "info",
+        ))
+        .expect("valid wire shape");
+        let retry: SessionUpdate =
+            serde_json::from_value(pi_chunk("Retrying (attempt 1/3, waiting 2s)..."))
+                .expect("valid wire shape");
+        let prose: SessionUpdate =
+            serde_json::from_value(pi_chunk("是的，插件已加载。")).expect("valid wire shape");
+
+        assert!(!is_agent_output_update(AgentType::Pi, &status));
+        assert!(!is_agent_output_update(AgentType::Pi, &retry));
+        assert!(is_agent_output_update(AgentType::Pi, &prose));
+        // Same frames, another agent: unchanged.
+        assert!(is_agent_output_update(AgentType::ClaudeCode, &status));
+        assert!(is_agent_output_update(AgentType::ClaudeCode, &retry));
+    }
+
+    /// The frames below are a VERBATIM capture from a real `pi-acp@0.0.33`,
+    /// driven against a stub `pi --mode rpc` via the supported `PI_ACP_PI_COMMAND`
+    /// override, so this test asserts against the wire rather than against my
+    /// reading of pi-acp's source.
+    ///
+    /// It pins the two properties the whole fix rests on:
+    ///
+    /// 1. `_meta.piAcp.notify.level` really does reach the client, so the notify
+    ///    rule has a structured handle and never has to guess from the text.
+    /// 2. Each announcement arrives as ONE COMPLETE chunk, while real prose
+    ///    arrives in fragments (`是的，` / `OV 插件` / `已加载。`) — which is what
+    ///    makes whole-string matching safe. A prose delta is a fragment of a
+    ///    sentence; it is not a whole sentence with terminal punctuation.
+    #[test]
+    fn pi_captured_wire_frames_route_as_expected() {
+        let captured = serde_json::json!([
+            {"sessionUpdate": "agent_message_chunk",
+             "content": {"type": "text", "text": "Released pi-caffeinate (agent finished)."},
+             "_meta": {"piAcp": {"notify": {"level": "info"}}}},
+            {"sessionUpdate": "agent_message_chunk",
+             "content": {"type": "text", "text": "Retrying (attempt 1/3, waiting 2s)..."}},
+            {"sessionUpdate": "agent_message_chunk",
+             "content": {"type": "text", "text": "Retry finished, resuming."}},
+            {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "是的，"}},
+            {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "OV 插件"}},
+            {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "已加载。"}},
+        ]);
+
+        let routes: Vec<PiChunkRoute> = captured
+            .as_array()
+            .expect("captured frames")
+            .iter()
+            .map(|frame| {
+                let text = frame["content"]["text"].as_str().expect("text chunk");
+                let meta = frame.get("_meta").and_then(|m| m.as_object()).cloned();
+                pi_message_chunk_route(AgentType::Pi, text, meta.as_ref())
+            })
+            .collect();
+
+        assert_eq!(
+            routes,
+            vec![
+                PiChunkRoute::Drop,
+                PiChunkRoute::Retrying {
+                    attempt: Some(1),
+                    max: Some(3),
+                    delay_ms: Some(2000),
+                },
+                PiChunkRoute::Drop,
+                PiChunkRoute::Prose,
+                PiChunkRoute::Prose,
+                PiChunkRoute::Prose,
+            ],
+            "the reply survives whole; only pi-acp's announcements are taken out"
+        );
+    }
+
+    /// End to end: a turn whose ONLY chunks were pi status is diagnosed as
+    /// metadata-only, so it reports "sent only status updates and no reply"
+    /// instead of completing as a silent blank turn.
+    #[test]
+    fn pi_status_only_turn_diagnoses_as_metadata_only() {
+        let mut probe = TurnOutputProbe::new(0);
+        for wire in [
+            pi_notify_chunk("Keeping computer awake (display-awake).", "info"),
+            pi_chunk("Retrying (attempt 1/3, waiting 2s)..."),
+            pi_chunk("Retry finished, resuming."),
+        ] {
+            probe.note_update(
+                AgentType::Pi,
+                &serde_json::from_value(wire).expect("valid wire shape"),
+            );
+        }
+        assert!(!probe.saw_agent_output);
+        assert_eq!(diagnose_empty_turn(&probe), EmptyTurnCause::MetadataOnly);
+
+        // One line of real prose is all it takes to make the turn non-empty.
+        probe.note_update(
+            AgentType::Pi,
+            &serde_json::from_value(pi_chunk("是的，插件已加载。")).expect("valid wire shape"),
+        );
+        assert!(probe.saw_agent_output);
     }
 
     #[test]

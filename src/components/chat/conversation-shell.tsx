@@ -11,9 +11,12 @@ import type {
   PromptInputBlock,
   QuestionAnswer,
   SessionConfigOptionInfo,
+  SessionFailureRecord,
   SessionModeInfo,
   AvailableCommandInfo,
 } from "@/lib/types"
+import type { SessionFailureAction } from "@/lib/session-failures"
+import { SessionFailureBanner } from "@/components/chat/session-failure-banner"
 import type {
   PendingPermission,
   PendingQuestion,
@@ -22,6 +25,7 @@ import type {
 import type { QueuedMessage } from "@/hooks/use-message-queue"
 import { Loader2 } from "lucide-react"
 import { ChatInput } from "@/components/chat/chat-input"
+import type { ComposerInjectContent } from "@/components/chat/message-input"
 import { PermissionDialog } from "@/components/chat/permission-dialog"
 import { QuestionDialog } from "@/components/chat/question-dialog"
 import { AskQuestionCard } from "@/components/chat/ask-question-card"
@@ -34,6 +38,19 @@ interface ConversationShellProps {
   agentName?: string
   error: string | null
   claudeApiRetry: ClaudeApiRetryState | null
+  /** AIR typed session failures for this connection (active + resolved; the
+   *  banner splits them itself). Omit/empty renders nothing. */
+  sessionFailures?: SessionFailureRecord[]
+  /** Wires the failure strips' suggested actions (retry/login/new_session);
+   *  omitted for read-only surfaces — the buttons are then hidden. */
+  onSessionFailureAction?: (
+    action: SessionFailureAction,
+    failure: SessionFailureRecord
+  ) => void
+  /** Closes a failure strip, taking every record it stands for. Passed for
+   *  every surface with a live store — dismissing is client-local, so viewers
+   *  get it too. */
+  onSessionFailureDismiss?: (ids: string[]) => void
   pendingPermission: PendingPermission | null
   pendingQuestion: PendingQuestion | null
   /** Awaiting-answer multiple-choice `ask_user_question`. */
@@ -110,6 +127,11 @@ interface ConversationShellProps {
    *  (e.g. the "restart to apply" config-stale banner). Renders nothing when
    *  omitted. */
   topBanner?: ReactNode
+  /** Content pushed into the docked composer from outside it — currently a
+   *  quoted transcript selection. Cleared by the host via `onInjectConsumed`
+   *  once the composer has taken it. */
+  injectContent?: ComposerInjectContent | null
+  onInjectConsumed?: () => void
 }
 
 export function ConversationShell({
@@ -119,6 +141,9 @@ export function ConversationShell({
   agentName,
   error,
   claudeApiRetry,
+  sessionFailures,
+  onSessionFailureAction,
+  onSessionFailureDismiss,
   pendingPermission,
   pendingQuestion,
   pendingAskQuestion,
@@ -166,6 +191,8 @@ export function ConversationShell({
   onForkSend,
   onSteer,
   topBanner,
+  injectContent,
+  onInjectConsumed,
 }: ConversationShellProps) {
   const tAcp = useTranslations("Folder.chat.acpConnections")
   const retryLineText = useMemo(() => {
@@ -184,7 +211,11 @@ export function ConversationShell({
       retry.retryDelayMs !== null && retry.retryDelayMs !== undefined
         ? (retry.retryDelayMs / 1000).toFixed(1)
         : null
-    const errorLabel = retry.error ?? tAcp("claudeApiRetry.fallbackError")
+    // `null` only for a source that reports no cause at all (pi, #525) — see
+    // `ClaudeApiRetryState.reportsError`. Claude and codex keep the fallback.
+    const errorLabel =
+      retry.error ??
+      (retry.reportsError ? tAcp("claudeApiRetry.fallbackError") : null)
     const statusLabel =
       retry.errorStatus !== null && retry.errorStatus !== undefined
         ? tAcp("claudeApiRetry.httpStatus", {
@@ -209,15 +240,27 @@ export function ConversationShell({
           })
         : null
 
+    // With no cause AND no HTTP status there is nothing to put before the
+    // separator, and the shared template would render a dangling "· 正在重试".
+    // Take the prefix-less pair instead — the counters carry the whole message.
+    if (errorLabel === null && statusLabel === "") {
+      return delayLabel !== null
+        ? tAcp("claudeApiRetry.lineNoErrorWithDelay", {
+            retry: retryLabel,
+            delay: delayLabel,
+          })
+        : tAcp("claudeApiRetry.lineNoError", { retry: retryLabel })
+    }
+
     return delayLabel !== null
       ? tAcp("claudeApiRetry.lineWithDelay", {
-          error: errorLabel,
+          error: errorLabel ?? "",
           status: statusLabel,
           retry: retryLabel,
           delay: delayLabel,
         })
       : tAcp("claudeApiRetry.line", {
-          error: errorLabel,
+          error: errorLabel ?? "",
           status: statusLabel,
           retry: retryLabel,
         })
@@ -311,10 +354,20 @@ export function ConversationShell({
               onSteer={onSteer}
               onAddFeedback={onAddFeedback}
               feedbackAddDisabled={feedbackAddDisabled}
+              injectContent={injectContent}
+              onInjectConsumed={onInjectConsumed}
             />
           </div>
         )}
       </div>
+
+      {sessionFailures && sessionFailures.length > 0 && (
+        <SessionFailureBanner
+          failures={sessionFailures}
+          onAction={onSessionFailureAction}
+          onDismiss={onSessionFailureDismiss}
+        />
+      )}
 
       {retryLineText && (
         <div className="border-t border-destructive/20 bg-destructive/5 px-4 py-2 text-xs text-destructive">

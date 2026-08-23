@@ -1,17 +1,8 @@
 "use client"
 
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type PointerEvent as ReactPointerEvent,
-} from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle,
-  Copy,
   Download,
   FileCode,
   FileImage,
@@ -37,7 +28,8 @@ import { useTabActions, useTabStore } from "@/contexts/tab-context"
 import { groupOfTab, isReparentUnmount } from "@/stores/tab-store"
 import { computeRects, leafIds } from "@/lib/tab-group-layout"
 import { useTaskContext } from "@/contexts/task-context"
-import { cn, copyTextFromMenu, randomUUID } from "@/lib/utils"
+import { cn, randomUUID } from "@/lib/utils"
+import { buildQuotedMarkdown } from "@/lib/message-quote"
 import { useConnectionLifecycle } from "@/hooks/use-connection-lifecycle"
 import { useMessageQueue, type QueuedMessage } from "@/hooks/use-message-queue"
 import { MessageListView } from "@/components/message/message-list-view"
@@ -45,6 +37,7 @@ import {
   GoalControlProvider,
   type GoalControlValue,
 } from "@/components/message/goal-control-context"
+import { useAdvertisedGoalActions } from "@/hooks/use-goal-actions"
 import { ConversationShell } from "@/components/chat/conversation-shell"
 import { SessionConfigStaleBanner } from "@/components/chat/session-config-stale-banner"
 import { PiProjectTrustBanner } from "@/components/chat/pi-project-trust-banner"
@@ -63,6 +56,7 @@ import { QuickActions } from "@/components/chat/quick-actions"
 import type { ComposerInjectContent } from "@/components/chat/message-input"
 import { TileScrollContainer } from "@/components/conversations/tile-scroll-container"
 import { GroupSplitHandle } from "@/components/conversations/group-split-handle"
+import { OverlayHostHiddenProvider } from "@/components/ui/overlay-host-hidden"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { TabBar } from "@/components/tabs/tab-bar"
 import { TabDragGhost } from "@/components/tabs/tab-drag-ghost"
@@ -95,6 +89,7 @@ import { nextStatusForOutcome, type SteerOutcome } from "@/lib/steering-queue"
 import {
   getConversationIdByExternalIdFromStore,
   getRuntimeSession,
+  getTimelineTurns,
   useConversationRuntimeActions,
   useConversationRuntimeStore,
 } from "@/stores/conversation-runtime-store"
@@ -115,6 +110,11 @@ import {
   type QuestionAnswer,
   type UserMessageBlock,
 } from "@/lib/types"
+import { useRouter } from "next/navigation"
+import {
+  lastUserPromptText,
+  type SessionFailureAction,
+} from "@/lib/session-failures"
 import { getAgentLabel } from "@/lib/custom-agents"
 import {
   getSavedModeId,
@@ -328,7 +328,11 @@ const ConversationTabView = memo(function ConversationTabView({
     null
   )
   const [hasSentMessage, setHasSentMessage] = useState(false)
-  const [quickActionInject, setQuickActionInject] =
+  // One inbox for everything pushed into this tab's composer from outside it:
+  // welcome-page quick actions (replace) and quoted transcript selections
+  // (append). Exactly one composer is mounted at a time — the welcome one or the
+  // docked one — so a single slot can serve both.
+  const [composerInject, setComposerInject] =
     useState<ComposerInjectContent | null>(null)
 
   const hasPersistedConversation = dbConversationId != null
@@ -861,7 +865,17 @@ const ConversationTabView = memo(function ConversationTabView({
 
   useEffect(() => {
     if (effectiveConversationId <= 0) return
-    setExternalId(effectiveConversationId, detail?.summary.external_id ?? null)
+    // Only ever WRITE a real id — never clear one. `detail` is null while a
+    // (re)fetch is in flight, and writing null then would wipe a session id the
+    // connSessionId effect below had already resolved. That store value is one
+    // of the two sources `externalId` (and therefore the sessionId passed to
+    // acp_connect) resolves from, so clearing it can turn a reconnect into
+    // session/new and strand the conversation's history. Nothing ever nulls a
+    // row's external_id, and switching conversations changes the store key
+    // rather than clearing this one, so there is no case that needs the clear.
+    const persisted = detail?.summary.external_id
+    if (!persisted) return
+    setExternalId(effectiveConversationId, persisted)
   }, [effectiveConversationId, detail?.summary.external_id, setExternalId])
 
   useEffect(() => {
@@ -1618,11 +1632,19 @@ const ConversationTabView = memo(function ConversationTabView({
   const isWelcomeMode = showDraftHeader
 
   const handleQuickAction = useCallback((payload: ComposerInjectContent) => {
-    setQuickActionInject(payload)
+    setComposerInject(payload)
   }, [])
 
-  const handleQuickActionConsumed = useCallback(() => {
-    setQuickActionInject(null)
+  const handleComposerInjectConsumed = useCallback(() => {
+    setComposerInject(null)
+  }, [])
+
+  // Quote a transcript selection into the composer. A fresh object every time so
+  // quoting the same passage twice still re-fires the composer's inject effect.
+  const handleQuoteSelection = useCallback((selected: string) => {
+    const quoted = buildQuotedMarkdown(selected)
+    if (!quoted) return
+    setComposerInject({ text: quoted, mode: "append" })
   }, [])
 
   const canShowDetailErrorActions =
@@ -1708,6 +1730,14 @@ const ConversationTabView = memo(function ConversationTabView({
   // its buttons. Codex is the only agent that produces goal cards, so no
   // agent-type gate is needed. Provided only around the main panel's list; the
   // read-only sub-agent dialog renders its own MessageListView with no provider.
+  // The adapter's ADVERTISED goal-control vocabulary (fail-closed: no
+  // controls until the snapshot for this exact connectionId reports a known
+  // one — see `useAdvertisedGoalActions`). `connStatus` is what brings the
+  // hook back for a second read: a brand-new conversation hands us its
+  // connection id while `initialize` is still in flight, and the vocabulary
+  // isn't decided until that response lands.
+  const goalActions = useAdvertisedGoalActions(conn.connectionId, connStatus)
+
   const goalControlValue = useMemo<GoalControlValue>(() => {
     const live =
       conn.connectionId !== null &&
@@ -1719,8 +1749,87 @@ const ConversationTabView = memo(function ConversationTabView({
             void acpActions.goalControl(tabId, action)
           }
         : null,
+      actions: goalActions,
     }
-  }, [conn.connectionId, conn.isViewer, connStatus, acpActions, tabId])
+  }, [
+    conn.connectionId,
+    conn.isViewer,
+    connStatus,
+    acpActions,
+    tabId,
+    goalActions,
+  ])
+
+  // AIR session-failure strip actions. `retry` re-submits the LAST user
+  // prompt through the message queue — same mechanism as the live-feedback
+  // resend fallback: enqueue survives the turn-end status race and flushes as
+  // soon as the connection can take a prompt, so the retry is never silently
+  // dropped. `login` lands on the agents settings page (auth lives there);
+  // `new_session` reuses the load-error banner's fresh-draft path.
+  const router = useRouter()
+  const tSessionFailure = useTranslations("Folder.chat.sessionFailure")
+  const detailTurns = detail?.turns
+  const handleSessionFailureAction = useCallback(
+    (action: SessionFailureAction) => {
+      switch (action) {
+        case "retry": {
+          // Prompt text source: the runtime TIMELINE first — it is what the
+          // user sees, and a failed turn's prompt lives there as an
+          // optimistic/promoted turn even when the persisted detail is stale
+          // (field report 2026-08-16: after a network-drop terminal failure
+          // the detail had no user turn yet, so retry read null and silently
+          // did nothing). Persisted detail is the fallback for a conversation
+          // whose runtime session was evicted.
+          const text =
+            lastUserPromptText(
+              getTimelineTurns(effectiveConversationId).map((e) => e.turn)
+            ) ?? lastUserPromptText(detailTurns)
+          if (!text) {
+            // Nothing resendable is a dead end for this action — say so
+            // instead of swallowing the click.
+            toast.warning(tSessionFailure("retryUnavailable"))
+            return
+          }
+          mqEnqueue(
+            { blocks: [{ type: "text", text }], displayText: text },
+            selectedModeId
+          )
+          break
+        }
+        case "login":
+          router.push("/settings/agents")
+          break
+        case "new_session":
+          handleOpenNewSession()
+          break
+      }
+    },
+    [
+      effectiveConversationId,
+      detailTurns,
+      mqEnqueue,
+      selectedModeId,
+      router,
+      handleOpenNewSession,
+      tSessionFailure,
+    ]
+  )
+
+  // Closing a strip is client-local (it only resolves the record in this
+  // client's projection), so unlike the recovery actions it is offered to
+  // viewers too — see `AcpActionsValue.dismissSessionFailure`.
+  const handleSessionFailureDismiss = useCallback(
+    (ids: string[]) => {
+      acpActions.dismissSessionFailures(tabId, ids)
+    },
+    [acpActions, tabId]
+  )
+
+  // The docked composer is the only place a quote can land, so the selection
+  // bubble offers "quote" exactly when that composer is on screen (see
+  // `hideInput` below). Without a composer the inject would never be consumed
+  // and the action would silently do nothing.
+  const composerAvailable = !isWelcomeMode && !acpLoadError
 
   const messageListNode = (
     <GoalControlProvider value={goalControlValue}>
@@ -1738,6 +1847,7 @@ const ConversationTabView = memo(function ConversationTabView({
         onNewSession={
           canShowDetailErrorActions ? handleOpenNewSession : undefined
         }
+        onQuoteSelection={composerAvailable ? handleQuoteSelection : undefined}
       />
     </GoalControlProvider>
   )
@@ -1809,6 +1919,15 @@ const ConversationTabView = memo(function ConversationTabView({
       agentName={getAgentLabel(selectedAgent)}
       error={conn.error}
       claudeApiRetry={conn.claudeApiRetry}
+      sessionFailures={conn.sessionFailures}
+      onSessionFailureAction={
+        // Owners of a live connection only — mirrors the goal-control gate:
+        // viewers must see the strips but not drive recovery.
+        conn.connectionId !== null && !conn.isViewer
+          ? handleSessionFailureAction
+          : undefined
+      }
+      onSessionFailureDismiss={handleSessionFailureDismiss}
       pendingPermission={conn.pendingPermission}
       pendingQuestion={conn.pendingQuestion}
       pendingAskQuestion={conn.pendingAskQuestion}
@@ -1833,6 +1952,8 @@ const ConversationTabView = memo(function ConversationTabView({
       attachmentTabId={tabId}
       draftStorageKey={draftStorageKey}
       hideInput={isWelcomeMode || Boolean(acpLoadError)}
+      injectContent={composerInject}
+      onInjectConsumed={handleComposerInjectConsumed}
       composerBanner={acpLoadErrorBanner}
       feedbackList={
         feedback.showList ? (
@@ -1893,6 +2014,10 @@ const ConversationTabView = memo(function ConversationTabView({
               />
               <div className="flex justify-center">
                 <AgentSelector
+                  // The selector spans the row it is given (it has to measure
+                  // how much room it has), so the centring lives inside it now
+                  // — the `justify-center` above only centres a full-width box.
+                  align="center"
                   defaultAgentType={selectedAgent}
                   onSelect={handleAgentSelect}
                   onFallback={handleAgentFallback}
@@ -1957,8 +2082,8 @@ const ConversationTabView = memo(function ConversationTabView({
                   feedback.featureEnabled ? feedback.openDialog : undefined
                 }
                 feedbackAddDisabled={!feedback.canSubmit}
-                injectContent={quickActionInject}
-                onInjectConsumed={handleQuickActionConsumed}
+                injectContent={composerInject}
+                onInjectConsumed={handleComposerInjectConsumed}
                 flush
                 tall
               />
@@ -2208,68 +2333,6 @@ export function ConversationDetailPanel() {
       [activeConversationTab.id]: (prev[activeConversationTab.id] ?? 0) + 1,
     }))
   }, [activeConversationTab])
-
-  const [contextMenuSelectedText, setContextMenuSelectedText] = useState("")
-  const savedSelectionRangeRef = useRef<Range | null>(null)
-  const isContextMenuOpenRef = useRef(false)
-
-  const handleContextMenuOpenChange = useCallback((open: boolean) => {
-    isContextMenuOpenRef.current = open
-    if (!open) {
-      savedSelectionRangeRef.current = null
-      return
-    }
-    const selection = window.getSelection()
-    const text = selection?.toString() ?? ""
-    setContextMenuSelectedText(text)
-    savedSelectionRangeRef.current =
-      selection && selection.rangeCount > 0 && !selection.isCollapsed
-        ? selection.getRangeAt(0).cloneRange()
-        : null
-  }, [])
-
-  const handleContextMenuTriggerPointerDown = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (event.button !== 2) return
-      const selection = window.getSelection()
-      if (selection && !selection.isCollapsed) {
-        event.preventDefault()
-      }
-    },
-    []
-  )
-
-  useEffect(() => {
-    const handler = () => {
-      if (!isContextMenuOpenRef.current) return
-      const range = savedSelectionRangeRef.current
-      if (!range) return
-      if (
-        !document.contains(range.startContainer) ||
-        !document.contains(range.endContainer)
-      ) {
-        savedSelectionRangeRef.current = null
-        return
-      }
-      const selection = window.getSelection()
-      if (!selection) return
-      if (selection.toString().length > 0) return
-      selection.removeAllRanges()
-      selection.addRange(range)
-    }
-    document.addEventListener("selectionchange", handler)
-    return () => document.removeEventListener("selectionchange", handler)
-  }, [])
-
-  const handleCopySelectedText = useCallback(async () => {
-    if (!contextMenuSelectedText) return
-    const ok = await copyTextFromMenu(contextMenuSelectedText)
-    if (ok) {
-      toast.success(t("copyTextSuccess"))
-    } else {
-      toast.error(t("copyTextFailed"))
-    }
-  }, [contextMenuSelectedText, t])
 
   const handleNewConversation = useCallback(() => {
     if (!folder) return
@@ -2529,7 +2592,14 @@ export function ConversationDetailPanel() {
         {(isSplit || canTileG) && active && (
           <span className="sr-only">{t("activeConversationIndicator")}</span>
         )}
-        {view}
+        {/* A backgrounded tab is kept mounted and merely hidden (its session is
+            still live), but a "查看会话" drawer opened from it portals to the
+            body — so without this it went on painting over whichever tab the
+            user switched to. The flag is additive, so a visible tab inside a
+            covered workspace stays hidden. */}
+        <OverlayHostHiddenProvider hidden={!canTileG && !visible}>
+          {view}
+        </OverlayHostHiddenProvider>
       </div>
     )
   }
@@ -2654,12 +2724,11 @@ export function ConversationDetailPanel() {
             status={activeTab.status as ConversationStatus | undefined}
           />
         )}
-        <ContextMenu onOpenChange={handleContextMenuOpenChange}>
+        <ContextMenu>
           <ContextMenuTrigger asChild>
             <div
               ref={groupContainerRef}
               className="relative min-h-0 flex-1 overflow-hidden"
-              onPointerDown={handleContextMenuTriggerPointerDown}
             >
               {/* Flat sibling shells keyed by stable group id + divider
                   overlays — stable across every split/tile flip, otherwise
@@ -2678,14 +2747,6 @@ export function ConversationDetailPanel() {
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>
-            <ContextMenuItem
-              disabled={!contextMenuSelectedText}
-              onSelect={handleCopySelectedText}
-            >
-              <Copy className="h-4 w-4" />
-              {t("copyText")}
-            </ContextMenuItem>
-            <ContextMenuSeparator />
             <ContextMenuItem
               disabled={!folder?.path}
               onSelect={handleNewConversation}

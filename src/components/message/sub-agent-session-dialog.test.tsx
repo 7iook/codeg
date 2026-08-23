@@ -254,6 +254,7 @@ function makeConnState(overrides: Partial<ConnectionState>): ConnectionState {
     pendingAskQuestion: null,
     pendingPlanApproval: null,
     claudeApiRetry: null,
+    sessionFailures: [],
     error: null,
     loadError: null,
     lastAppliedSeq: 0,
@@ -819,7 +820,7 @@ describe("SubAgentSessionDialog", () => {
     })
   })
 
-  it("invokes onOpenChange when the user closes the dialog via the close button", () => {
+  it("invokes onOpenChange when the user closes the viewer via the close button", () => {
     const onOpenChange = vi.fn()
     renderWithIntl(
       <SubAgentSessionDialog
@@ -830,11 +831,19 @@ describe("SubAgentSessionDialog", () => {
         agentType="codex"
       />
     )
-    // Radix Dialog's built-in close button is rendered with an accessible
+    // The Drawer's built-in close button is rendered with an accessible
     // "Close" label; clicking it should drive onOpenChange(false).
     const closeButton = screen.getByRole("button", { name: /close/i })
     fireEvent.click(closeButton)
-    expect(onOpenChange).toHaveBeenCalledWith(false)
+    // Base UI hands the reason along as a second argument (Radix passed the
+    // bare boolean). Asserted rather than waved past with `anything()`: the
+    // drawer wrapper CANCELS ambient dismissals that were really meant for a
+    // layer above it, so "the close button closes" is only proven by a close
+    // that arrives as `close-press` — never as an outside press or Escape.
+    expect(onOpenChange).toHaveBeenCalledWith(
+      false,
+      expect.objectContaining({ reason: "close-press" })
+    )
   })
 
   // M1 · Requirement 4.5 + the §M1 capability boundary (R1-A7). The dialog is

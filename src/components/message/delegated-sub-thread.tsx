@@ -32,6 +32,7 @@ import {
   RequestedPersonaNote,
 } from "@/components/message/persona-label"
 import { SubAgentSessionDialog } from "@/components/message/sub-agent-session-dialog"
+import { useSessionViewerHost } from "@/components/message/session-viewer-host"
 import { useDelegationCardModel } from "@/hooks/use-delegation-card-model"
 
 interface Props {
@@ -64,7 +65,20 @@ export function DelegatedSubThread({
   meta,
 }: Props) {
   const t = useTranslations("Folder.chat.delegation")
+  // Preferred: hand the viewer to the transcript-level host, which outlives
+  // this card's virtual row. `null` means this card is rendering outside a
+  // `MessageListView` (and so outside any virtualizer) — then it owns the
+  // drawer itself, as it always did.
+  const viewerHost = useSessionViewerHost()
   const [dialogOpen, setDialogOpen] = useState(false)
+  const source = {
+    parentToolUseId,
+    input,
+    output,
+    errorText,
+    state,
+    meta,
+  }
   const {
     agentType,
     task,
@@ -77,14 +91,7 @@ export function DelegatedSubThread({
     requestedPersona,
     requestedModel,
     hasModel,
-  } = useDelegationCardModel({
-    parentToolUseId,
-    input,
-    output,
-    errorText,
-    state,
-    meta,
-  })
+  } = useDelegationCardModel(source)
 
   // A snapshot replay with an empty/unparseable input AND no live binding has
   // no useful card to draw — fall through to the standard renderer instead of
@@ -142,7 +149,11 @@ export function DelegatedSubThread({
         {childConversationId != null && (
           <button
             type="button"
-            onClick={() => setDialogOpen(true)}
+            onClick={() =>
+              viewerHost
+                ? viewerHost.open({ kind: "delegation", source })
+                : setDialogOpen(true)
+            }
             className="shrink-0 flex items-center gap-1.5 px-3 border-l border-border text-xs font-medium text-foreground/80 hover:bg-muted/60 hover:text-foreground transition-colors"
             title={t("openDetail")}
             aria-label={t("openDetail")}
@@ -154,7 +165,7 @@ export function DelegatedSubThread({
           </button>
         )}
       </div>
-      {childConversationId != null && (
+      {viewerHost == null && childConversationId != null && (
         <SubAgentSessionDialog
           open={dialogOpen}
           onOpenChange={setDialogOpen}

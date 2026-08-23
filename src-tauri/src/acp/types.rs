@@ -57,6 +57,46 @@ pub struct EventEnvelope {
     pub payload: AcpEvent,
 }
 
+/// One JetBrains AIR typed session failure record
+/// (`session_info_update._meta.jetbrains.air.sessionFailure`; claude-agent-acp
+/// 0.67+/codex-acp 1.2+, published only because `build_client_capabilities`
+/// advertises `clientCapabilities._meta.jetbrains.air`).
+///
+/// The wire carries UPSERTS ONLY: one record is revised in place through
+/// `id` + `revision` (per-id, from 1), and neither adapter ever publishes a
+/// resolve or tombstone — codex deliberately keeps terminal (severity
+/// `"error"`) records active so late duplicate notifications can't append
+/// duplicate rows, and a retry warning simply stops being revised once the
+/// turn recovers. Consumers therefore apply the monotonic merge themselves
+/// (reject `revision <=` the stored one; see `SessionState::apply_event` and
+/// the frontend reducer, which implement the same rule) and INFER resolution:
+/// severity `"warning"` records flip [`Self::resolved`] at the next
+/// successful turn end. `category`/`severity`/`actions` stay plain strings so
+/// a future vocabulary extension degrades to the frontend's fallback
+/// rendering instead of a deserialization failure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionFailureRecord {
+    pub id: String,
+    pub revision: u64,
+    /// AIR category: `connection|access|limit|request|service|unknown` today.
+    pub category: String,
+    /// `"warning"` (transient, auto-recovering) or `"error"` (terminal).
+    pub severity: String,
+    /// Adapter-authored user-facing text (claude forwards the model's own
+    /// words; codex caps the combined form at 240 chars). May be empty — the
+    /// frontend then falls back to the localized category label.
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+    /// Suggested recovery actions, subset of `retry|login|new_session` today.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+    /// Client-inferred lifecycle (never on the wire — see the type docs).
+    /// Emitted `false` from the parser; flipped by the two stores.
+    #[serde(default)]
+    pub resolved: bool,
+}
+
 /// Events pushed from Rust backend to frontend via Tauri event system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -198,6 +238,12 @@ pub enum AcpEvent {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         parent_tool_use_id: Option<String>,
     },
+    /// Agent published a live session title via ACP `session_info_update.title`.
+    /// Applied to the conversation row by the lifecycle worker (unlocked titles
+    /// only). The sidebar converges through `conversation://changed`; this event
+    /// itself is not rendered. Omitted when the update carries no title so
+    /// goal-only `session_info_update`s stay off the lifecycle path.
+    NativeSessionTitle { title: String },
     /// Backend has transitioned the conversation row's `status` column.
     /// Emitted by `send_prompt_linked` (`InProgress`) and the lifecycle
     /// subscriber on `TurnComplete` (`PendingReview`). The frontend mirrors
@@ -317,14 +363,48 @@ pub enum AcpEvent {
     /// transient "retrying" indicator on the active turn — it is NOT a turn
     /// failure and must not be rendered as one. The frontend reuses the Claude
     /// API-retry banner and clears it at the next turn boundary.
+    ///
+    /// pi shares this channel (issue #525): pi-acp announces `auto_retry_start`
+    /// as ordinary prose, which spliced the sentence into the reply, so it is
+    /// classified out of the transcript and routed here instead (see
+    /// `pi_message_chunk_route`).
     TurnRetrying {
         /// Human-readable transient error (`_meta.codex.error.message`).
+        ///
+        /// EMPTY for pi, which forwards no error text at all — only the retry
+        /// counters below. The frontend renders its own localized line in that
+        /// case rather than inventing an error description.
         message: String,
         /// HTTP status pulled from a `codexErrorInfo` object variant
         /// (e.g. `responseStreamDisconnected.httpStatusCode`), when present.
         #[serde(skip_serializing_if = "Option::is_none")]
         error_status: Option<i64>,
+        /// Which retry this is, and out of how many, and how long the agent will
+        /// wait first — pi's own numbers, recovered from the sentence pi-acp
+        /// formats them into (`pi_parse_retry_announcement`). The retry banner
+        /// has localized slots for exactly these, so filling them is what keeps
+        /// a non-English UI from reading half in English.
+        ///
+        /// All `None` for codex, which reports none of them; skipped from the
+        /// wire when absent, so codex's payload stays byte-identical and older
+        /// clients are unaffected.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_retries: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_delay_ms: Option<u64>,
     },
+    /// A JetBrains AIR typed session failure upsert (see
+    /// [`SessionFailureRecord`]). Emitted verbatim for every VALID record the
+    /// adapter publishes — stale-revision rejection happens identically in
+    /// `SessionState::apply_event` (snapshot) and the frontend reducer
+    /// (live), so a replayed or out-of-order upsert is dropped the same way
+    /// on every consumer. Advertising `_meta.jetbrains.air` REPLACES codex's
+    /// legacy failure surfaces (`_meta.codex.error` → `TurnRetrying`, warning
+    /// text chunks), so severity-`warning` records take over the retry-banner
+    /// role on those connections.
+    SessionFailure { record: SessionFailureRecord },
     /// `session/load` failed in a non-recoverable way (e.g. the agent has no
     /// record of this `session_id`). Emitted instead of silently falling back
     /// to `session/new`, so the frontend can surface the failure with reload
@@ -897,6 +977,17 @@ pub struct AcpAgentInfo {
     pub sort_order: i32,
     pub installed_version: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// The RESOLVED `CODEG_ACP_HOST_TOOLS` verdict for this agent — whether the
+    /// next launch hands the `fs/*` + `terminal/*` channels (and, with them,
+    /// codeg-mcp's delegation tools) back to the agent.
+    ///
+    /// Resolved by [`crate::acp::host_tools_policy::HostToolsPolicy::from_env`],
+    /// the same function the launch uses, so it accounts for BOTH layers: the
+    /// per-agent `env_json` above and codeg's own process env. Reading `env`
+    /// frontend-side would see only the first, and an operator who exported the
+    /// knob process-wide would get no warning at all while every agent silently
+    /// lost delegation.
+    pub host_tools_agent_mode: bool,
     pub config_json: Option<String>,
     pub config_file_path: Option<String>,
     pub opencode_auth_json: Option<String>,
@@ -1227,6 +1318,33 @@ pub struct CursorModelsResult {
     pub models: Vec<CursorModelInfo>,
     pub default_model: Option<String>,
     pub error: Option<String>,
+}
+
+/// Result of probing `qoder status -o json` for the Qoder settings panel's
+/// auth card. The CLI prints a flat object:
+/// `{logged_in, version, allow_byok, username, email, avatar_url, user_type}`.
+/// Parsed defensively — a shape change degrades to `error` rather than making
+/// the card claim the account is signed out.
+#[derive(Debug, Clone, Serialize)]
+pub struct QoderAuthStatus {
+    /// A launchable `qoder` binary was found (managed cache or system install).
+    pub installed: bool,
+    pub logged_in: bool,
+    pub username: Option<String>,
+    pub email: Option<String>,
+    /// Account tier, e.g. `personal_standard`.
+    pub user_type: Option<String>,
+    /// CLI version the probe reported — the one that would actually launch,
+    /// which is not necessarily the version codeg's registry pins.
+    pub version: Option<String>,
+    /// Whether the account may bring its own model provider key.
+    pub allow_byok: Option<bool>,
+    /// Probe failure detail (spawn error / timeout / non-JSON output).
+    pub error: Option<String>,
+    /// Absolute path to the `qoder` binary codeg would launch. The panel builds
+    /// a copy-pasteable `"<binary_path>" login` command from it, because a
+    /// managed binary lives in codeg's cache and is NOT on the user's PATH.
+    pub binary_path: Option<String>,
 }
 
 /// Lightweight status info for a single agent, used by connect() pre-check.

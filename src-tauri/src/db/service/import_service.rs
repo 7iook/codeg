@@ -7,11 +7,13 @@ use crate::db::entities::conversation;
 use crate::db::error::DbError;
 use crate::db::service::conversation_service;
 use crate::models::{AgentType, ConversationSummary, ImportResult};
+use crate::parsers::antigravity::AntigravityParser;
 use crate::parsers::claude::ClaudeParser;
 use crate::parsers::cline::ClineParser;
 use crate::parsers::codebuddy::CodeBuddyParser;
 use crate::parsers::codex::CodexParser;
 use crate::parsers::cursor::CursorParser;
+use crate::parsers::deepseek::DeepSeekParser;
 use crate::parsers::gemini::GeminiParser;
 use crate::parsers::grok::GrokParser;
 use crate::parsers::hermes::HermesParser;
@@ -20,10 +22,11 @@ use crate::parsers::kiro::KiroParser;
 use crate::parsers::openclaw::OpenClawParser;
 use crate::parsers::opencode::OpenCodeParser;
 use crate::parsers::pi::PiParser;
+use crate::parsers::qoder::QoderParser;
 use crate::parsers::{path_eq_for_matching, AgentParser};
 
 /// Every locally-parsable agent, in the canonical parser order.
-const ALL_PARSER_AGENTS: [AgentType; 13] = [
+const ALL_PARSER_AGENTS: [AgentType; 16] = [
     AgentType::ClaudeCode,
     AgentType::Codex,
     AgentType::OpenCode,
@@ -37,6 +40,9 @@ const ALL_PARSER_AGENTS: [AgentType; 13] = [
     AgentType::Grok,
     AgentType::Cursor,
     AgentType::Kiro,
+    AgentType::DeepSeek,
+    AgentType::Qoder,
+    AgentType::Antigravity,
 ];
 
 fn build_parser(agent_type: AgentType) -> Box<dyn AgentParser> {
@@ -54,6 +60,9 @@ fn build_parser(agent_type: AgentType) -> Box<dyn AgentParser> {
         AgentType::Grok => Box::new(GrokParser::new()),
         AgentType::Cursor => Box::new(CursorParser::new()),
         AgentType::Kiro => Box::new(KiroParser::new()),
+        AgentType::DeepSeek => Box::new(DeepSeekParser::new()),
+        AgentType::Qoder => Box::new(QoderParser::new()),
+        AgentType::Antigravity => Box::new(AntigravityParser::new()),
         // Custom agents' history lives in codeg's own ACP transcript.
         AgentType::Custom(_) => {
             Box::new(crate::parsers::acp_native::AcpNativeParser::new(agent_type))
@@ -340,10 +349,14 @@ async fn refresh_existing(
 /// the sync costs one index build plus one UPDATE per row that genuinely
 /// drifted, with no per-session SELECT.
 ///
-/// `rows` is matched, not `items`, so historical duplicate rows sharing an
-/// `(agent_type, external_id)` (the pair has no unique index) all converge.
-/// A row error is logged and skipped: a best-effort refresh must never fail the
-/// scan it rides along with.
+/// `rows` is matched, not `items`, so every row carrying an `external_id` is
+/// visited directly rather than looked up per session. (An earlier version of
+/// this comment claimed the pair had no unique index and that duplicate rows
+/// therefore had to converge — both are wrong: the init migration creates
+/// `idx_conversation_external_agent` UNIQUE over `(external_id, agent_type)`,
+/// so duplicates cannot exist. The iteration shape is unchanged; only the
+/// stated reason was.) A row error is logged and skipped: a best-effort refresh
+/// must never fail the scan it rides along with.
 pub(crate) async fn sync_imported_sessions(
     conn: &DatabaseConnection,
     rows: &[conversation::Model],
