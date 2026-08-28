@@ -55,3 +55,9 @@ src-tauri/binaries/
 
 # pnpm local store (pnpm 11+)
 .pnpm-store/
+
+# AI retrieval indexes (warmed by .cursor/install.sh + the index-warm terminal).
+# Local/machine-specific: the ACE index uploads to the team backend and the
+# codegraph DB is a per-checkout SQLite artifact — never commit either.
+.ace-tool/
+.codegraph/

@@ -7,6 +7,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+REPO_ROOT="$(pwd)"
 
 # 1. System libraries required by the Rust server / mcp build.
 #    - libssl-dev + pkg-config: reqwest defaults to native-tls, which links
@@ -34,5 +35,13 @@ pnpm install --frozen-lockfile
 #    A full build is intentionally left to the developer / snapshot to keep the
 #    install phase bounded.
 (cd src-tauri && cargo fetch)
+
+# 5. Warm the AI retrieval indexes (codegraph + ACE). fail-soft: this must never
+#    fail the install, so it runs through the always-0 .cursor/index-warm.sh and
+#    is additionally guarded with `|| true`. Dependency failures above already
+#    short-circuit via `set -e`; only index warming is allowed to be best-effort.
+#    A boot-time `index-warm` terminal (see .cursor/environment.json) re-warms on
+#    every start to cover snapshot invisibility and code drift.
+bash "$REPO_ROOT/.cursor/index-warm.sh" "$REPO_ROOT" || true
 
 echo "[install] Codeg environment ready."

@@ -1,5 +1,11 @@
 {
   "name": "Codeg",
   "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "index-warm",
+      "command": "bash .cursor/index-warm.sh /workspace"
+    }
+  ],
   "ports": [3000, 3080]
 }
