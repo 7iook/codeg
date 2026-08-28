@@ -1,0 +1,5 @@
+{
+  "name": "Codeg",
+  "install": "bash .cursor/install.sh",
+  "ports": [3000, 3080]
+}
