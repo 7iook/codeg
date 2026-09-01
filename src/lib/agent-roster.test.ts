@@ -46,7 +46,10 @@ function rustDelegationAgentTypes(): string[] {
   const delegateTool = schema.find((tool) => tool.name === "delegate_to_agent")
   const agentTypes = delegateTool?.inputSchema?.properties?.agent_type?.enum
 
-  expect(agentTypes, "delegate_to_agent agent_type.enum is missing").toBeDefined()
+  expect(
+    agentTypes,
+    "delegate_to_agent agent_type.enum is missing"
+  ).toBeDefined()
   return agentTypes ?? []
 }
 

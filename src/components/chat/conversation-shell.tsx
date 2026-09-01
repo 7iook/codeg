@@ -1,3 +1,4 @@
+import type { ConversationFolderPickerOverride } from "@/components/chat/conversation-context-bar"
 import { useMemo, type ReactNode } from "react"
 import { useTranslations } from "next-intl"
 import type {
@@ -82,6 +83,8 @@ interface ConversationShellProps {
   agentType?: AgentType | null
   availableCommands?: AvailableCommandInfo[] | null
   attachmentTabId?: string | null
+  /** Pass-through: see `MessageInput`. */
+  folderPickerOverride?: ConversationFolderPickerOverride
   draftStorageKey?: string | null
   hideInput?: boolean
   /** Optional banner rendered in the composer dock, where the input sits.
@@ -167,6 +170,7 @@ export function ConversationShell({
   agentType,
   availableCommands,
   attachmentTabId,
+  folderPickerOverride,
   draftStorageKey,
   hideInput = false,
   composerBanner,
@@ -334,6 +338,7 @@ export function ConversationShell({
               agentType={agentType}
               availableCommands={availableCommands}
               attachmentTabId={attachmentTabId}
+              folderPickerOverride={folderPickerOverride}
               draftStorageKey={draftStorageKey}
               isActive={isActive}
               showActiveFlow={showActiveFlow}

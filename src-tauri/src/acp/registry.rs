@@ -157,6 +157,49 @@ impl AcpAgentMeta {
             AgentDistribution::SystemBinary { .. } => None,
         }
     }
+
+    /// Whether asking for a version other than the pinned one can actually
+    /// FETCH that version on this machine.
+    ///
+    /// Having a `registry_version` does not imply it: a binary agent's custom
+    /// install works by substituting the requested version into the pinned
+    /// download URL (`apply_custom_version_to_url`), which only produces a
+    /// different URL when the pinned version is a substring of it. Antigravity
+    /// is the counter-example — its `version` is the ACP registry's `1.0.0`
+    /// while its URLs carry Google's build id
+    /// (`agy_acp_server_20260818_01_RC01`), so the substitution is a no-op and
+    /// the "install 1.2.3" the user asked for would download the SAME bytes
+    /// and cache them under the new number. That is worse than refusing:
+    /// `installed_version` then reports a build that was never fetched.
+    ///
+    /// Judged per-platform, because only the current platform's URL is ever
+    /// downloaded and a future agent may template one target but not another.
+    /// An unsupported platform answers `false` — there is nothing to install.
+    ///
+    /// Uvx pins its version inside the package spec and the download path
+    /// rejects it outright, so it is `false` rather than "ignored silently".
+    ///
+    /// `SystemBinary` is `false` for a stronger reason: the user owns the
+    /// install and codeg has no fetch channel at all (no URL, no cache, no
+    /// pinned `registry_version` — see
+    /// docs/architecture/ADR-0001-agent-distribution-system-binary.md).
+    /// Accepting a requested version would record one codeg never fetched and
+    /// cannot fetch, while the process on PATH keeps whatever version the user
+    /// installed — the same "reports a build that was never fetched" failure
+    /// this predicate exists to prevent, in its most absolute form.
+    pub fn supports_custom_version(&self) -> bool {
+        match &self.distribution {
+            AgentDistribution::Npx { .. } => true,
+            AgentDistribution::Uvx { .. } => false,
+            AgentDistribution::SystemBinary { .. } => false,
+            AgentDistribution::Binary {
+                version, platforms, ..
+            } => platforms
+                .iter()
+                .find(|p| p.platform == current_platform())
+                .is_some_and(|p| p.url.contains(version)),
+        }
+    }
 }
 
 /// Launch args for Google Antigravity's ACP server, resolved at compile time.
@@ -410,6 +453,49 @@ pub fn goal_control_is_out_of_band(agent_type: AgentType) -> bool {
     matches!(agent_type, AgentType::Codex)
 }
 
+/// Whether this agent's resolved launch recipe runs Cursor's ACP adapter
+/// (`cursor-agent … acp`). Custom agents that wrap the same binary as the
+/// built-in Cursor entry must advertise the same client capabilities.
+pub fn uses_cursor_acp_backend(agent_type: AgentType) -> bool {
+    distribution_uses_cursor_acp(&get_agent_meta(agent_type).distribution)
+}
+
+fn distribution_uses_cursor_acp(distribution: &AgentDistribution) -> bool {
+    match distribution {
+        // `SystemBinary` launches `cmd` straight off PATH, so its (cmd, args)
+        // pair IS the resolved launch recipe — exactly what the Npx / Binary
+        // arms inspect. A user-installed `cursor-agent … acp` must advertise
+        // the same client capabilities as the built-in entry that wraps the
+        // same binary; where the executable came from is irrelevant to what
+        // protocol it speaks.
+        AgentDistribution::Npx { cmd, args, .. }
+        | AgentDistribution::Binary { cmd, args, .. }
+        | AgentDistribution::SystemBinary { cmd, args, .. } => {
+            launch_spec_uses_cursor_acp(cmd, args)
+        }
+        AgentDistribution::Uvx {
+            cmd,
+            args,
+            system_cmd,
+            ..
+        } => {
+            launch_spec_uses_cursor_acp(cmd, args)
+                || system_cmd.is_some_and(|(c, a)| launch_spec_uses_cursor_acp(c, a))
+        }
+    }
+}
+
+/// True when the resolved executable basename is `cursor-agent` and the
+/// process is launched in ACP mode (`acp` argument present).
+fn launch_spec_uses_cursor_acp(cmd: &str, args: &[&str]) -> bool {
+    let trimmed = cmd.trim();
+    let base = std::path::Path::new(trimmed)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(trimmed);
+    base.eq_ignore_ascii_case("cursor-agent") && args.contains(&"acp")
+}
+
 pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
     if let AgentType::Custom(id) = agent_type {
         return crate::acp::custom_registry::get(id)
@@ -659,9 +745,76 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // continuation. Either way it is an extra model round-trip per
             // prompt, and it is gated on a client advertisement codeg does not
             // make — see `build_client_capabilities` in connection.rs.
+            // 1.6.0/1.6.2 (no 1.5.0 or 1.6.1 was published) add NO new modules
+            // and nothing wire-visible: `@openai/codex` moves to ^0.148.0,
+            // `thread/reverted` + `thread/queue/changed` join the adapter's
+            // IGNORED-notification list (so they never reach a client), and
+            // `misalignmentPolicyViolation` becomes a second codex error name
+            // mapping onto the EXISTING `policy_denied` bucket —
+            // `SESSION_FAILURE_POLICY` (the codex→AIR category/actions table)
+            // is byte-identical to 1.3.0's, so the six-category vocabulary in
+            // `AcpEvent::SessionFailure` is unchanged. The rest is logging.
+            // 1.7.0 rebuilds the permission layer (`src/permissions/*`) and
+            // redefines the three approval presets. Both are wire-visible:
+            //
+            // (a) Option-level `_meta.permission.changes[]` is GONE. Codex's
+            // reason moves from `toolCall.title` (1.4.0's
+            // `params.reason ?? "Permissions Request"`) to REQUEST-level
+            // `_meta.permission = {version: 1, title, description?}`, with
+            // `{version: 1, description}` on individual options (MCP
+            // elicitation approvals only). Titles are now four fixed strings
+            // ("Run command?" / "Allow network access?" / "Make edits?" /
+            // "Grant permissions?") and the action itself is described through
+            // standard ACP fields `parse_permission_tool_call` already reads
+            // (`rawInput.command/cwd/url/additionalPermissions`, `locations`,
+            // `content`). `handle_permission_request` hoists the request meta
+            // onto the card so the reason survives; claude-agent-acp 0.69.0
+            // still emits `changes[]`, so that parser stays. Codex's option
+            // IDs were also renamed (`allow_for_session`,
+            // `accept_execpolicy_amendment`, `apply_network_policy_amendment:N`
+            // …) — inert here, codeg only echoes back the selected id — and
+            // network deny amendments introduce codex's first `reject_always`
+            // option kind, which `handle_permission_request` already maps.
+            // `_meta.codex = {kind: "plan_review", planItemId}` is unchanged,
+            // so `is_codex_plan_review` still fires.
+            //
+            // (b) `AgentMode`: the `read-only` preset's sandbox became
+            // `workspaceWrite` (it was `readOnly`) and the presets are now
+            // separated by a new `approvalsReviewer` axis — `read-only` =
+            // "Ask for approval" (reviewer `user`), `agent` = "Approve for me"
+            // (reviewer `auto_review`, i.e. a model decides which escalations
+            // to show), `agent-full-access` unchanged. Each preset also gains
+            // `_meta.kind` (`standard` / `auto_review` / `full_access`) on both
+            // `SessionMode` and the `mode` config option. There is NO read-only
+            // sandbox preset any more, which is why
+            // `codex_initial_agent_mode` (commands/acp.rs) can no longer
+            // promise to preserve one — see its doc comment.
+            //
+            // NOT adopted: native ACP subagent sessions (the draft subagent
+            // RFD). The gate is bilateral — `clientCapabilities.subagents: {}`
+            // or AIR `nativeSubagentSessions` — and codeg advertises neither,
+            // so the lifecycle stays the legacy `subAgentActivity` tool call
+            // whose shape (`_meta.codex.subagent = {threadId, path, activity}`)
+            // is byte-identical to 1.4.0's. Opting in is not merely unhelpful,
+            // it is undeliverable: `agent-client-protocol-schema` 0.11.7 has no
+            // `subagents` field on `ClientCapabilities`, and its `SessionUpdate`
+            // is an internally-tagged enum with no catch-all arm, so the
+            // `subagent_spawned` / `subagent_state_update` notifications would
+            // fail to deserialize — child output would then stream to a child
+            // session id codeg never learned about and vanish from the
+            // timeline. Revisit only after the schema crate ships both.
+            // Likewise still not adopted: `agentFileChangeReport` (unchanged
+            // since 1.4.0). `compaction_update` / `compaction_summary_chunk`
+            // appear in the bundle but come from the vendored
+            // `@agentclientprotocol/sdk` 1.4.0 SCHEMA only — codex-acp keeps
+            // emitting the `contextCompaction` synthetic tool call, so the
+            // compaction card is untouched. Steering still ships no
+            // `promptRequired` opt-in (tarball grep: zero hits ⇒ the arm below
+            // stays None), and there is still no `engines.node`, so the 20.0.0
+            // floor is retained.
             distribution: AgentDistribution::Npx {
-                version: "1.4.0",
-                package: "@agentclientprotocol/codex-acp@1.4.0",
+                version: "1.7.0",
+                package: "@agentclientprotocol/codex-acp@1.7.0",
                 cmd: "codex-acp",
                 args: &[],
                 env: &[],
@@ -674,8 +827,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Gemini CLI",
             description: "Google's official CLI for Gemini",
             distribution: AgentDistribution::Npx {
-                version: "0.55.1",
-                package: "@google/gemini-cli@0.55.1",
+                version: "0.57.0",
+                package: "@google/gemini-cli@0.57.0",
                 cmd: "gemini",
                 args: &["--acp", "--skip-trust"],
                 env: &[],
@@ -704,8 +857,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Cline",
             description: "Autonomous coding agent CLI",
             distribution: AgentDistribution::Npx {
-                version: "3.0.56",
-                package: "cline@3.0.56",
+                version: "3.0.60",
+                package: "cline@3.0.60",
                 cmd: "cline",
                 args: &["--acp"],
                 env: &[],
@@ -718,39 +871,39 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "OpenCode",
             description: "The open source coding agent",
             distribution: AgentDistribution::Binary {
-                version: "1.18.20",
+                version: "1.18.25",
                 cmd: "opencode",
                 args: &["acp"],
                 env: &[],
                 platforms: &[
                     PlatformBinary {
                         platform: "darwin-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.20/opencode-darwin-arm64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-darwin-arm64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "darwin-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.20/opencode-darwin-x64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-darwin-x64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "linux-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.20/opencode-linux-arm64.tar.gz",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-linux-arm64.tar.gz",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "linux-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.20/opencode-linux-x64.tar.gz",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-linux-x64.tar.gz",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "windows-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.20/opencode-windows-arm64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-windows-arm64.zip",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "windows-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.20/opencode-windows-x64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.18.25/opencode-windows-x64.zip",
                         sha256: None,
                     },
                 ],
@@ -769,8 +922,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // Docker / Nix are the supported channels. The npm `hermes-agent`
             // package is a COMMUNITY bridge (wyrtensi/hermes-agent-npm, not
             // Nous Research), pinned here at an exact, audited version: its
-            // postinstall clones the OFFICIAL repo at tag v2026.8.19 verifying
-            // the full commit SHA (fcbd1076…), bootstraps an isolated Python
+            // postinstall clones the OFFICIAL repo at tag v2026.8.27 verifying
+            // the full commit SHA (5fc308a7…), bootstraps an isolated Python
             // 3.11 venv with a checksum-pinned uv, and `uv sync --locked
             // --extra all` (⊇ the acp+mcp extras) from upstream's lockfile —
             // all inside the npm package directory; config/credentials stay in
@@ -778,25 +931,25 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // console script, so `hermes acp` is the same adapter the official
             // install runs. Keep the pin EXACT on version bumps and re-audit
             // the wrapper diff — the exact pin is what bounds the third-party
-            // trust surface. 0.20.5 audited, and this bump is the cheap kind:
-            // every file in the tarball EXCEPT `package.json` is byte-identical
-            // to the fully-read 0.20.4 wrapper — `bin/`, the whole `lib/` (incl.
-            // `runtime-checkout.js`), and `scripts/postinstall.js` with its
-            // `fetchAndVerifyPinnedTag` hard `rev-parse <tag>^{commit}` equality
-            // against the 40-hex pin and its checksum-pinned `uv` installer /
-            // venv bootstrap. `package.json` moves only the version and the
-            // upstream pin. That new pin resolves as advertised: the annotated
-            // tag v2026.8.19 dereferences to exactly fcbd1076…, tagged by
-            // Teknium, and is NousResearch's own "Hermes Agent v0.20.5
-            // (v2026.8.19)" release.
+            // trust surface. 0.20.6 audited, and this bump is the cheap kind
+            // (same as 0.20.4→0.20.5): every file in the tarball EXCEPT
+            // `package.json` is byte-identical to the fully-read 0.20.4 wrapper
+            // — `bin/`, the whole `lib/` (incl. `runtime-checkout.js`), and
+            // `scripts/postinstall.js` with its `fetchAndVerifyPinnedTag` hard
+            // `rev-parse <tag>^{commit}` equality against the 40-hex pin and
+            // its checksum-pinned `uv` installer / venv bootstrap. That last
+            // one is byte-identical by sha256, not just by diff. `package.json`
+            // moves only the version and the upstream pin. That new pin
+            // resolves as advertised: the annotated tag v2026.8.27
+            // dereferences to exactly 5fc308a7…, tagged by Teknium.
             //
             // Launch preference: `resolve_npx_command("hermes")` checks PATH
             // first, so an official-installer `hermes` (which self-updates)
             // naturally outranks the npm-managed copy; the npm global install
             // is the managed/one-click channel codeg's Install button drives.
             distribution: AgentDistribution::Npx {
-                version: "0.20.5",
-                package: "hermes-agent@0.20.5",
+                version: "0.20.6",
+                package: "hermes-agent@0.20.6",
                 cmd: "hermes",
                 args: &["acp"],
                 env: &[],
@@ -811,8 +964,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "CodeBuddy",
             description: "Tencent Cloud's official AI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "2.137.1",
-                package: "@tencent-ai/codebuddy-code@2.137.1",
+                version: "2.141.0",
+                package: "@tencent-ai/codebuddy-code@2.141.0",
                 cmd: "codebuddy",
                 args: &["--acp"],
                 env: &[],
@@ -824,28 +977,38 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             supports_mcp: true,
             name: "Kimi Code",
             description: "Moonshot AI's official CLI coding assistant (ACP)",
-            // DELIBERATELY BEHIND `latest`: 0.36.1 is the last release where
-            // MCP servers handed over on the ACP connection actually come up.
-            // On 0.37.x they do not — which takes the codeg-mcp companion (and
-            // therefore multi-agent delegation) down with every user server, so
-            // "newer" is a regression here. Field-observed on 0.37.x; do NOT
-            // bump this pin on a version number alone — reconnect with a real
-            // MCP entry and confirm its tools are callable first.
+            // NEVER PIN INTO 0.37.0–0.38.0. Those releases hard-fail
+            // `session/new` (and `session/load` / `session/resume`) with "ACP
+            // stdio MCP server <name> does not declare a runtime identity" as
+            // soon as any stdio server rides the wire — for Kimi that is always
+            // the codeg-mcp companion, so the whole agent was unusable, not
+            // just delegation. codeg sat on 0.36.1 until 0.39.0 restored it.
             //
-            // Where NOT to look when re-testing: the wire-facing surface is a
-            // red herring. Diffing the 0.36.1 and 0.37.2 bundles, the whole
-            // `packages/acp-adapter/src/server.ts` region is byte-identical
-            // (`newSession`/`loadSession`/`resumeSession` all still run
-            // `acpMcpServersToConfigs(params.mcpServers)` into the harness),
-            // `packages/acp-server/src/server.ts` changes nothing MCP-related,
-            // and BOTH advertise the same `mcpCapabilities { http, sse }`. So
-            // the handshake and the request handlers look fine and prove
-            // nothing; whatever breaks is further in, around the
-            // `agent-core-v2` `mcpService` / `mcpCore` connection-manager
-            // rework that 0.37.x shipped.
+            // Root cause, if it ever regresses: 0.37.x added a SECOND converter
+            // (`acpMcpServersToConfigRecord`), pointed the three session entry
+            // points at it, and left the old `acpMcpServersToConfigs` in the
+            // bundle as dead code. The new one handled only `http`/`sse` and
+            // threw on an absent `type` — which is how ACP spells stdio. 0.39.0
+            // gives it a stdio arm again (`{transport:"stdio", …,
+            // runtime_id:"local"}`), feeding the `runtime_id` that Kimi's own
+            // session-scoped connection manager demands; codeg sends nothing
+            // extra. Diffing the old converter or the handshake proves nothing
+            // — both were byte-identical across the break.
+            //
+            // 0.39.0 was verified live before adopting it rather than assumed
+            // from the version number: a stdio server handed over on
+            // `session/new` is spawned, its tools reach the model as
+            // `mcp__<server>__<tool>`, `tools/call` runs, and the result comes
+            // back — same for a server in Kimi's own `~/.kimi-code/mcp.json`.
+            // For 0.39.1 the check is the cheaper source-level one, since the
+            // failure is a single missing match arm: `dist/main.mjs` still
+            // gives `acpMcpServersToConfigRecord` its absent-`type` arm
+            // emitting `{transport:"stdio", …, runtime_id:"local"}`, and the
+            // "does not declare a runtime identity" throw is nowhere in the
+            // bundle. Any future bump must re-check at least this much.
             distribution: AgentDistribution::Npx {
-                version: "0.36.1",
-                package: "@moonshot-ai/kimi-code@0.36.1",
+                version: "0.39.1",
+                package: "@moonshot-ai/kimi-code@0.39.1",
                 cmd: "kimi",
                 args: &["acp"],
                 env: &[],
@@ -1080,13 +1243,30 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // `dsh-session-persistence-jsonl`'s `session.jsonl[.zstd]` tree —
             // are unchanged across rc.7 → rc.2, so nothing else moved.
             //
+            // 0.7.0 moves NOTHING on the wire — `protocol/initialize.js`差异
+            // 只有 `AGENT_INFO.version` 一行，`@agentclientprotocol/sdk` 和上面
+            // 那三个被镜像的 `dsh-*` 依赖都停在原版本，所以上述能力断言与
+            // `parsers::deepseek` 都不用动。两处值得知道的行为变化：
+            //
+            // * `session/load` + `session/fork` 的 cwd 校验从裸字符串相等换成
+            //   `sameWorkspace()`（realpath.native，fail-closed）。这是**放宽**：
+            //   codeg 送的工作区路径以前只要拼写与日志里记的不同就被拒——macOS
+            //   的 `/var` → `/private/var`、Windows 8.3 短名——恢复会莫名失败。
+            //   `session/list` 的 cwd 过滤同样改成按目录判定。
+            // * Windows 上模型面向的 shell 工具从 `bash` 换成 `pwsh`
+            //   (`composition/shell.js` 的 `mountNativeShell`)；非 Windows 仍是
+            //   `bash`。`dsh-tool-pwsh` 的 `presentCall` 与 `dsh-tool-bash` 逐字
+            //   同形（前台 `card: "terminal"` + `{title, description, cwd?}`，
+            //   后台才是 `card: "generic"` + 裸字符串 `rawInput`），所以 codeg
+            //   的终端工具卡在两个平台上拿到的形状一致。
+            //
             // Keep `version` and `package` moving together: `version` is what
             // the agents list shows as the upgrade target beside the installed
             // version, so a drift leaves the Upgrade button installing one
             // version while the row keeps calling it stale.
             distribution: AgentDistribution::Npx {
-                version: "0.6.0",
-                package: "deepseek-acp@0.6.0",
+                version: "0.7.0",
+                package: "deepseek-acp@0.7.0",
                 cmd: "deepseek-acp",
                 args: &[],
                 env: &[],
@@ -1118,8 +1298,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // own copy AES-GCM-encrypted under the machine key, so it is not
             // the source). `engines.node: ">=20"`.
             distribution: AgentDistribution::Npx {
-                version: "1.1.28",
-                package: "@qoder-ai/qodercli@1.1.28",
+                version: "1.1.33",
+                package: "@qoder-ai/qodercli@1.1.33",
                 cmd: "qoder",
                 args: &["--acp"],
                 env: &[],
@@ -1171,8 +1351,11 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // VERSION vs URL. `version` is the ACP registry's ("1.0.0"); the
             // URLs carry Google's build id (`agy_acp_server_20260818_01_RC01`)
             // instead, so the two do NOT substitute into each other — bump
-            // both together, and note a custom-version override can only
-            // relabel the cache entry, not select a different build.
+            // both together. Because the version is not templatable into the
+            // URL, `supports_custom_version()` answers false for this agent and
+            // both the settings page and the download path refuse a custom
+            // version outright, rather than relabelling the cache entry with a
+            // build that was never fetched.
             // `darwin-x86_64` is deliberately absent: upstream publishes no
             // Intel macOS build, so those machines get `PlatformNotSupported`
             // rather than a 404 mid-download.
@@ -1371,6 +1554,29 @@ mod tests {
         }
     }
 
+    /// The URL is what decides whether a custom version can be installed, not
+    /// the presence of a `version`.
+    ///
+    /// Antigravity has both a registry version (`1.0.0`) and download URLs that
+    /// never mention it — they carry Google's build id — so substituting a
+    /// requested version into the URL is a no-op: the same archive comes down
+    /// and gets cached under whatever number was typed, leaving
+    /// `installed_version` describing a build that was never fetched. The
+    /// settings page used to offer the control to every binary agent with a
+    /// version, which is exactly that inference.
+    #[test]
+    fn custom_version_install_follows_the_url_not_the_version_field() {
+        assert!(
+            !get_agent_meta(AgentType::Antigravity).supports_custom_version(),
+            "antigravity's URLs carry a build id, so a version cannot be templated in"
+        );
+        // Cursor is the control: a binary agent whose release path IS its
+        // pinned version, so the substitution genuinely selects a build.
+        assert!(get_agent_meta(AgentType::Cursor).supports_custom_version());
+        // npx installs `<package>@<version>` directly — no URL involved.
+        assert!(get_agent_meta(AgentType::Codex).supports_custom_version());
+    }
+
     // Cursor is one of two dir-tree binary agents: the archive must be kept
     // intact (bundled Node runtime) and launched via the in-tree entry
     // script, never copied out as a single file.
@@ -1463,8 +1669,8 @@ mod tests {
         );
         assert_npx_version(
             AgentType::Gemini,
-            "0.55.1",
-            "@google/gemini-cli@0.55.1",
+            "0.57.0",
+            "@google/gemini-cli@0.57.0",
             Some("20.0.0"),
         );
         assert_npx_version(
@@ -1473,27 +1679,25 @@ mod tests {
             "openclaw@2026.7.1",
             Some("22.22.3"),
         );
-        assert_npx_version(AgentType::Cline, "3.0.56", "cline@3.0.56", Some("22.0.0"));
+        assert_npx_version(AgentType::Cline, "3.0.60", "cline@3.0.60", Some("22.0.0"));
         assert_npx_version(
             AgentType::CodeBuddy,
-            "2.137.1",
-            "@tencent-ai/codebuddy-code@2.137.1",
+            "2.141.0",
+            "@tencent-ai/codebuddy-code@2.141.0",
             Some("22.0.0"),
         );
-        // Kimi Code is pinned BELOW `latest` on purpose — 0.37.x breaks MCP
-        // over the ACP connection (see the registry entry). This assertion is
-        // the tripwire: a routine "bump everything to latest" sweep has to
-        // come here and read why before it can go green.
+        // Kimi Code must never land on 0.37.0–0.38.0: every session in that
+        // range dies on the codeg-mcp stdio entry (see the registry entry).
         assert_npx_version(
             AgentType::KimiCode,
-            "0.36.1",
-            "@moonshot-ai/kimi-code@0.36.1",
+            "0.39.1",
+            "@moonshot-ai/kimi-code@0.39.1",
             Some("22.19.0"),
         );
         assert_npx_version(
             AgentType::Codex,
-            "1.4.0",
-            "@agentclientprotocol/codex-acp@1.4.0",
+            "1.7.0",
+            "@agentclientprotocol/codex-acp@1.7.0",
             Some("20.0.0"),
         );
         assert_npx_version(AgentType::Pi, "0.0.33", "pi-acp@0.0.33", Some("22.0.0"));
@@ -1505,20 +1709,20 @@ mod tests {
         );
         assert_npx_version(
             AgentType::DeepSeek,
-            "0.6.0",
-            "deepseek-acp@0.6.0",
+            "0.7.0",
+            "deepseek-acp@0.7.0",
             Some("22.0.0"),
         );
         assert_npx_version(
             AgentType::Qoder,
-            "1.1.28",
-            "@qoder-ai/qodercli@1.1.28",
+            "1.1.33",
+            "@qoder-ai/qodercli@1.1.33",
             Some("20.0.0"),
         );
         assert_binary_version(
             AgentType::OpenCode,
-            "1.18.20",
-            "/releases/download/v1.18.20/",
+            "1.18.25",
+            "/releases/download/v1.18.25/",
         );
         // Hermes rides the community npm bridge (upstream retired its PyPI
         // channel at 0.19.0; see the registry entry). The npm package version
@@ -1526,8 +1730,8 @@ mod tests {
         // audited wrapper code is only what the pinned version ships.
         assert_npx_version(
             AgentType::Hermes,
-            "0.20.5",
-            "hermes-agent@0.20.5",
+            "0.20.6",
+            "hermes-agent@0.20.6",
             Some("20.0.0"),
         );
     }
@@ -1548,6 +1752,24 @@ mod tests {
             }
             other => panic!("expected npx distribution for Hermes, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn uses_cursor_acp_backend_matches_resolved_launch_spec() {
+        assert!(uses_cursor_acp_backend(AgentType::Cursor));
+        assert!(!uses_cursor_acp_backend(AgentType::Codex));
+        assert!(!uses_cursor_acp_backend(AgentType::ClaudeCode));
+        assert!(!uses_cursor_acp_backend(AgentType::Custom("acme")));
+
+        assert!(launch_spec_uses_cursor_acp("cursor-agent", &["acp"]));
+        assert!(launch_spec_uses_cursor_acp("cursor-agent.cmd", &["acp"]));
+        assert!(launch_spec_uses_cursor_acp(
+            "./dist-package/cursor-agent.cmd",
+            &["acp"]
+        ));
+        assert!(!launch_spec_uses_cursor_acp("cursor-agent", &[]));
+        assert!(!launch_spec_uses_cursor_acp("codex-acp", &[]));
+        assert!(!launch_spec_uses_cursor_acp("cursor-agent", &["stdio"]));
     }
 
     // Only Claude Code and Codex ship as a third-party ACP adapter wrapping a

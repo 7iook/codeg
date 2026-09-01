@@ -62,9 +62,7 @@ describe("KiroMcpScopePanel", () => {
     // The shadow warning must name the scope that lost, so the user knows the
     // file they just edited is the one being ignored.
     expect(
-      screen.getByText(
-        kiroT.shadowedBy.replace("{scopes}", kiroT.scope.global)
-      )
+      screen.getByText(kiroT.shadowedBy.replace("{scopes}", kiroT.scope.global))
     ).toBeInTheDocument()
   })
 

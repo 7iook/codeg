@@ -29,9 +29,13 @@
 //!     batch wait wakes as soon as ANY requested task reaches a terminal state.
 //!   * `cancel_task` — [`BrokerCancelTaskRequest`] for `cancel_delegation`;
 //!     returns a task report.
+//!   * `resume_task` — [`BrokerResumeTaskRequest`] for `resume_delegation`;
+//!     returns a task report (a `Running` ack under the unchanged task id, or
+//!     a refusal).
 //!   * `cancel` — fire-and-forget [`BrokerCancelRequest`] from MCP
 //!     `notifications/cancelled`, targeting an in-flight `delegate_to_agent`
-//!     call by `external_handle`; gets a `Value::Null` ack.
+//!     or `resume_delegation` call by `external_handle`; gets a `Value::Null`
+//!     ack.
 //!
 //! All arms are authenticated by the same per-launch `token`.
 //!
@@ -146,6 +150,23 @@ pub struct BrokerStatusRequest {
 pub struct BrokerCancelTaskRequest {
     pub token: String,
     pub task_id: String,
+}
+
+/// Resume a previously-canceled / interrupted delegation task by its broker
+/// `task_id`. Backs the `resume_delegation` MCP tool. Carries NO task text —
+/// the tool continues the ORIGINAL task in the child's resumed session; the
+/// optional `reason` is bounded interruption context, never new instructions.
+/// `external_handle` mirrors [`BrokerRequest::external_handle`]: a
+/// `notifications/cancelled` during resume setup must tear the re-spawned
+/// child back down.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerResumeTaskRequest {
+    pub token: String,
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_handle: Option<String>,
 }
 
 /// Pull the pending live-feedback notes for the parent session. Backs the
@@ -285,6 +306,7 @@ pub enum BrokerMessage {
     CancelTask(BrokerCancelTaskRequest),
     Continue(BrokerContinueRequest),
     CloseSession(BrokerCloseSessionRequest),
+    ResumeTask(BrokerResumeTaskRequest),
     Feedback(BrokerFeedbackRequest),
     CommitFeedback(BrokerCommitFeedbackRequest),
     Ask(BrokerAskRequest),
@@ -412,6 +434,15 @@ pub async fn client_close_session_round_trip(
     req: &BrokerCloseSessionRequest,
 ) -> io::Result<BrokerResponse> {
     message_round_trip(socket_path, &BrokerMessage::CloseSession(req.clone())).await
+}
+
+/// Dispatch a `resume_delegation` request and read back the task report (a
+/// `Running` ack when the resume took, or a refusal / setup-failure report).
+pub async fn client_resume_task_round_trip(
+    socket_path: &str,
+    req: &BrokerResumeTaskRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ResumeTask(req.clone())).await
 }
 
 /// Dispatch a `check_user_feedback` query and read back the
@@ -614,6 +645,28 @@ mod tests {
                 assert_eq!(req.max_messages, Some(20));
             }
             other => panic!("expected SessionInfo variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_task_message_round_trip_in_memory() {
+        let (mut a, mut b) = duplex(8 * 1024);
+        let msg = BrokerMessage::ResumeTask(BrokerResumeTaskRequest {
+            token: "tok".into(),
+            task_id: "task-1".into(),
+            reason: Some("app crashed".into()),
+            external_handle: Some("h1".into()),
+        });
+        write_frame(&mut a, &msg).await.unwrap();
+        let got: BrokerMessage = read_frame(&mut b).await.unwrap();
+        match got {
+            BrokerMessage::ResumeTask(req) => {
+                assert_eq!(req.token, "tok");
+                assert_eq!(req.task_id, "task-1");
+                assert_eq!(req.reason.as_deref(), Some("app crashed"));
+                assert_eq!(req.external_handle.as_deref(), Some("h1"));
+            }
+            other => panic!("expected ResumeTask variant, got {other:?}"),
         }
     }
 

@@ -8,6 +8,7 @@ import {
   ListChevronsUpDown,
   LayoutTemplate,
   ListTodo,
+  Map as MapIcon,
   Menu,
   MessagesSquare,
   SquarePen,
@@ -25,7 +26,6 @@ import {
   SidebarConversationList,
   type SidebarConversationListHandle,
 } from "@/components/conversations/sidebar-conversation-list"
-import { ForgeBetaBadge } from "@/components/forge/forge-beta-badge"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -105,6 +105,7 @@ const NAV_ITEM_ICONS: Record<SidebarNavItemId, LucideIcon> = {
   automations: Zap,
   tasks: ListTodo,
   forge: LayoutTemplate,
+  canvas: MapIcon,
 }
 
 /**
@@ -581,7 +582,17 @@ export function Sidebar() {
               if (isMobile) toggle()
               setRoute("forge")
             }}
-            trailing={<ForgeBetaBadge className="ml-auto" />}
+          />
+        )}
+        {isNavItemVisible(navItems, "canvas") && (
+          <SidebarNavButton
+            icon={MapIcon}
+            label={t("canvas")}
+            active={routeId === "canvas"}
+            onClick={() => {
+              if (isMobile) toggle()
+              setRoute("canvas")
+            }}
           />
         )}
       </div>

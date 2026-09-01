@@ -10,26 +10,13 @@ use crate::db::service::{conversation_service, folder_service, import_service, t
 #[cfg(feature = "tauri-runtime")]
 use crate::db::AppDatabase;
 use crate::models::*;
-use crate::parsers::acp_native::AcpNativeParser;
-use crate::parsers::antigravity::AntigravityParser;
-use crate::parsers::claude::ClaudeParser;
-use crate::parsers::cline::ClineParser;
-use crate::parsers::codebuddy::CodeBuddyParser;
+// Concrete parser type only for `load_thread_name_index`, which is codex's own
+// index reader and not part of the `AgentParser` trait. Every history read goes
+// through `build_agent_parser`.
 use crate::parsers::codex::CodexParser;
-use crate::parsers::cursor::CursorParser;
-use crate::parsers::deepseek::DeepSeekParser;
-use crate::parsers::gemini::GeminiParser;
-use crate::parsers::grok::GrokParser;
-use crate::parsers::hermes::HermesParser;
-use crate::parsers::kimi_code::KimiCodeParser;
-use crate::parsers::kiro::KiroParser;
-use crate::parsers::openclaw::OpenClawParser;
-use crate::parsers::opencode::OpenCodeParser;
-use crate::parsers::pi::PiParser;
-use crate::parsers::qoder::QoderParser;
 use crate::parsers::{
-    folder_name_from_path, normalize_path_for_matching, path_eq_for_matching, AgentParser,
-    ParseError,
+    build_agent_parser, folder_name_from_path, normalize_path_for_matching, path_eq_for_matching,
+    AgentParser, ParseError,
 };
 use crate::web::event_bridge::{
     emit_event, ConversationChange, ConversationsBulkChanged, EventEmitter, ImportScanProgress,
@@ -226,32 +213,25 @@ pub async fn save_opened_tabs(
     .await
 }
 
-/// Every locally-parsable agent paired with its parser, in listing order.
+/// Every locally-parsable builtin agent paired with its parser, in listing
+/// order.
 ///
-/// Hand-written, and an omission here is SILENT: the missing agent's sessions
-/// still open through `get_conversation` but never appear in the sidebar, the
-/// stats, the folder list, or the import scan. `parser_table_agent_types` +
-/// `every_registered_agent_has_a_parser_in_the_listing_table` pin it against
-/// `all_acp_agents()` so the next addition fails a test instead.
+/// `BUILTIN_AGENT_TYPES`, not `registry::builtin_acp_agents()`: the two differ
+/// in ORDER, and this list's order is the sidebar's tie-break for two
+/// conversations that compare equal on the active sort.
+///
+/// Derived from the shared table rather than hand-written, so an agent can no
+/// longer be silently absent from listings: `build_agent_parser` matches
+/// `AgentType` exhaustively, so a new agent without a parser is a compile
+/// error, and its presence in `BUILTIN_AGENT_TYPES` is what puts it here.
+/// `parser_table_agent_types` +
+/// `every_registered_agent_has_a_parser_in_the_listing_table` still pin the
+/// result against `all_acp_agents()`.
 fn build_parser_table() -> Vec<(AgentType, Box<dyn AgentParser>)> {
-    vec![
-        (AgentType::ClaudeCode, Box::new(ClaudeParser::new())),
-        (AgentType::Codex, Box::new(CodexParser::new())),
-        (AgentType::OpenCode, Box::new(OpenCodeParser::new())),
-        (AgentType::Gemini, Box::new(GeminiParser::new())),
-        (AgentType::OpenClaw, Box::new(OpenClawParser::new())),
-        (AgentType::Cline, Box::new(ClineParser::new())),
-        (AgentType::Hermes, Box::new(HermesParser::new())),
-        (AgentType::CodeBuddy, Box::new(CodeBuddyParser::new())),
-        (AgentType::KimiCode, Box::new(KimiCodeParser::new())),
-        (AgentType::Pi, Box::new(PiParser::new())),
-        (AgentType::Grok, Box::new(GrokParser::new())),
-        (AgentType::Cursor, Box::new(CursorParser::new())),
-        (AgentType::Kiro, Box::new(KiroParser::new())),
-        (AgentType::DeepSeek, Box::new(DeepSeekParser::new())),
-        (AgentType::Qoder, Box::new(QoderParser::new())),
-        (AgentType::Antigravity, Box::new(AntigravityParser::new())),
-    ]
+    crate::models::agent::BUILTIN_AGENT_TYPES
+        .iter()
+        .map(|&at| (at, build_agent_parser(at)))
+        .collect()
 }
 
 /// The agent types `build_parser_table` covers. Reads the real table rather
@@ -275,7 +255,7 @@ fn list_conversations_sync(
     // Registered custom agents read back from codeg's own ACP transcripts, so
     // their sessions participate in folder grouping and stats like any other.
     for custom in crate::acp::custom_registry::all() {
-        parsers.push((custom, Box::new(AcpNativeParser::new(custom))));
+        parsers.push((custom, build_agent_parser(custom)));
     }
 
     for (at, parser) in &parsers {
@@ -372,29 +352,7 @@ pub async fn get_conversation(
     conversation_id: String,
 ) -> Result<ConversationDetail, AppCommandError> {
     tokio::task::spawn_blocking(move || -> Result<ConversationDetail, AppCommandError> {
-        let parser: Box<dyn AgentParser> = match agent_type {
-            AgentType::ClaudeCode => Box::new(ClaudeParser::new()),
-            AgentType::Codex => Box::new(CodexParser::new()),
-            AgentType::OpenCode => Box::new(OpenCodeParser::new()),
-            AgentType::Gemini => Box::new(GeminiParser::new()),
-            AgentType::OpenClaw => Box::new(OpenClawParser::new()),
-            AgentType::Cline => Box::new(ClineParser::new()),
-            AgentType::Hermes => Box::new(HermesParser::new()),
-            AgentType::CodeBuddy => Box::new(CodeBuddyParser::new()),
-            AgentType::KimiCode => Box::new(KimiCodeParser::new()),
-            AgentType::Pi => Box::new(PiParser::new()),
-            AgentType::Grok => Box::new(GrokParser::new()),
-            AgentType::Cursor => Box::new(CursorParser::new()),
-            AgentType::Kiro => Box::new(KiroParser::new()),
-            AgentType::DeepSeek => Box::new(DeepSeekParser::new()),
-            AgentType::Qoder => Box::new(QoderParser::new()),
-            AgentType::Antigravity => Box::new(AntigravityParser::new()),
-            // Custom ACP agents have no native store to reverse-engineer;
-            // their history is codeg's own ACP transcript.
-            AgentType::Custom(_) => Box::new(AcpNativeParser::new(agent_type)),
-        };
-
-        parser
+        build_agent_parser(agent_type)
             .get_conversation(&conversation_id)
             .map_err(parse_error_to_app_error)
     })
@@ -1155,25 +1113,7 @@ pub async fn get_folder_conversation_core(
                 .map(|f| f.path),
         };
         tokio::task::spawn_blocking(move || -> Result<_, AppCommandError> {
-            let parser: Box<dyn AgentParser> = match at {
-                AgentType::ClaudeCode => Box::new(ClaudeParser::new()),
-                AgentType::Codex => Box::new(CodexParser::new()),
-                AgentType::OpenCode => Box::new(OpenCodeParser::new()),
-                AgentType::Gemini => Box::new(GeminiParser::new()),
-                AgentType::OpenClaw => Box::new(OpenClawParser::new()),
-                AgentType::Cline => Box::new(ClineParser::new()),
-                AgentType::Hermes => Box::new(HermesParser::new()),
-                AgentType::CodeBuddy => Box::new(CodeBuddyParser::new()),
-                AgentType::KimiCode => Box::new(KimiCodeParser::new()),
-                AgentType::Pi => Box::new(PiParser::new()),
-                AgentType::Grok => Box::new(GrokParser::new()),
-                AgentType::Cursor => Box::new(CursorParser::new()),
-                AgentType::Kiro => Box::new(KiroParser::new()),
-                AgentType::DeepSeek => Box::new(DeepSeekParser::new()),
-                AgentType::Qoder => Box::new(QoderParser::new()),
-                AgentType::Antigravity => Box::new(AntigravityParser::new()),
-                AgentType::Custom(_) => Box::new(AcpNativeParser::new(at)),
-            };
+            let parser = build_agent_parser(at);
             match parser.get_conversation(&eid) {
                 Ok(d) => Ok((
                     d.turns,
@@ -1275,11 +1215,17 @@ pub async fn get_folder_conversation_core(
     // The transcript is the richer source for the session's model. Codex is
     // the concrete case: an ACP-driven row is created before any
     // `turn_context` names a model, so the DB column can stay NULL forever
-    // while the rollout file knows the answer. Fill the *returned* summary
-    // only — the row itself is left alone — so the usage sync's
-    // session-model fallback and the detail view both see it.
-    if summary.model.is_none() {
-        summary.model = parsed_model;
+    // while the rollout file knows the answer.
+    //
+    // The parse WINS over the column rather than merely filling a hole in it.
+    // `seed_model_if_empty` now persists the first model a session is seen
+    // using, so "fill only when NULL" would pin this summary — and with it the
+    // details dialog, which reads `summary.model` ahead of the turns — to that
+    // first value for the life of the conversation, and a mid-session `/model`
+    // switch would never show. The stored value stays as the fallback for a
+    // transcript that names no model at all.
+    if let Some(parsed) = parsed_model.filter(|m| !m.trim().is_empty()) {
+        summary.model = Some(parsed);
     }
 
     // Historical recovery for the read-only sub-agent viewer: JSONL parsers
@@ -1525,6 +1471,11 @@ pub async fn get_folder_conversation_with_live_core(
     // hand. `refresh_auto_title` re-checks the lock and equality, so once the
     // title converges this becomes a cheap no-op on every later turn. The
     // pre-check here just avoids the extra DB round-trip in the common case.
+    //
+    // One upsert for the whole fetch: the title and the model can both land on
+    // the same open, and the sidebar has no use for two broadcasts of the same
+    // row a microsecond apart.
+    let mut upserted = false;
     if !detail.summary.title_locked {
         if let Some(parsed) = parsed_title.as_deref().map(str::trim) {
             if !parsed.is_empty() && detail.summary.title.as_deref() != Some(parsed) {
@@ -1537,7 +1488,7 @@ pub async fn get_folder_conversation_with_live_core(
                 {
                     Ok(true) => {
                         detail.summary.title = Some(parsed.to_string());
-                        emit_conversation_upsert(emitter, conn, conversation_id).await;
+                        upserted = true;
                         chat_channel_manager
                             .sync_conversation_title(conn, conversation_id, parsed)
                             .await;
@@ -1549,6 +1500,25 @@ pub async fn get_folder_conversation_with_live_core(
                 }
             }
         }
+    }
+
+    // Session-model backfill, the sibling of the auto-title above and for the
+    // same reason: the row was inserted before any model was named, and the
+    // sidebar reads the row rather than the transcript this parse just walked.
+    // `seed_model_if_empty` re-checks emptiness in SQL, so once a session has a
+    // model this is a no-op that writes nothing.
+    if let Some(model) = detail.summary.model.clone() {
+        match conversation_service::seed_model_if_empty(conn, conversation_id, &model).await {
+            Ok(true) => upserted = true,
+            Ok(false) => {}
+            Err(e) => tracing::error!(
+                "[conversations] session-model backfill failed for {conversation_id}: {e}"
+            ),
+        }
+    }
+
+    if upserted {
+        emit_conversation_upsert(emitter, conn, conversation_id).await;
     }
 
     if let Some((pending, started_at)) = manager
@@ -2406,6 +2376,15 @@ pub async fn delete_conversation_with_cleanup_core(
         emit_conversation_upsert(emitter, conn, parent_id).await;
     }
     cleanup_tabs_for_deleted_conversation(emitter, conn, conversation_id).await;
+    // Canvas references (pinned cards, custom-region memberships) survive the
+    // soft delete for the same reason tabs do — no FK cascade ever fires — so
+    // they get the same explicit scrub, at the same funnel.
+    crate::commands::canvas::cleanup_canvas_for_deleted_conversation(
+        emitter,
+        conn,
+        conversation_id,
+    )
+    .await;
     if let Some(folder_id) = folder_id {
         cleanup_chat_folder_for_deleted_conversation(conn, folder_id).await;
     }

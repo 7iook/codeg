@@ -139,9 +139,12 @@ async fn handle_acp_envelope(
                 // gets `None` and the row is preserved exactly once.
                 // Bridge sessions are chat-channel ROOT conversations; a
                 // Delegate row's resume credential is owned by the
-                // delegation lifecycle, not this writer.
+                // delegation lifecycle, not this writer — hence the
+                // skip-delegate variant, which refuses even the minting write
+                // on an empty credential (a bridge session id must never
+                // BECOME one).
                 let continues = crate::acp::continued_session_ids(session.agent_type, session_id);
-                match conversation_service::bind_external_id(
+                match conversation_service::bind_external_id_skip_delegate(
                     db,
                     session.conversation_id,
                     session_id,

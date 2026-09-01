@@ -53,6 +53,39 @@ pub struct AgentContinuationCapability {
     pub supports_resume: bool,
 }
 
+/// Result of [`ConnectionSpawner::spawn_for_resume`]: the connection now
+/// hosting the resumed agent session, plus whether it was DEDUP-REUSED from an
+/// already-live connection rather than freshly spawned (the manager reuses a
+/// live connection for the same (agent, working_dir, session_id) — e.g. the
+/// user has the canceled child session open in a tab). The broker's failure
+/// teardown keys on `reused`: a fresh connection is always safe to disconnect
+/// — even after a failed send has bound it to the conversation — while a
+/// reused one belongs to whoever was already driving it and must be left
+/// alone. Deciding this at spawn time is what a post-hoc "is anything live for
+/// this conversation?" probe cannot do: after a partially-failed send, the
+/// broker's OWN fresh connection may be the live one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumedSpawn {
+    pub connection_id: String,
+    pub reused: bool,
+}
+
+impl ResumedSpawn {
+    pub fn fresh(connection_id: impl Into<String>) -> Self {
+        Self {
+            connection_id: connection_id.into(),
+            reused: false,
+        }
+    }
+
+    pub fn reused(connection_id: impl Into<String>) -> Self {
+        Self {
+            connection_id: connection_id.into(),
+            reused: true,
+        }
+    }
+}
+
 /// Capabilities the delegation broker needs from whatever owns the ACP
 /// connections. v1 production impl is `Arc<ConnectionManager>` (see
 /// `acp/manager.rs`); tests use `mock::MockSpawner`.
@@ -124,28 +157,23 @@ pub trait ConnectionSpawner: Send + Sync {
         link: DelegationLink,
     ) -> Result<i32, SpawnerError>;
 
-    /// Cancel any in-flight prompt on the child connection. Idempotent:
-    /// calling on a connection with nothing in flight is a no-op success.
-    async fn cancel(&self, conn_id: &str) -> Result<(), SpawnerError>;
-
-    /// Tear down the child connection. Always called after the broker has
-    /// resolved (or failed) the pending call, to enforce v1's one-shot
-    /// semantics.
-    async fn disconnect(&self, conn_id: &str) -> Result<(), SpawnerError>;
-
-    /// Like [`ConnectionSpawner::spawn`], but revives a child that has already
-    /// existed: `session_id` is the child conversation row's persisted
-    /// `external_id` (the agent-assigned ACP session id), handed to
-    /// `session/resume` → `session/load` so the revived process keeps the
-    /// earlier turns' context. `None` means "no resume credential available" —
-    /// the impl then behaves exactly like `spawn` (cold session, context lost),
-    /// which the caller must surface to the user rather than silently accept.
+    /// Re-spawn a connection for an INTERRUPTED delegation child, resuming the
+    /// agent session identified by `external_session_id` (the child row's
+    /// `external_id`). Counterpart to [`Self::spawn`] for `resume_delegation`:
+    /// same parent-inherited emitter / window / runtime env, but the session is
+    /// loaded rather than created, so the child keeps its full prior context.
+    /// The returned [`ResumedSpawn::reused`] records whether the manager
+    /// dedup-reused an already-live connection instead of spawning — the
+    /// broker's failure teardown must not disconnect a reused one.
     ///
-    /// Passing a `session_id` also opts into `ConnectionManager`'s connection
-    /// dedup, so a still-live process for the same (agent, working_dir,
-    /// session) is reused instead of double-spawned.
-    ///
-    /// Returns the connection id to use for the next prompt.
+    /// `external_session_id` is REQUIRED (not `Option`): a resume with no
+    /// credential is not a resume. Callers that may lack one must reject
+    /// before reaching here — see the broker's `not_continuable` /
+    /// `resume_unavailable` gates, which refuse BEFORE any prompt side
+    /// effect rather than silently degrading into a cold `spawn` whose
+    /// context is gone. Passing the credential also opts into
+    /// `ConnectionManager`'s connection dedup, which is what `reused`
+    /// reports.
     ///
     /// # Takes no launch knobs — deliberately (R7.4), and the asymmetry is real
     ///
@@ -166,9 +194,9 @@ pub trait ConnectionSpawner: Send + Sync {
     ///   more turns ago and its argv cannot be rewritten. Whatever persona and
     ///   model that launch resolved are still in force, because it is still the
     ///   same process.
-    /// * `spawn_for_resume` DOES start a fresh process, so it is the only path
-    ///   where re-applying a knob would even be possible. Declining to is a
-    ///   choice, not a constraint.
+    /// * `spawn_for_resume` DOES start a fresh process (unless dedup reuses a
+    ///   live one), so it is the only path where re-applying a knob would even
+    ///   be possible. Declining to is a choice, not a constraint.
     ///
     /// Before changing that choice, note that the two knobs do NOT carry the
     /// same user-visible stakes, even though they ride the same mechanism:
@@ -198,10 +226,40 @@ pub trait ConnectionSpawner: Send + Sync {
         parent_connection_id: &str,
         agent_type: AgentType,
         working_dir: Option<String>,
-        session_id: Option<String>,
+        external_session_id: &str,
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
-    ) -> Result<String, SpawnerError>;
+    ) -> Result<ResumedSpawn, SpawnerError>;
+
+    /// Send the resume continuation prompt into the child's EXISTING
+    /// conversation row (`child_conversation_id`, in `folder_id`). Unlike
+    /// [`Self::send_prompt_linked_for_delegation`] this adopts the row instead
+    /// of creating one and passes NO delegation link — the row already carries
+    /// `parent_id` / `parent_tool_use_id` / `delegation_call_id` from the
+    /// original delegation, which is exactly what re-arms the lifecycle's
+    /// TurnComplete → `complete_call` routing for the resumed run.
+    async fn send_resume_prompt(
+        &self,
+        conn_id: &str,
+        prompt: String,
+        folder_id: i32,
+        child_conversation_id: i32,
+    ) -> Result<(), SpawnerError>;
+
+    /// Whether any live connection is currently bound to `conversation_id`.
+    /// Used by `resume_delegation` to tell a stale `in_progress` row (crash
+    /// leftover — resumable) from a child session that is genuinely active
+    /// outside the broker (user drives it in a tab — not resumable).
+    async fn has_live_connection_for_conversation(&self, conversation_id: i32) -> bool;
+
+    /// Cancel any in-flight prompt on the child connection. Idempotent:
+    /// calling on a connection with nothing in flight is a no-op success.
+    async fn cancel(&self, conn_id: &str) -> Result<(), SpawnerError>;
+
+    /// Tear down the child connection. Always called after the broker has
+    /// resolved (or failed) the pending call, to enforce v1's one-shot
+    /// semantics.
+    async fn disconnect(&self, conn_id: &str) -> Result<(), SpawnerError>;
 
     /// Send a follow-up prompt onto a child that ALREADY owns a conversation
     /// row — i.e. every turn after the delegation's first one.
@@ -270,9 +328,6 @@ pub mod mock {
         /// through unchanged (Native / no-persona path) — the observable
         /// half of the Native-vs-Hint mutual exclusivity.
         pub first_prompt_tasks: Mutex<Vec<String>>,
-        /// Every `spawn_for_resume` invocation, in call order — notably the
-        /// `session_id` the broker forwarded as the resume credential.
-        pub resume_args: Mutex<Vec<ResumeCallArgs>>,
         /// Every `send_followup_prompt` invocation, in call order.
         pub followups: Mutex<Vec<FollowupCallArgs>>,
         /// Connection ids `is_alive` must report as dead. Populated by
@@ -284,6 +339,17 @@ pub mod mock {
         /// connections without an entry answer `None` (state gone), matching
         /// the production behavior for an unknown id.
         pub capabilities: Mutex<std::collections::HashMap<String, AgentContinuationCapability>>,
+        /// Queued results for `spawn_for_resume`; recorded calls land in
+        /// `resume_spawn_args`. Separate queues from the fresh-spawn pair so a
+        /// test staging both paths can't cross-consume. Stage entries with
+        /// `ResumedSpawn::fresh(..)` / `ResumedSpawn::reused(..)`.
+        pub resume_spawn_results: Mutex<VecDeque<Result<ResumedSpawn, SpawnerError>>>,
+        pub resume_send_results: Mutex<VecDeque<Result<(), SpawnerError>>>,
+        pub resume_spawn_args: Mutex<Vec<ResumeSpawnCallArgs>>,
+        pub resume_send_args: Mutex<Vec<ResumeSendCallArgs>>,
+        /// Conversation ids `has_live_connection_for_conversation` answers
+        /// `true` for. Empty (default) = no live child connections.
+        pub live_conversations: Mutex<Vec<i32>>,
         /// When set, `send_prompt_linked_for_delegation` awaits this receiver
         /// before returning — lets a test hold `handle_request` in the window
         /// AFTER it has reserved the child (post-spawn) but BEFORE it parks the
@@ -315,19 +381,6 @@ pub mod mock {
         pub launch_options: Vec<crate::acp::delegation::persona::LaunchOption>,
     }
 
-    /// Recorded `spawn_for_resume` call. Same shape as [`SpawnCallArgs`] plus
-    /// the `session_id` resume credential, which is the whole reason the
-    /// resume variant exists.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct ResumeCallArgs {
-        pub parent_connection_id: String,
-        pub agent_type: AgentType,
-        pub working_dir: Option<String>,
-        pub session_id: Option<String>,
-        pub preferred_mode_id: Option<String>,
-        pub preferred_config_values: BTreeMap<String, String>,
-    }
-
     /// Recorded `send_followup_prompt` call. `conversation_id` + `folder_id`
     /// let a test assert the follow-up adopted the existing child row.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +389,28 @@ pub mod mock {
         pub message: String,
         pub conversation_id: i32,
         pub folder_id: i32,
+    }
+
+    /// Recorded `spawn_for_resume` call. Same shape as [`SpawnCallArgs`] plus
+    /// the `external_session_id` resume credential, which is the whole reason
+    /// the resume variant exists — broker tests assert the `external_id` from
+    /// the DB row is actually forwarded down to `spawn_agent`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResumeSpawnCallArgs {
+        pub parent_connection_id: String,
+        pub agent_type: AgentType,
+        pub working_dir: Option<String>,
+        pub external_session_id: String,
+        pub preferred_mode_id: Option<String>,
+        pub preferred_config_values: BTreeMap<String, String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResumeSendCallArgs {
+        pub conn_id: String,
+        pub prompt: String,
+        pub folder_id: i32,
+        pub child_conversation_id: i32,
     }
 
     impl MockSpawner {
@@ -382,6 +457,20 @@ pub mod mock {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.send_gate.lock().await = Some(rx);
             tx
+        }
+
+        pub async fn queue_resume_spawn(&self, r: Result<ResumedSpawn, SpawnerError>) {
+            self.resume_spawn_results.lock().await.push_back(r);
+        }
+
+        pub async fn queue_resume_send(&self, r: Result<(), SpawnerError>) {
+            self.resume_send_results.lock().await.push_back(r);
+        }
+
+        /// Mark `conversation_id` as having a live connection, so
+        /// `has_live_connection_for_conversation` answers `true` for it.
+        pub async fn mark_conversation_live(&self, conversation_id: i32) {
+            self.live_conversations.lock().await.push(conversation_id);
         }
 
         /// Install a one-shot gate that holds the next `spawn` (after it records
@@ -449,6 +538,60 @@ pub mod mock {
                 .unwrap_or_else(|| Err(SpawnerError::Send("no queued send result".into())))
         }
 
+        async fn spawn_for_resume(
+            &self,
+            parent_connection_id: &str,
+            agent_type: AgentType,
+            working_dir: Option<String>,
+            external_session_id: &str,
+            preferred_mode_id: Option<String>,
+            preferred_config_values: BTreeMap<String, String>,
+        ) -> Result<ResumedSpawn, SpawnerError> {
+            self.resume_spawn_args
+                .lock()
+                .await
+                .push(ResumeSpawnCallArgs {
+                    parent_connection_id: parent_connection_id.to_string(),
+                    agent_type,
+                    working_dir,
+                    external_session_id: external_session_id.to_string(),
+                    preferred_mode_id,
+                    preferred_config_values,
+                });
+            self.resume_spawn_results
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or_else(|| Err(SpawnerError::Spawn("no queued resume spawn result".into())))
+        }
+
+        async fn send_resume_prompt(
+            &self,
+            conn_id: &str,
+            prompt: String,
+            folder_id: i32,
+            child_conversation_id: i32,
+        ) -> Result<(), SpawnerError> {
+            self.resume_send_args.lock().await.push(ResumeSendCallArgs {
+                conn_id: conn_id.to_string(),
+                prompt,
+                folder_id,
+                child_conversation_id,
+            });
+            self.resume_send_results
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or_else(|| Err(SpawnerError::Send("no queued resume send result".into())))
+        }
+
+        async fn has_live_connection_for_conversation(&self, conversation_id: i32) -> bool {
+            self.live_conversations
+                .lock()
+                .await
+                .contains(&conversation_id)
+        }
+
         async fn cancel(&self, conn_id: &str) -> Result<(), SpawnerError> {
             self.cancels.lock().await.push(conn_id.to_string());
             Ok(())
@@ -461,34 +604,6 @@ pub mod mock {
             // "disconnected but still sendable" state.
             self.mark_dead(conn_id).await;
             Ok(())
-        }
-
-        async fn spawn_for_resume(
-            &self,
-            parent_connection_id: &str,
-            agent_type: AgentType,
-            working_dir: Option<String>,
-            session_id: Option<String>,
-            preferred_mode_id: Option<String>,
-            preferred_config_values: BTreeMap<String, String>,
-        ) -> Result<String, SpawnerError> {
-            self.resume_args.lock().await.push(ResumeCallArgs {
-                parent_connection_id: parent_connection_id.to_string(),
-                agent_type,
-                working_dir,
-                session_id,
-                preferred_mode_id,
-                preferred_config_values,
-            });
-            // Shares the `spawn_results` queue: from a broker test's point of
-            // view both paths "produce the next child connection id", and the
-            // recorded args (`spawn_args` vs `resume_args`) already distinguish
-            // which path ran.
-            self.spawn_results
-                .lock()
-                .await
-                .pop_front()
-                .unwrap_or_else(|| Err(SpawnerError::Spawn("no queued spawn result".into())))
         }
 
         async fn send_followup_prompt(
@@ -618,28 +733,30 @@ pub mod mock {
         }
 
         /// `spawn_for_resume` must record the resume credential it was handed
-        /// (`session_id`) so broker tests can assert the `external_id` from the
-        /// DB row is actually forwarded down to `spawn_agent` — the whole point
-        /// of the resume path.
+        /// (`external_session_id`) so broker tests can assert the `external_id`
+        /// from the DB row is actually forwarded down to `spawn_agent` — the
+        /// whole point of the resume path.
         #[tokio::test]
         async fn mock_spawn_for_resume_records_session_id() {
             let m = MockSpawner::new();
-            m.queue_spawn(Ok("revived-1".into())).await;
-            let id = m
+            m.queue_resume_spawn(Ok(ResumedSpawn::fresh("revived-1")))
+                .await;
+            let spawned = m
                 .spawn_for_resume(
                     "p1",
                     AgentType::ClaudeCode,
                     Some("/work".into()),
-                    Some("ext-abc".into()),
+                    "ext-abc",
                     None,
                     BTreeMap::new(),
                 )
                 .await
                 .unwrap();
-            assert_eq!(id, "revived-1");
-            let args = m.resume_args.lock().await;
+            assert_eq!(spawned.connection_id, "revived-1");
+            assert!(!spawned.reused);
+            let args = m.resume_spawn_args.lock().await;
             assert_eq!(args.len(), 1);
-            assert_eq!(args[0].session_id.as_deref(), Some("ext-abc"));
+            assert_eq!(args[0].external_session_id, "ext-abc");
             assert_eq!(args[0].working_dir.as_deref(), Some("/work"));
             // The plain `spawn` recorder must stay untouched so existing
             // assertions on fresh spawns can't be satisfied by a resume.

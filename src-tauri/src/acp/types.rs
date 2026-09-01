@@ -405,15 +405,17 @@ pub enum AcpEvent {
     /// text chunks), so severity-`warning` records take over the retry-banner
     /// role on those connections.
     SessionFailure { record: SessionFailureRecord },
-    /// `session/load` failed in a non-recoverable way (e.g. the agent has no
-    /// record of this `session_id`). Emitted instead of silently falling back
-    /// to `session/new`, so the frontend can surface the failure with reload
-    /// / new-conversation actions.
+    /// `session/load` failed in a way codeg cannot paper over — the agent has
+    /// no record of this `session_id`, the session/process died, or it is
+    /// archived. Emitted instead of silently falling back to `session/new`, so
+    /// the frontend can surface the failure with reload / new-conversation
+    /// actions.
     SessionLoadFailed {
         session_id: String,
         message: String,
-        /// Stable machine-readable identifier — currently
-        /// `"resource_not_found"` for JSON-RPC -32002.
+        /// Stable machine-readable identifier: `"resource_not_found"` for
+        /// JSON-RPC -32002, or `"session_unavailable"` / `"session_archived"`
+        /// matched on the wire message. See `classify_session_load_failure`.
         code: String,
     },
     /// Available slash commands updated
@@ -957,6 +959,17 @@ pub struct AcpAgentInfo {
     pub skills_capable: bool,
     pub registry_id: String,
     pub registry_version: Option<String>,
+    /// Whether "install a specific version" can actually fetch that version.
+    ///
+    /// NOT derivable from `registry_version` + `distribution_type`, which is
+    /// what the settings page used to infer it from: a binary agent's custom
+    /// install works by substituting the requested version into the pinned
+    /// download URL, and Antigravity's URLs carry a Google build id rather than
+    /// its registry version, so the substitution is a no-op and the install
+    /// would relabel the same bytes. Resolved by
+    /// [`crate::acp::registry::AcpAgentMeta::supports_custom_version`], which
+    /// checks the URL for THIS platform.
+    pub supports_custom_version: bool,
     pub name: String,
     pub description: String,
     pub available: bool,

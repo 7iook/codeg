@@ -252,6 +252,46 @@ pub async fn seed_auto_title_if_empty(
     Ok(res.rows_affected > 0)
 }
 
+/// Write the session's `model` ONLY when the row still has none. The sibling
+/// of [`seed_auto_title_if_empty`], and for the same reason: a conversation
+/// row is inserted before the agent has named a model, so the column is NULL
+/// for every session started in-app and only the transcript knows the answer.
+/// Without this the sidebar — which reads the row, not the transcript — could
+/// only show a model for imported sessions.
+///
+/// First value wins. The detail view re-reads the transcript on every open and
+/// stays exact, so the stored value is a cheap projection for the list rather
+/// than a second source of truth; re-writing it on every model switch would
+/// buy a row write per switch for a chip nobody reads mid-turn.
+///
+/// Returns `true` when a row was written so the caller can broadcast a sidebar
+/// upsert. Does not bump `updated_at` — the sidebar sorts on it, and merely
+/// opening a conversation must not float it to the top of Recent (same
+/// reasoning as [`update_pin`]).
+pub async fn seed_model_if_empty(
+    conn: &DatabaseConnection,
+    conversation_id: i32,
+    model: &str,
+) -> Result<bool, DbError> {
+    use sea_orm::sea_query::Expr;
+    let model = model.trim();
+    if model.is_empty() {
+        return Ok(false);
+    }
+    let res = conversation::Entity::update_many()
+        .col_expr(conversation::Column::Model, Expr::value(model))
+        .filter(conversation::Column::Id.eq(conversation_id))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .filter(
+            sea_orm::Condition::any()
+                .add(conversation::Column::Model.is_null())
+                .add(conversation::Column::Model.eq("")),
+        )
+        .exec(conn)
+        .await?;
+    Ok(res.rows_affected > 0)
+}
+
 /// Lock a row's title WITHOUT rewriting it. For a conversation whose name was
 /// typed by the user somewhere else — a work task's title, an automation's name
 /// — the seed passed to [`create`] already IS the name; all that's missing is
@@ -760,6 +800,13 @@ pub async fn bind_external_id(
                 // Release S1 first — the unique index leaves no other order.
                 let mut active: conversation::ActiveModel = current.into();
                 active.external_id = Set(Some(external_id.clone()));
+                // The model described the session being released, and `carried`
+                // has already taken it for the row that keeps S1's history. Left
+                // in place it would name S1's model on a row that is now S2 —
+                // and `seed_model_if_empty` only fills an EMPTY column, so
+                // nothing would ever correct it. Cleared, S2 seeds itself on its
+                // next open.
+                active.model = Set(None);
                 active.updated_at = Set(now);
                 active.update(txn).await?;
 
@@ -1008,7 +1055,7 @@ pub async fn update_external_id_resume_safe(
         .map(|_| ())
 }
 
-/// Root-writer variant of [`update_external_id`]: refuses to touch a
+/// Root-writer variant of [`bind_external_id`]: refuses to touch a
 /// `kind = Delegate` child row at all. For delegate children `external_id` is
 /// the RESUME CREDENTIAL owned by the delegation lifecycle
 /// ([`update_external_id_resume_safe`] is its guarded writer); the callers
@@ -1018,18 +1065,26 @@ pub async fn update_external_id_resume_safe(
 /// transcript match). Unlike the resume-safe variant this refuses even the
 /// minting write on an EMPTY credential: a root-session id must never BECOME
 /// a delegate row's resume credential.
-pub async fn update_external_id_skip_delegate(
+///
+/// Wraps [`bind_external_id`] rather than the retired plain `update_external_id`
+/// so a root caller keeps the full bind contract — `continues` (so a genuine
+/// session continuation advances the row instead of splitting it), the
+/// `Some(preserved_row_id)` split outcome, and `DbError::Conflict` when the id
+/// belongs to another row. A refusal reports `Ok(None)`: nothing was written and
+/// nothing was split off.
+pub async fn bind_external_id_skip_delegate(
     conn: &DatabaseConnection,
     conversation_id: i32,
-    external_id: String,
-) -> Result<(), DbError> {
+    external_id: &str,
+    continues: &[String],
+) -> Result<Option<i32>, DbError> {
     let Some(row) = conversation::Entity::find_by_id(conversation_id)
         .filter(conversation::Column::DeletedAt.is_null())
         .one(conn)
         .await?
     else {
-        // No live row — same silent no-op contract as `update_external_id`.
-        return Ok(());
+        // No live row — same silent no-op contract as `bind_external_id`.
+        return Ok(None);
     };
     if row.kind == ConversationKind::Delegate {
         tracing::warn!(
@@ -1037,11 +1092,9 @@ pub async fn update_external_id_skip_delegate(
              {conversation_id} (external_id is the resume credential; this writer \
              only manages root conversations)"
         );
-        return Ok(());
+        return Ok(None);
     }
-    bind_external_id(conn, conversation_id, &external_id, &[])
-        .await
-        .map(|_| ())
+    bind_external_id(conn, conversation_id, external_id, continues).await
 }
 
 // [merge-v0.23.0] Below is upstream v0.23.0 addition (work_task worktree migration).
@@ -1598,6 +1651,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seed_model_fills_an_empty_column_once_without_bumping_updated_at() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/codeg-seed-model").await;
+        let conv = create(&db.conn, folder, AgentType::Codex, Some("c".into()), None)
+            .await
+            .expect("create");
+
+        // The gap this closes: a row created in-app carries no model at all,
+        // which is why the sidebar could only ever show one for imported
+        // sessions.
+        let before = get_by_id(&db.conn, conv.id).await.expect("get before");
+        assert!(before.model.is_none(), "a new row names no model");
+        let updated_at_before = before.updated_at;
+
+        assert!(
+            seed_model_if_empty(&db.conn, conv.id, "  gpt-5-codex  ")
+                .await
+                .expect("seed"),
+            "an empty column must be filled, and report that it was so the \
+             caller knows to broadcast"
+        );
+        let seeded = get_by_id(&db.conn, conv.id).await.expect("get seeded");
+        assert_eq!(seeded.model.as_deref(), Some("gpt-5-codex"), "trimmed");
+        assert_eq!(
+            seeded.updated_at, updated_at_before,
+            "seeding must not bump updated_at: the sidebar sorts on it, and \
+             merely opening a conversation must not float it to the top"
+        );
+
+        // First value wins. The detail view re-reads the transcript and stays
+        // exact; the column is a projection for the list, not a second source
+        // of truth that fights the parse.
+        assert!(
+            !seed_model_if_empty(&db.conn, conv.id, "gpt-5.2")
+                .await
+                .expect("second seed"),
+            "a populated column must be left alone, and say nothing was written"
+        );
+        assert_eq!(
+            get_by_id(&db.conn, conv.id)
+                .await
+                .expect("get after")
+                .model
+                .as_deref(),
+            Some("gpt-5-codex")
+        );
+
+        // A transcript that names no model asks for no write at all.
+        assert!(!seed_model_if_empty(&db.conn, conv.id, "   ")
+            .await
+            .expect("blank seed"));
+    }
+
+    #[tokio::test]
+    async fn seed_model_skips_a_soft_deleted_row() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/codeg-seed-model-deleted").await;
+        let conv = create(&db.conn, folder, AgentType::Codex, Some("c".into()), None)
+            .await
+            .expect("create");
+        soft_delete(&db.conn, conv.id).await.expect("delete");
+
+        assert!(
+            !seed_model_if_empty(&db.conn, conv.id, "gpt-5-codex")
+                .await
+                .expect("seed"),
+            "a deleted conversation is not something an open can resurrect a \
+             column on"
+        );
+    }
+
+    #[tokio::test]
     async fn update_pin_sets_and_clears_without_bumping_updated_at() {
         let db = fresh_in_memory_db().await;
         let folder = seed_folder(&db, "/tmp/codeg-update-pin").await;
@@ -1811,7 +1936,7 @@ mod tests {
 
         // 1. EMPTY credential: even the minting write is refused (this is the
         //    behavioral difference from `update_external_id_resume_safe`).
-        update_external_id_skip_delegate(&db.conn, child.id, "not-a-credential".into())
+        bind_external_id_skip_delegate(&db.conn, child.id, "not-a-credential", &[])
             .await
             .expect("refusal must be a silent no-op, not an error");
         assert_eq!(
@@ -1824,7 +1949,7 @@ mod tests {
         update_external_id_resume_safe(&db.conn, child.id, "sess-real".into())
             .await
             .expect("mint via the delegation-owned writer");
-        update_external_id_skip_delegate(&db.conn, child.id, "sess-hijack".into())
+        bind_external_id_skip_delegate(&db.conn, child.id, "sess-hijack", &[])
             .await
             .expect("no-op");
         assert_eq!(
@@ -1834,10 +1959,10 @@ mod tests {
         );
 
         // 3. Root rows keep the historical full-overwrite semantics.
-        update_external_id_skip_delegate(&db.conn, parent.id, "root-a".into())
+        bind_external_id_skip_delegate(&db.conn, parent.id, "root-a", &[])
             .await
             .expect("root first");
-        update_external_id_skip_delegate(&db.conn, parent.id, "root-b".into())
+        bind_external_id_skip_delegate(&db.conn, parent.id, "root-b", &[])
             .await
             .expect("root overwrite");
         assert_eq!(
@@ -1890,6 +2015,9 @@ mod tests {
         bind_external_id(&db.conn, row.id, "S1", &[])
             .await
             .expect("first bind");
+        seed_model_if_empty(&db.conn, row.id, "gpt-5-codex")
+            .await
+            .expect("seed S1's model");
         let before = raw_row(&db.conn, row.id).await;
 
         let preserved_id = bind_external_id(&db.conn, row.id, "S2", &[])
@@ -1903,6 +2031,12 @@ mod tests {
             Some("S2"),
             "the live row advances to the new session"
         );
+        assert!(
+            current.model.is_none(),
+            "the model described S1; left behind it would name S1's model on a \
+             row that is now S2, and `seed_model_if_empty` only fills an EMPTY \
+             column, so nothing would ever correct it"
+        );
 
         let preserved = raw_row(&db.conn, preserved_id).await;
         assert_eq!(preserved.external_id.as_deref(), Some("S1"));
@@ -1914,6 +2048,11 @@ mod tests {
         assert_eq!(preserved.folder_id, before.folder_id);
         assert_eq!(preserved.agent_type, before.agent_type);
         assert_eq!(preserved.git_branch.as_deref(), Some("main"));
+        assert_eq!(
+            preserved.model.as_deref(),
+            Some("gpt-5-codex"),
+            "the model belongs to S1, and this row is what S1 becomes"
+        );
         assert_eq!(
             preserved.created_at, before.created_at,
             "created_at is carried, not stamped now — the preserved row IS the \

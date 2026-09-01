@@ -164,7 +164,7 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
         <RequestedModelLabel model={requestedModel} className="text-[11px]" />
         {taskId && (
           <span
-            className="shrink-0 font-mono text-[11px] text-muted-foreground"
+            className="shrink-0 font-mono text-2xs text-muted-foreground"
             title={taskId}
           >
             #{taskId.slice(0, 8)}
@@ -173,7 +173,7 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
         <StatusBadge status={status} errorCode={errorCode} />
       </div>
       {task && (
-        <div className="truncate text-[11px] text-muted-foreground">{task}</div>
+        <div className="truncate text-2xs text-muted-foreground">{task}</div>
       )}
       {/* Failure only — mirrors the inline card so the two never disagree. */}
       {status === "err" && (

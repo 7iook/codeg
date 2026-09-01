@@ -8,7 +8,26 @@ import { randomUUID } from "@/lib/utils"
 export interface QueuedMessage {
   id: string
   draft: PromptDraft
+  /**
+   * The mode this message will be sent under. `null` means "leave the agent's
+   * mode alone" — an explicit choice for the answer / plan-notes retry paths,
+   * which must not switch mode on their way out.
+   *
+   * That is why {@link QueuedMessage.adoptSendTimeMode} exists as a separate
+   * flag rather than being spelled `modeId === null`: "unknown yet" and
+   * "deliberately none" are different intents.
+   */
   modeId: string | null
+  /**
+   * Resolve the mode when this message actually SENDS, ignoring `modeId`.
+   *
+   * For messages queued before their tab could know its modes — a prompt parked
+   * on a brand-new draft by "ask about this selection", which is enqueued while
+   * the connection is still coming up. Without it the agent would run in
+   * whatever mode it happened to start in while the composer above displayed the
+   * user's saved mode.
+   */
+  adoptSendTimeMode?: boolean
   /**
    * Stable delivery identity, distinct from `id`.
    *
@@ -28,7 +47,11 @@ export interface QueuedMessage {
 
 export interface UseMessageQueueReturn {
   queue: QueuedMessage[]
-  enqueue: (draft: PromptDraft, modeId: string | null) => void
+  enqueue: (
+    draft: PromptDraft,
+    modeId: string | null,
+    opts?: { adoptSendTimeMode?: boolean }
+  ) => void
   /**
    * Put a draft back at the FRONT of the queue. Used when an auto-flushed item
    * was dequeued, sent, and bounced (TurnBusyError): it must return to the head
@@ -79,11 +102,16 @@ export interface UseMessageQueueReturn {
  * draft (a bounce means the send was rejected, so that draft has no prior
  * delivery to be confused with).
  */
-function newItem(draft: PromptDraft, modeId: string | null): QueuedMessage {
+function newItem(
+  draft: PromptDraft,
+  modeId: string | null,
+  opts?: { adoptSendTimeMode?: boolean }
+): QueuedMessage {
   return {
     id: randomUUID(),
     draft,
     modeId,
+    ...(opts?.adoptSendTimeMode ? { adoptSendTimeMode: true } : {}),
     messageId: randomUUID(),
     status: "queued",
   }
@@ -110,8 +138,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
   }, [])
 
   const enqueue = useCallback(
-    (draft: PromptDraft, modeId: string | null) => {
-      commit([...queueRef.current, newItem(draft, modeId)])
+    (
+      draft: PromptDraft,
+      modeId: string | null,
+      opts?: { adoptSendTimeMode?: boolean }
+    ) => {
+      commit([...queueRef.current, newItem(draft, modeId, opts)])
     },
     [commit]
   )

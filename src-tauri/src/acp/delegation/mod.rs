@@ -34,6 +34,18 @@
 //! child conversation row). Re-spawning with the child's agent `external_id`
 //! covers the case where the process was reaped while the conversation row
 //! still exists.
+//!
+//! `resume_delegation` is the third, narrower door onto the same child, and it
+//! is NOT redundant with `continue_with_session`. Continuation needs the child
+//! to still be continuable — a live process, or at least a session this run has
+//! not released — and it carries new instructions. Resume covers the case
+//! continuation cannot reach: a task INTERRUPTED (canceled, or stranded by a
+//! crash) whose original work was never finished. It takes no task text, only
+//! bounded interruption `reason`, re-spawns from the recorded agent session id
+//! and re-arms the same `delegation_call_id`, so it is strictly a continuation
+//! OF THE ORIGINAL TASK rather than a second iteration on it. Refusing a
+//! running or self-completed task with `not_resumable` is what keeps it from
+//! degenerating into a second `delegate_to_agent`.
 
 pub mod broker;
 pub mod cancel_scope;
@@ -64,3 +76,4 @@ pub const STATUS_TOOL_REWRITE_TITLE: &str = "codeg-mcp__get_delegation_status";
 pub const CANCEL_TOOL_REWRITE_TITLE: &str = "codeg-mcp__cancel_delegation";
 pub const CONTINUE_TOOL_REWRITE_TITLE: &str = "codeg-mcp__continue_with_session";
 pub const CLOSE_TOOL_REWRITE_TITLE: &str = "codeg-mcp__close_session";
+pub const RESUME_TOOL_REWRITE_TITLE: &str = "codeg-mcp__resume_delegation";

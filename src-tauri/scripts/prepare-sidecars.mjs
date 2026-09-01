@@ -130,12 +130,7 @@ function main() {
     { stdio: "inherit", cwd: SRC_TAURI }
   )
 
-  const built = join(
-    resolveTargetDir(),
-    target,
-    "release",
-    `${BIN_NAME}${ext}`
-  )
+  const built = join(resolveTargetDir(), target, "release", `${BIN_NAME}${ext}`)
   if (!existsSync(built)) {
     die(`expected ${built} after cargo build, but it does not exist`)
   }
