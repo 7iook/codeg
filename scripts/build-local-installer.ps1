@@ -122,8 +122,18 @@ if ($SkipVerify) {
 
     Push-Location $repo
     try {
-        & pnpm test
-        if ($LASTEXITCODE -ne 0) { Die 'frontend tests failed' }
+        # NODE_ENV=test for THIS step only. Vitest sets `test` itself unless the
+        # variable is already set, and the `production` value this script needs
+        # for the Next build makes Vite resolve `node:path` (and friends) through
+        # the browser condition -- every source-reading test then dies with
+        # "resolve is not a function". Restored right after so the build below
+        # still sees `production`.
+        $nodeEnvForBuild = $env:NODE_ENV
+        $env:NODE_ENV = 'test'
+        try {
+            & pnpm test
+            if ($LASTEXITCODE -ne 0) { Die 'frontend tests failed' }
+        } finally { $env:NODE_ENV = $nodeEnvForBuild }
         Ok 'frontend tests'
     } finally { Pop-Location }
 }
