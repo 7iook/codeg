@@ -2094,6 +2094,15 @@ pub fn build_resume_prompt(reason: Option<&str>) -> String {
 /// result sniff (`cursor_companion_title_from_content`) anchors on that exact
 /// prefix to re-title identity-less calls as `delegate_to_agent`.
 ///
+/// The opening "Delegation resumed" is load-bearing, like the "Not resumed" of
+/// [`not_resumable_report`]: `companion::render_task_report` renders only
+/// `message` as content text and keeps the rest in `structuredContent`, which
+/// some hosts drop wholesale (OpenCode — see `acp::connection`). There the
+/// words are all that separates this from a refusal or an
+/// [`unknown_report`], so the card can still tell a real resume from the
+/// model naming somebody else's task. `isAffirmedResume` in
+/// `src/lib/delegation-card.ts` reads it; keep the two spellings in step.
+///
 /// Carries NO `applied_persona` / `requested_model`: a resume replays an
 /// EXISTING session and deliberately re-nominates neither knob (R7.4 — the
 /// spawner threads an empty launch-option slice). Echoing the ORIGINAL call's
@@ -2130,6 +2139,11 @@ fn resume_ack(
 /// learns where the task really stands) with `error_code: "not_resumable"` and
 /// a message that opens with "Not resumed" — unambiguous against the ack even
 /// on hosts that only surface the content text.
+///
+/// That prefix is load-bearing, not decorative: `isRefusedResume` in
+/// `src/lib/delegation-card.ts` falls back to it wherever `error_code` did not
+/// survive, and without it a refusal renders as a resumed sub-agent card. Keep
+/// the two spellings in step.
 ///
 /// No `applied_persona` / `requested_model`: the resume was REFUSED, so nothing
 /// was launched and there is no attribution this round to report.

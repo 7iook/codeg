@@ -1,5 +1,6 @@
 import type {
   ActiveDelegationState,
+  AsyncTaskRecord,
   AvailableCommandInfo,
   ConfigStaleKind,
   ConnectionStatus,
@@ -99,6 +100,10 @@ export interface SnapshotPatch {
    *  records, never clobber a fresher live one. `[]` when the server omitted
    *  the field. */
   sessionFailures: SessionFailureRecord[]
+  /** AIR async tasks carried by the snapshot, already merged backend-side.
+   *  Terminal rows included — they are the ids subsequent live deltas revise.
+   *  `[]` when the server omitted the field. */
+  asyncTasks: AsyncTaskRecord[]
   /** Latest ACP runtime error carried by the snapshot. `null` means none. */
   lastError: string | null
   /** Diagnostic evidence attached to `lastError` (agent stderr tail, unparsed
@@ -179,6 +184,7 @@ export function denormalizeSnapshot(wire: LiveSessionSnapshot): SnapshotPatch {
     backgroundOutstandingAgents: wire.background_outstanding_agents ?? 0,
     backgroundOutstandingShells: wire.background_outstanding_shells ?? 0,
     sessionFailures: wire.session_failures ?? [],
+    asyncTasks: wire.async_tasks ?? [],
     lastError,
     lastErrorDetails,
     eventSeq: wire.event_seq,

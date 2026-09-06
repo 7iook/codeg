@@ -24,7 +24,10 @@ import { toast } from "sonner"
 import { toPng } from "html-to-image"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useTabActions } from "@/contexts/tab-context"
-import { useAcpActions } from "@/contexts/acp-connections-context"
+import {
+  useAcpActions,
+  useConnectionStore,
+} from "@/contexts/acp-connections-context"
 import {
   canvasCreateNode,
   canvasDeleteNode,
@@ -42,12 +45,15 @@ import {
   loadCanvasDrafts,
   loadCanvasExpandedCards,
   loadCanvasExpandedRegions,
+  loadCanvasSurfaceKeys,
   loadCanvasViewport,
   saveCanvasDrafts,
   saveCanvasExpandedCards,
   saveCanvasExpandedRegions,
+  saveCanvasSurfaceKeys,
   saveCanvasViewport,
   type CanvasDraftCard,
+  type CanvasSurfaceKey,
 } from "@/lib/canvas-view-storage"
 import { resolveDefaultAgent } from "@/lib/resolve-default-agent"
 import {
@@ -56,12 +62,27 @@ import {
   type CanvasNodeMovePayload,
   type DbConversationSummary,
 } from "@/lib/types"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { cn, randomUUID } from "@/lib/utils"
 import {
   isConversationDeleted,
   useAppWorkspaceStore,
 } from "@/stores/app-workspace-store"
-import { applyMovesTo, useCanvasStore } from "@/stores/canvas-store"
+import {
+  applyMovesTo,
+  beginContentWrite,
+  hasContentWriteInFlight,
+  useCanvasStore,
+} from "@/stores/canvas-store"
 import { NOTE_H, NOTE_W } from "./add-node-menu"
 import { CanvasConversationDrawer } from "./canvas-conversation-drawer"
 import { useCanvasData } from "./canvas-data"
@@ -70,12 +91,14 @@ import {
   BOARD_DOT_GAP,
   DETAIL_CARD_HEIGHT,
   DETAIL_CARD_WIDTH,
+  DRAG_HANDLE_SELECTOR,
   REGION_PADDING,
   columnsForRegionWidth,
   computeAlignment,
   computeDropHint,
   computeRegionMembers,
   deriveFlowGraph,
+  noteHoldsProse,
   packLayout,
   parseMemberNodeId,
   parseRegionNodeId,
@@ -235,14 +258,25 @@ function CanvasFlow() {
   }, [])
   // Pin db id → the connection key its surface must keep using. Only ever
   // written when a draft materializes (see `materializeDraft`); every other
-  // card uses `pinSurfaceKey`.
-  const [surfaceKeys, setSurfaceKeys] = useState<ReadonlyMap<number, string>>(
-    () => new Map()
-  )
+  // card uses `pinSurfaceKey`. Restored like the expansions are: recomputing it
+  // after a route switch would point the card at `canvas-node-<id>` while the
+  // agent its first message started is still running under the draft's key.
+  const [surfaceKeys, setSurfaceKeys] = useState<
+    ReadonlyMap<number, CanvasSurfaceKey>
+  >(loadCanvasSurfaceKeys)
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(
     () => new Set()
   )
   const [renamingRegionId, setRenamingRegionId] = useState<number | null>(null)
+  // The delete waiting on the user's answer, or null for "not asking".
+  // `notes` is how many written notes it would take, so the dialog can say
+  // what is at stake. `run` is the delete itself, CAPTURED when the question
+  // was asked — the alternative, re-reading the live selection on confirm,
+  // lets the prompt describe one set of nodes and the confirm delete another.
+  const [pendingDelete, setPendingDelete] = useState<{
+    notes: number
+    run: () => Promise<void>
+  } | null>(null)
   // Transient drag positions (RF node id → parent-relative position). State,
   // not a ref: the derive layer must re-run as the pointer moves.
   const [overlay, setOverlay] = useState<
@@ -340,9 +374,12 @@ function CanvasFlow() {
   // Drop ids whose nodes are gone — deleted here, deleted from another window,
   // or belonging to a different backend entirely. Runs on every change to the
   // board rather than once at hydration: a node deleted later in the session
-  // would otherwise keep its id in storage, and ids are REUSED (SQLite hands
-  // the next row the same rowid after the last one is deleted), so a stale
-  // "expanded" id can eventually reopen a card the user never expanded.
+  // would otherwise keep its id in storage, and this storage is not
+  // backend-scoped, so two databases behind one origin hand out the same low
+  // ids to entirely different nodes — a stale "expanded" id can then reopen a
+  // card the user never expanded. (Within ONE database that cannot happen:
+  // `canvas_node.id` is AUTOINCREMENT, so a deleted id is never handed out
+  // again. An earlier version of this comment said otherwise.)
   // Safe to run continuously because `hydrated` only goes true once the node
   // set has actually loaded, and `reset()` clears it again — the empty map
   // during a refetch is never mistaken for an empty board.
@@ -356,6 +393,25 @@ function CanvasFlow() {
       const next = new Set([...prev].filter((id) => dbNodes.has(id)))
       if (next.size === prev.size) return prev
       saveCanvasExpandedRegions([...next])
+      return next
+    })
+    // Connection keys are checked against the card they were written for, not
+    // just its id — same cross-database reason as above, except a mismatch here
+    // would hand a card a stranger's ACP connection key rather than merely open
+    // it. `created_at` is the half that survives an id sequence. Runs before any
+    // card can mount: `hydrated` is what puts nodes on the board at all.
+    setSurfaceKeys((prev) => {
+      const next = new Map(
+        [...prev].filter(([id, entry]) => {
+          const node = dbNodes.get(id)
+          return (
+            node?.conversation_id === entry.conversationId &&
+            node.created_at === entry.createdAt
+          )
+        })
+      )
+      if (next.size === prev.size) return prev
+      saveCanvasSurfaceKeys(next)
       return next
     })
   }, [hydrated, dbNodes, setDetailCardsPersisted])
@@ -416,6 +472,16 @@ function CanvasFlow() {
         width: size?.width ?? draft.width,
         height: size?.height ?? draft.height,
         selected: selectedIds.has(rfId),
+        // Same title-bar-only handle the expanded card uses, and for a reason
+        // that is invisible until someone types into the card: a node with NO
+        // `dragHandle` passes d3-drag's filter on every mousedown anywhere in
+        // it, and d3 answers by installing a capture-phase `selectstart`
+        // preventDefault on the window for the life of the gesture. The browser
+        // asks permission to move a caret through that same event, so a click
+        // inside the composer focused the textarea but could not put the cursor
+        // where it was clicked, and no text in the card could be selected. The
+        // handle is what keeps the filter from matching in the body at all.
+        dragHandle: DRAG_HANDLE_SELECTOR,
         data: {
           draftId: draft.id,
           target: draft.target,
@@ -451,6 +517,11 @@ function CanvasFlow() {
 
   const patchNode = useCallback(
     async (nodeId: number, patch: CanvasNodePatchInput) => {
+      // Text in flight is tracked so the delete confirmations can see it — the
+      // cached row still reads EMPTY until this resolves. See
+      // `beginContentWrite` for why that matters and why it lives in the store.
+      const endWrite =
+        patch.content !== undefined ? beginContentWrite(nodeId) : null
       try {
         const res = await canvasUpdateNode(nodeId, patch)
         useCanvasStore
@@ -460,10 +531,29 @@ function CanvasFlow() {
           )
       } catch (e) {
         toast.error(toErrorMessage(e))
+      } finally {
+        endWrite?.()
       }
     },
     []
   )
+
+  /**
+   * How many of these nodes would take prose with them — the one question both
+   * delete paths ask, against the store rather than the rendered nodes so a
+   * caller holding only an id asks it the same way.
+   *
+   * Counts a note whose text is STILL IN FLIGHT as at risk even though the
+   * cached row looks empty. Deliberately conservative: a patch that CLEARS a
+   * note is in flight too, and asking about a note the user just emptied costs
+   * one dialog, while the other error costs the paragraph they just typed.
+   */
+  const notesAtRisk = useCallback((ids: readonly number[]) => {
+    const rows = useCanvasStore.getState().nodes
+    return ids.filter(
+      (id) => noteHoldsProse(rows.get(id)) || hasContentWriteInFlight(id)
+    ).length
+  }, [])
 
   const forgetNodes = useCallback(
     (ids: readonly number[]) => {
@@ -477,7 +567,7 @@ function CanvasFlow() {
     [setDetailCardsPersisted]
   )
 
-  const deleteNode = useCallback(
+  const commitDeleteNode = useCallback(
     async (nodeId: number) => {
       try {
         const res = await canvasDeleteNode(nodeId)
@@ -490,6 +580,26 @@ function CanvasFlow() {
       }
     },
     [forgetNodes]
+  )
+
+  /**
+   * Single-node delete, and the SECOND door into destroying a note: the dock
+   * renders a trash button for whatever one node is selected, so a written note
+   * can be deleted here without the selection gesture ever running. The guard
+   * therefore sits on this chokepoint rather than on its callers — the dock's
+   * note button, its region button and the card's unpin all come through here,
+   * and only the note among them can take prose with it.
+   */
+  const deleteNode = useCallback(
+    async (nodeId: number) => {
+      const notes = notesAtRisk([nodeId])
+      if (notes > 0) {
+        setPendingDelete({ notes, run: () => commitDeleteNode(nodeId) })
+        return
+      }
+      await commitDeleteNode(nodeId)
+    },
+    [commitDeleteNode, notesAtRisk]
   )
 
   const createNode = useCallback(async (input: CreateCanvasNodeInput) => {
@@ -589,10 +699,69 @@ function CanvasFlow() {
     )
   }, [])
 
+  // Reads `surfaceKeys` alone, never `dbNodes`: a card's connection key has to
+  // be stable for its whole life, and re-deriving it from a map that changes on
+  // every board mutation would re-key a live connection. Entries are validated
+  // against their node in the prune above, which runs on hydration — i.e.
+  // before there is a board for a card to mount on.
   const contextKeyForPin = useCallback(
-    (pinDbId: number) => surfaceKeys.get(pinDbId) ?? pinSurfaceKey(pinDbId),
+    (pinDbId: number) =>
+      surfaceKeys.get(pinDbId)?.key ?? pinSurfaceKey(pinDbId),
     [surfaceKeys]
   )
+
+  /**
+   * Cards whose agent is ALREADY running come back live, not dormant.
+   *
+   * Dormancy exists so that arriving on a board with six expanded cards does
+   * not start six agent CLIs — it is about not SPAWNING agents, not about
+   * refusing to hold one that is already there. Leaving such a card asleep
+   * costs twice: it reads as disconnected (or streams a reply into a card whose
+   * composer nobody has armed) while the user watches, and because
+   * `registerLiveSurfaceKeys` only claims live surfaces, nothing claims that
+   * connection — so a minute after the turn settles the idle sweep reclaims it
+   * and kills the agent out from under the card.
+   *
+   * Adopting one starts nothing: `connect()` returns on its fast path for an
+   * entry with the same agent and working directory, so this only makes the
+   * card own what it is already showing.
+   *
+   * Runs once per canvas mount, off the connection store's synchronous
+   * snapshot. Both inputs are read from storage before first paint, so nothing
+   * has to load first — including a key inherited from a draft, which the prune
+   * above has not validated yet at this point. That window is harmless in the
+   * only direction that matters: an entry belonging to some other database
+   * names a key this client never opened a connection under, so it matches
+   * nothing and adopts nothing.
+   *
+   * Drafts are deliberately not scanned. A draft that was merely connected is
+   * disconnected by its own unmount (`shouldDisconnectOnUnmount` keeps only
+   * BUSY connections), so by the time the board comes back there is nothing
+   * left to adopt; a draft that was mid-first-send is a card that should have
+   * become a pinned one already.
+   */
+  const connectionStore = useConnectionStore()
+  const adoptedLiveRef = useRef(false)
+  useEffect(() => {
+    if (adoptedLiveRef.current) return
+    adoptedLiveRef.current = true
+    const alive = [...detailCards]
+      .map((pinDbId) => contextKeyForPin(pinDbId))
+      .filter((key) => {
+        const status = connectionStore.getConnection(key)?.status
+        return (
+          status === "connected" ||
+          status === "prompting" ||
+          status === "connecting"
+        )
+      })
+    if (alive.length === 0) return
+    setLiveSurfaces((prev) => {
+      const next = new Set(prev)
+      for (const key of alive) next.add(key)
+      return next
+    })
+  }, [connectionStore, contextKeyForPin, detailCards])
 
   /** The side panel's conversation, re-resolved rather than snapshotted so a
    *  rename or a status change reaches its header — and so the panel empties
@@ -820,12 +989,33 @@ function CanvasFlow() {
       })
       if (!created) return
       const key = draftSurfaceKey(draftId)
-      setSurfaceKeys((prev) => new Map(prev).set(created.id, key))
+      // Inheriting the key is also what carries the RUNTIME session across: the
+      // message the user just sent, and the reply already answering it, are
+      // filed under the id that key derives, and the arriving card adopts them
+      // in a layout effect. That has to happen on the far side of this swap —
+      // ReactFlow applies a changed `nodes` prop from a passive effect, so the
+      // draft card is still mounted (and paintable) after this returns. See
+      // `CanvasConversationSurface`'s hand-off effect.
+      setSurfaceKeys((prev) => {
+        const next = new Map(prev).set(created.id, {
+          conversationId,
+          createdAt: created.created_at,
+          key,
+        })
+        saveCanvasSurfaceKeys(next)
+        return next
+      })
       activateSurface(key)
       // Open the persisted card in detail mode BEFORE removing the draft so the
       // surface the user is watching swaps in place rather than blinking away.
       setDetailCardsPersisted((prev) => new Set(prev).add(created.id))
-      dismissDraft(draftId)
+      // Deliberately not `dismissDraft`: its guard refuses to drop a draft whose
+      // first send is in flight, which is exactly the state this one is in. That
+      // guard exists for the three DISCARD paths, where dropping the card would
+      // strand a conversation nobody can see. This is the hand-off — the row is
+      // created, the card that shows it is on screen, and leaving the draft up
+      // would put a second surface on the same connection key.
+      setDraftsPersisted((prev) => prev.filter((d) => d.id !== draftId))
     },
     [
       drafts,
@@ -834,7 +1024,7 @@ function CanvasFlow() {
       createNode,
       activateSurface,
       setDetailCardsPersisted,
-      dismissDraft,
+      setDraftsPersisted,
     ]
   )
 
@@ -1518,12 +1708,21 @@ function CanvasFlow() {
   // ── Selection actions ──
 
   /** Top-level pinned cards in the current selection — the only nodes the
-   *  "collect" gesture consumes (a region or note keeps living where it is). */
+   *  "collect" gesture consumes (a region or note keeps living where it is).
+   *
+   *  `noteIds` is what the delete gesture asks about before it fires: of
+   *  everything on this board, a note's text is the only thing the user typed
+   *  by hand and the only thing a delete cannot give back. Cards and regions
+   *  are arrangements of things that live elsewhere — re-pinning a card is
+   *  tedious, losing a paragraph is not the same kind of loss. Ids rather than
+   *  a count, because whether a note is EMPTY is answered at delete time (see
+   *  `notesAtRisk`), not when the selection was last derived. */
   const selection = useMemo(() => {
     const memberIds: number[] = []
     const consumeNodeIds: number[] = []
     const deletableIds: number[] = []
     const draftIds: string[] = []
+    const noteIds: number[] = []
     for (const n of selectedNodes) {
       const draftId = parseDraftNodeId(n.id)
       if (draftId != null) {
@@ -1532,6 +1731,10 @@ function CanvasFlow() {
       }
       const dbId = parseRegionNodeId(n.id)
       if (dbId != null) deletableIds.push(dbId)
+      if (n.type === "note") {
+        if (dbId != null) noteIds.push(dbId)
+        continue
+      }
       if (n.type !== "conversationCard" && n.type !== "conversationDetail") {
         continue
       }
@@ -1540,7 +1743,7 @@ function CanvasFlow() {
       memberIds.push(data.conversation.id)
       if (data.pinDbId != null) consumeNodeIds.push(data.pinDbId)
     }
-    return { memberIds, consumeNodeIds, deletableIds, draftIds }
+    return { memberIds, consumeNodeIds, deletableIds, draftIds, noteIds }
   }, [selectedNodes])
 
   const groupSelection = useCallback(async () => {
@@ -1568,7 +1771,7 @@ function CanvasFlow() {
     }
   }, [selection, selectedNodes, groupIntoRegion])
 
-  const deleteSelection = useCallback(async () => {
+  const commitDeleteSelection = useCallback(async () => {
     for (const draftId of selection.draftIds) dismissDraft(draftId)
     if (selection.deletableIds.length === 0) return
     try {
@@ -1582,6 +1785,31 @@ function CanvasFlow() {
       toast.error(toErrorMessage(e))
     }
   }, [selection, dismissDraft, forgetNodes])
+
+  /**
+   * Delete is destructive and the board has no undo, so a selection holding
+   * written notes stops to ask. Both entry points come through here — the
+   * Delete/Backspace chord and the dock's button — so neither can skip it.
+   *
+   * The ask is scoped to notes with text in them on purpose. Confirming every
+   * delete would train the reflex it is meant to interrupt, and there is
+   * nothing to protect in the common case: removing a card unpins it, removing
+   * a region unframes it, and both leave the conversation itself untouched. An
+   * empty note is a blank sheet — no keystroke of the user's dies with it.
+   *
+   * Backspace is what makes this worth a dialog rather than a toast. A note is
+   * single-click to SELECT and double-click to EDIT, so the click that looks
+   * like "put the cursor in my note" leaves the board holding the key, and in
+   * a webview Backspace has decades of "go back" behind it.
+   */
+  const deleteSelection = useCallback(async () => {
+    const notes = notesAtRisk(selection.noteIds)
+    if (notes > 0) {
+      setPendingDelete({ notes, run: commitDeleteSelection })
+      return
+    }
+    await commitDeleteSelection()
+  }, [selection.noteIds, commitDeleteSelection, notesAtRisk])
 
   // ── Toolbar actions ──
 
@@ -1642,7 +1870,10 @@ function CanvasFlow() {
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return
         if (
           target.closest(
-            '[role="dialog"],[role="menu"],[role="listbox"],[data-radix-popper-content-wrapper]'
+            // `alertdialog` is its own role, not a kind of `dialog` — the
+            // delete confirmation renders as one, and a Delete pressed on its
+            // buttons must not re-enter the gesture that opened it.
+            '[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],[data-radix-popper-content-wrapper]'
           )
         ) {
           return
@@ -2051,6 +2282,33 @@ function CanvasFlow() {
             </button>
           </div>
         )}
+        <AlertDialog
+          open={pendingDelete !== null}
+          onOpenChange={(open) => {
+            if (!open) setPendingDelete(null)
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t("confirmDeleteTitle")}</AlertDialogTitle>
+              <AlertDialogDescription>
+                {t("confirmDeleteNotes", { count: pendingDelete?.notes ?? 0 })}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t("confirmDeleteCancel")}</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  const run = pendingDelete?.run
+                  setPendingDelete(null)
+                  void run?.()
+                }}
+              >
+                {t("confirmDeleteConfirm")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </CanvasViewProvider>
   )

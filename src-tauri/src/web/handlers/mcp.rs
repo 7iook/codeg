@@ -5,8 +5,8 @@ use serde_json::Value;
 use crate::app_error::AppCommandError;
 use crate::commands::mcp as mcp_commands;
 use crate::commands::mcp::{
-    KiroMcpView, LocalMcpServer, McpAppType, McpMarketplaceItem, McpMarketplaceProvider,
-    McpMarketplaceServerDetail,
+    KiroMcpView, LocalMcpScan, LocalMcpServer, McpAppType, McpMarketplaceItem,
+    McpMarketplaceProvider, McpMarketplaceServerDetail,
 };
 
 // ---------------------------------------------------------------------------
@@ -82,9 +82,12 @@ pub struct KiroScopedViewParams {
 // NOT wrapped (R5.6).
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_scan_local() -> Result<Json<Vec<LocalMcpServer>>, AppCommandError> {
-    let result = mcp_commands::with_http_entry_point(mcp_commands::mcp_scan_local()).await?;
-    Ok(Json(result))
+/// Still wrapped even though the scan no longer returns an error: Kiro's global
+/// scope is one of the sources, so the gate has to see the HTTP entry point to
+/// deny it. A denial drops Kiro's entries from the payload and leaves the other
+/// 14 sources scanning normally.
+pub async fn mcp_scan_local() -> Json<LocalMcpScan> {
+    Json(mcp_commands::with_http_entry_point(mcp_commands::mcp_scan_local()).await)
 }
 
 /// Kiro's three-scope display payload. Wrapped like every other Kiro-reaching

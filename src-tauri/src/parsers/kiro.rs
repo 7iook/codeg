@@ -396,6 +396,10 @@ fn new_assistant_turn(now: DateTime<Utc>) -> MessageTurn {
         duration_ms: None,
         model: None,
         completed_at: None,
+        // Kiro's transcript records no id the agent would recognise — a turn's
+        // id here is synthesized from its position in the stream (assigned in
+        // the final pass above), so there is nothing to fork "up to".
+        agent_message_id: None,
     }
 }
 
@@ -465,6 +469,8 @@ fn parse_transcript(path: &Path) -> ParsedTranscript {
                     duration_ms: None,
                     model: None,
                     completed_at: None,
+                    // See `new_assistant_turn`: Kiro ids are positional.
+                    agent_message_id: None,
                 });
             }
             // Assistant output: thinking / text / tool calls, in emit order.

@@ -669,6 +669,10 @@ pub fn build_router(
             post(handlers::version_control::validate_gitlab_token),
         )
         .route(
+            "/validate_gitea_token",
+            post(handlers::version_control::validate_gitea_token),
+        )
+        .route(
             "/save_account_token",
             post(handlers::version_control::save_account_token),
         )
@@ -763,6 +767,10 @@ pub fn build_router(
             post(handlers::acp::acp_cancel_with_scope_token),
         )
         .route("/acp_fork", post(handlers::acp::acp_fork))
+        .route(
+            "/acp_stop_async_task",
+            post(handlers::acp::acp_stop_async_task),
+        )
         .route(
             "/acp_respond_permission",
             post(handlers::acp::acp_respond_permission),

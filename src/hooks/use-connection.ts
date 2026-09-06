@@ -21,6 +21,7 @@ import type {
   PromptCapabilitiesInfo,
   QuestionAnswer,
   SessionConfigOptionInfo,
+  AsyncTaskRecord,
   SessionFailureRecord,
   SessionModeStateInfo,
   PromptInputBlock,
@@ -36,6 +37,10 @@ const DEFAULT_PROMPT_CAPABILITIES: PromptCapabilitiesInfo = {
 
 /** Stable empty table so the no-failures common case never re-renders. */
 const EMPTY_SESSION_FAILURES: SessionFailureRecord[] = []
+const EMPTY_STEERED_MESSAGE_IDS: string[] = []
+// Stable empty reference: a new [] on every render would break the memo below
+// for every connection that has no async tasks — i.e. almost all of them.
+const EMPTY_ASYNC_TASKS: AsyncTaskRecord[] = []
 
 export interface UseConnectionReturn {
   connectionId: string | null
@@ -74,6 +79,10 @@ export interface UseConnectionReturn {
   availableCommands: AvailableCommandInfo[] | null
   pendingPermission: PendingPermission | null
   pendingUserMessage: PendingUserMessage | null
+  /** Feedback-note ids this turn's live message adopted as mid-turn user turns
+   *  (native steering). The notes list drops their strips so one message shows
+   *  in exactly one place. `[]` when nothing was steered. */
+  steeredMessageIds: string[]
   pendingQuestion: PendingQuestion | null
   pendingAskQuestion: PendingQuestionState | null
   pendingPlanApproval: PendingPlanApprovalState | null
@@ -81,6 +90,10 @@ export interface UseConnectionReturn {
   /** AIR typed session failure table (active + resolved; see
    *  `lib/session-failures.ts`). `[]` when the connection has none. */
   sessionFailures: SessionFailureRecord[]
+  /** AIR async tasks — Claude's background shells / workflows / monitors
+   *  (see `lib/async-tasks.ts`). Retained after they settle; the strip filters
+   *  to the live ones. `[]` when the connection has none. */
+  asyncTasks: AsyncTaskRecord[]
   error: string | null
   loadError: string | null
   /** Runnable recovery for `loadError` (today `codex unarchive <id>`), or
@@ -270,11 +283,14 @@ export function useConnection(contextKey: string): UseConnectionReturn {
   const availableCommands = connection?.availableCommands ?? null
   const pendingPermission = connection?.pendingPermission ?? null
   const pendingUserMessage = connection?.pendingUserMessage ?? null
+  const steeredMessageIds =
+    connection?.steeredMessageIds ?? EMPTY_STEERED_MESSAGE_IDS
   const pendingQuestion = connection?.pendingQuestion ?? null
   const pendingAskQuestion = connection?.pendingAskQuestion ?? null
   const pendingPlanApproval = connection?.pendingPlanApproval ?? null
   const claudeApiRetry = connection?.claudeApiRetry ?? null
   const sessionFailures = connection?.sessionFailures ?? EMPTY_SESSION_FAILURES
+  const asyncTasks = connection?.asyncTasks ?? EMPTY_ASYNC_TASKS
   const error = connection?.error ?? null
   const loadError = connection?.loadError ?? null
   const loadErrorCommand = connection?.loadErrorCommand ?? null
@@ -399,11 +415,13 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       availableCommands,
       pendingPermission,
       pendingUserMessage,
+      steeredMessageIds,
       pendingQuestion,
       pendingAskQuestion,
       pendingPlanApproval,
       claudeApiRetry,
       sessionFailures,
+      asyncTasks,
       error,
       loadError,
       loadErrorCommand,
@@ -446,11 +464,13 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       availableCommands,
       pendingPermission,
       pendingUserMessage,
+      steeredMessageIds,
       pendingQuestion,
       pendingAskQuestion,
       pendingPlanApproval,
       claudeApiRetry,
       sessionFailures,
+      asyncTasks,
       error,
       loadError,
       loadErrorCommand,

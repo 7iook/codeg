@@ -160,6 +160,7 @@ import type {
   GitHubAccountsSettings,
   GitHubTokenValidation,
   McpAppType,
+  LocalMcpScan,
   LocalMcpServer,
   McpMarketplaceProvider,
   McpMarketplaceItem,
@@ -417,18 +418,23 @@ export async function acpFork(
   connectionId: string,
   // Linkage for a conversation opened from history: its connection resumed via
   // session_id but the row isn't bound to the connection until the first prompt
-  // fires, and a fork-send forks BEFORE that prompt. Passing these lets the
-  // backend adopt the row so the fork doesn't reject as unlinked. Ignored once
-  // the connection is already linked (a new-conversation-then-fork). See
-  // `ConnectionManager::fork_session`.
+  // fires, and forking from a rendered turn needs no prompt at all. Passing
+  // these lets the backend adopt the row so the fork doesn't reject as
+  // unlinked. Ignored once the connection is already linked (a
+  // new-conversation-then-fork). See `ConnectionManager::fork_session`.
   conversationId?: number | null,
-  folderId?: number | null
+  folderId?: number | null,
+  // "Fork from here": the rendered turn to fork at. The UI always passes one;
+  // omitting it forks at the tail, which the backend also falls back to for a
+  // turn the agent cannot name — its call, see `resolve_fork_point`.
+  forkFromTurnId?: string | null
 ): Promise<ForkResult> {
   try {
     return await getTransport().call("acp_fork", {
       connectionId,
       conversationId: conversationId ?? null,
       folderId: folderId ?? null,
+      forkFromTurnId: forkFromTurnId ?? null,
     })
   } catch (e) {
     // A fork is serialized with prompts on the backend: it returns
@@ -437,6 +443,22 @@ export async function acpFork(
     if (isTurnInProgressRejection(e)) throw new TurnBusyError()
     throw e
   }
+}
+
+/**
+ * Stop one AIR async task (`_session/async_task/stop`).
+ *
+ * Resolves to the adapter's own verdict, NOT "the request went through": it
+ * answers `false` for a task it declines to stop (unknown, already finished, or
+ * a stop already in flight). The visible result — the task's terminal state and
+ * the agent's acknowledgement — arrives on the session channel either way, so
+ * callers use this only to avoid claiming they stopped something they didn't.
+ */
+export async function acpStopAsyncTask(
+  connectionId: string,
+  taskId: string
+): Promise<boolean> {
+  return getTransport().call("acp_stop_async_task", { connectionId, taskId })
 }
 
 export async function acpRespondPermission(
@@ -1934,6 +1956,16 @@ export async function validateGitLabToken(
   return getTransport().call("validate_gitlab_token", { serverUrl, token })
 }
 
+/** Same answer shape again, from Gitea's `GET /api/v1/user`. `scopes` always
+ *  comes back empty: Gitea reports a token's scopes only on an endpoint that
+ *  wants the account password and refuses the token being checked. */
+export async function validateGiteaToken(
+  serverUrl: string,
+  token: string
+): Promise<GitHubTokenValidation> {
+  return getTransport().call("validate_gitea_token", { serverUrl, token })
+}
+
 export async function updateGitHubAccounts(
   settings: GitHubAccountsSettings
 ): Promise<GitHubAccountsSettings> {
@@ -1957,7 +1989,7 @@ export async function deleteAccountToken(accountId: string): Promise<void> {
   return getTransport().call("delete_account_token", { accountId })
 }
 
-export async function mcpScanLocal(): Promise<LocalMcpServer[]> {
+export async function mcpScanLocal(): Promise<LocalMcpScan> {
   return getTransport().call("mcp_scan_local")
 }
 
@@ -5075,14 +5107,29 @@ export async function setFeedbackSettings(
  * steering path). Returns the stored note (it also arrives via the
  * `feedback_submitted` event). Rejects when no turn is in flight — callers
  * detect that with `isNoActiveTurnRejection` and fall back to a normal prompt.
+ *
+ * `blocks` (optional) is the full prompt-block draft when the note carries
+ * image attachments; `text` stays the recorded/display form. Blocks ride the
+ * native `_session/steering` wire only — the backend rejects them on the pull
+ * path (same `NoActiveTurn` fallback) so an attachment is never silently
+ * dropped. Uploaded payloads are stripped to their `file://` markers in every
+ * HTTP-body mode, exactly like `acpPrompt`; the backend re-hydrates them.
  */
 export async function submitSessionFeedback(
   connectionId: string,
-  text: string
+  text: string,
+  blocks?: PromptInputBlock[] | null
 ): Promise<FeedbackItem> {
   return getTransport().call("submit_session_feedback", {
     connectionId,
     text,
+    blocks:
+      blocks && blocks.length > 0
+        ? stripUploadedImagePayloads(
+            blocks,
+            !isDesktop() || getActiveRemoteConnectionId() !== null
+          )
+        : null,
   })
 }
 
